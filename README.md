@@ -1,5 +1,7 @@
 # SQL Tool
 
+[![CI](https://github.com/wjhdfnmf/sql-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/wjhdfnmf/sql-tool/actions/workflows/ci.yml)
+
 A free, open-source desktop SQL client for MySQL and MariaDB, built to be light and fast.
 
 **Status: early alpha.** It connects, runs queries, shows results and browses schemas. It has been tested on Windows against MariaDB 11.8 and MySQL 8.4 only. Expect rough edges, and do not rely on it for production work yet.
