@@ -74,7 +74,8 @@
     padding: 6px 8px 0;
     background: var(--panel-2);
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    /* No scroll bar: tabs that do not fit go onto another row. */
+    flex-wrap: wrap;
   }
 
   .tab,

@@ -586,7 +586,8 @@
     gap: 6px;
     padding: 4px 8px;
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    /* No scroll bar: controls that do not fit go onto another row. */
+    flex-wrap: wrap;
     white-space: nowrap;
   }
 

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { backend } from '../lib/backend';
-  import { asUiError, type ColumnEntry, type ObjectKind, type SchemaObjects, type TreeTarget } from '../lib/types';
+  import { asUiError, type ObjectKind, type SchemaObjects, type TreeTarget } from '../lib/types';
 
   interface Props {
     workspaceId: number;
@@ -17,19 +17,16 @@
     onuse: (schema: string) => void;
     /** A right-click (or the menu key). `target` is null on empty space. */
     oncontext: (target: TreeTarget | null, x: number, y: number) => void;
-    /** A column was double-clicked: write its name into the editor. */
-    oninsert: (name: string) => void;
     /** A schema was expanded; its names are worth loading for completion. */
     onloaded: (schema: string) => void;
   }
 
-  let { workspaceId, current, version, selected, onselect, onopen, onuse, oncontext, oninsert, onloaded }: Props = $props();
+  let { workspaceId, current, version, selected, onselect, onopen, onuse, oncontext, onloaded }: Props = $props();
 
   type Loaded<T> = { state: 'loading' } | { state: 'error'; message: string } | { state: 'ready'; value: T };
 
   let schemas = $state<Loaded<string[]>>({ state: 'loading' });
   let objects = $state<Record<string, Loaded<SchemaObjects>>>({});
-  let columns = $state<Record<string, Loaded<ColumnEntry[]>>>({});
   let open = $state<Record<string, boolean>>({});
   let filter = $state('');
 
@@ -50,7 +47,6 @@
     const expanded = Object.keys(objects).filter((schema) => open[schema]);
     schemas = { state: 'loading' };
     objects = {};
-    columns = {};
     try {
       const list = await backend.schemaList(workspaceId);
       schemas = { state: 'ready', value: list };
@@ -75,17 +71,9 @@
     if (open[schema] && !objects[schema]) void loadObjects(schema);
   }
 
-  async function toggleTable(schema: string, table: string, isView: boolean) {
+  /** Clicking a table selects it; the information pane shows its columns and indexes. */
+  function selectTable(schema: string, table: string, isView: boolean) {
     onselect({ kind: isView ? 'view' : 'table', schema, name: table });
-    const key = `${schema}\u0000${table}`;
-    open[key] = !open[key];
-    if (!open[key] || columns[key]) return;
-    columns[key] = { state: 'loading' };
-    try {
-      columns[key] = { state: 'ready', value: await backend.tableColumns(workspaceId, schema, table) };
-    } catch (e) {
-      columns[key] = { state: 'error', message: asUiError(e).message };
-    }
   }
 
   /** With a filter, a schema is shown if its name or one of its loaded tables matches. */
@@ -183,22 +171,19 @@
                     <div class="group">{group.title} <span class="muted">{group.items.length}</span></div>
                     <ul>
                       {#each group.items as table (table.name)}
-                        {@const key = `${schema}\u0000${table.name}`}
-                        {@const cols = columns[key]}
                         {@const kind = table.isView ? ('view' as const) : ('table' as const)}
                         {@const target = { kind, schema, name: table.name }}
                         <li>
                           <div class="row" class:selected={isSelected(kind, schema, table.name)}>
                             <button
                               class="node"
-                              aria-expanded={!!open[key]}
-                              title="Double-click to show rows. Right-click for more."
-                              onclick={() => toggleTable(schema, table.name, table.isView)}
+                              title="Click to see its columns and indexes below. Double-click to show rows. Right-click for more."
+                              onclick={() => selectTable(schema, table.name, table.isView)}
                               ondblclick={() => onopen(schema, table.name)}
                               oncontextmenu={(e) => context(e, target)}
                               onkeydown={(e) => menuKey(e, target)}
                             >
-                              <span class="chevron" aria-hidden="true">{open[key] ? '▾' : '▸'}</span>
+                              <span class="chevron" aria-hidden="true"></span>
                               <span class="label">{table.name}</span>
                             </button>
                             <button
@@ -208,26 +193,6 @@
                               onclick={() => onopen(schema, table.name)}>&#9655;</button
                             >
                           </div>
-                          {#if open[key]}
-                            {#if !cols || cols.state === 'loading'}
-                              <p class="muted note indent2">Loading&hellip;</p>
-                            {:else if cols.state === 'error'}
-                              <p class="error-text note indent2" role="alert">{cols.message}</p>
-                            {:else}
-                              <ul class="columns">
-                                {#each cols.value as column (column.name)}
-                                  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                                  <li
-                                    title={`${column.columnType}${column.nullable ? '' : ' NOT NULL'}${column.extra ? ' ' + column.extra : ''}. Double-click to insert the name into the editor.`}
-                                    ondblclick={() => oninsert(column.name)}
-                                  >
-                                    <span class="label" class:key={column.key === 'PRI'}>{column.name}</span>
-                                    <span class="type muted">{column.columnType}</span>
-                                  </li>
-                                {/each}
-                              </ul>
-                            {/if}
-                          {/if}
                         </li>
                       {/each}
                     </ul>
@@ -378,23 +343,6 @@
     color: var(--muted);
   }
 
-  .columns li {
-    display: flex;
-    gap: 8px;
-    padding: 1px 8px 1px 24px;
-    white-space: nowrap;
-  }
-
-  .columns .key {
-    font-weight: 700;
-  }
-
-  .type {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: 12px;
-  }
-
   .note {
     margin: 0;
     padding: 6px 10px;
@@ -403,9 +351,5 @@
 
   .indent {
     padding-left: 26px;
-  }
-
-  .indent2 {
-    padding-left: 40px;
   }
 </style>
