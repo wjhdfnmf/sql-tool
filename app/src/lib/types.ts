@@ -23,6 +23,8 @@ export interface Profile {
   readOnly: boolean;
   /** Ask before structure changes and before UPDATE or DELETE without WHERE. */
   production: boolean;
+  /** Where this connection's scripts are kept: Open and Save As start there. */
+  scriptFolder: string | null;
   /** Whether the keychain holds a password. Set by the backend. */
   hasPassword?: boolean;
 }
@@ -44,6 +46,7 @@ export function newProfile(): Profile {
     color: null,
     readOnly: false,
     production: false,
+    scriptFolder: null,
   };
 }
 

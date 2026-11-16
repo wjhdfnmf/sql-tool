@@ -26,6 +26,7 @@ let profiles: Profile[] = [
     color: null,
     readOnly: false,
     production: false,
+    scriptFolder: null,
     hasPassword: true,
   },
   {
@@ -44,6 +45,7 @@ let profiles: Profile[] = [
     color: 'red',
     readOnly: false,
     production: true,
+    scriptFolder: null,
     hasPassword: false,
   },
   {
@@ -62,6 +64,7 @@ let profiles: Profile[] = [
     color: 'green',
     readOnly: false,
     production: false,
+    scriptFolder: null,
     hasPassword: true,
   },
 ];
@@ -396,7 +399,8 @@ export const mockBackend: Backend = {
     name: 'monthly-report.sql',
     text: '-- Monthly report\nselect status, count(*) as orders, sum(total) as revenue from sales.orders where placed_at >= \'2026-10-01\' group by status order by revenue desc;\n',
   }),
-  scriptSave: async (path, suggestedName) => ({
+  folderPick: async () => 'C:\\scripts',
+  scriptSave: async (_workspaceId, path, suggestedName) => ({
     path: path ?? `C:\\scripts\\${suggestedName}`,
     name: path ? path.split('\\').pop()! : suggestedName,
     text: '',

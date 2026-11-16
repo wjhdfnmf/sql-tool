@@ -79,9 +79,11 @@ export interface Backend {
   alterScript(workspaceId: number, kind: ObjectKind, schema: string, name: string): Promise<string>;
   createTemplate(kind: ObjectKind, schema: string | null): Promise<string>;
   /** Shows the native open dialog. Null if the user cancels. */
-  scriptOpen(): Promise<ScriptFile | null>;
+  scriptOpen(workspaceId: number): Promise<ScriptFile | null>;
+  /** Shows the native folder dialog, for a connection's script folder. Null if the user cancels. */
+  folderPick(start: string | null): Promise<string | null>;
   /** Saves to `path`, or asks where if `path` is null. Null if the user cancels. */
-  scriptSave(path: string | null, suggestedName: string, text: string): Promise<ScriptFile | null>;
+  scriptSave(workspaceId: number, path: string | null, suggestedName: string, text: string): Promise<ScriptFile | null>;
   /** What a production connection should confirm before running this. */
   reviewScript(script: string, mode: RunMode): Promise<Concern[]>;
   /** Sorts and filters what the grid shows; resolves to the visible row count. */
@@ -147,8 +149,9 @@ const tauriBackend: Backend = {
   schemaDdl: (alter, name, charset, collation) => invoke('schema_ddl', { alter, name, charset, collation }),
   alterScript: (workspaceId, kind, schema, name) => invoke('alter_script', { workspaceId, kind, schema, name }),
   createTemplate: (kind, schema) => invoke('create_template', { kind, schema }),
-  scriptOpen: () => invoke('script_open'),
-  scriptSave: (path, suggestedName, text) => invoke('script_save', { path, suggestedName, text }),
+  scriptOpen: (workspaceId) => invoke('script_open', { workspaceId }),
+  folderPick: (start) => invoke('folder_pick', { start }),
+  scriptSave: (workspaceId, path, suggestedName, text) => invoke('script_save', { workspaceId, path, suggestedName, text }),
   reviewScript: (script, mode) => invoke('review_script', { script, mode }),
   resultView: (resultId, filter, sortColumn, descending) => invoke('result_view', { resultId, filter, sortColumn, descending }),
   exportResult: (resultId, format, table) => invoke('export_result', { resultId, format, table }),
