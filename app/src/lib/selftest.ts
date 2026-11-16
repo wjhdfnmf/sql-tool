@@ -8,7 +8,8 @@
 
 import { backend } from './backend';
 import { app } from './state.svelte';
-import { asUiError, serverLabel, type Profile, type RunMode, type RunMsg, type SelfTestConfig, type WorkspaceInfo } from './types';
+import { decodeCells } from './rows';
+import { asUiError, serverLabel, type Profile, type RowEdit, type RunMode, type RunMsg, type SelfTestConfig, type WorkspaceInfo } from './types';
 
 interface Step {
   name: string;
@@ -20,30 +21,6 @@ interface Step {
 
 function expect(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
-}
-
-/** Decodes the first `cells` cells of a row window into text (null for NULL). */
-function decodeCells(u8: Uint8Array, cells: number): { rows: number; values: (string | null)[] } {
-  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-  const rows = dv.getUint32(0, true);
-  const values: (string | null)[] = [];
-  const decoder = new TextDecoder();
-  let pos = 4;
-  while (values.length < cells && pos < u8.length) {
-    const b = u8[pos];
-    if (b === 0xfb) {
-      values.push(null);
-      pos += 1;
-    } else if (b < 251) {
-      values.push(decoder.decode(u8.subarray(pos + 1, pos + 1 + b)));
-      pos += 1 + b;
-    } else {
-      const l = dv.getUint16(pos + 1, true);
-      values.push(decoder.decode(u8.subarray(pos + 3, pos + 3 + l)));
-      pos += 3 + l;
-    }
-  }
-  return { rows, values };
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -196,6 +173,120 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     expect(set && set.columns.some((c) => c.name.toLowerCase() === 'select_type'), 'no execution plan came back');
     await backend.closeResults([set.resultId]);
     return set.columns.map((c) => c.name);
+  });
+
+  await step('risky statements are flagged for confirmation', async () => {
+    const concerns = await backend.reviewScript('SELECT 1; UPDATE t SET a = 1; DROP TABLE t; DELETE FROM t WHERE id = 1', { kind: 'all' });
+    expect(concerns.map((c) => c.index).join() === '1,2', `flagged ${JSON.stringify(concerns)}`);
+    expect(concerns[0].reason.includes('WHERE') && concerns[1].sql.startsWith('DROP'), 'concern fields are wrong');
+    return concerns.map((c) => c.reason);
+  });
+
+  await step('sort and filter a result', async () => {
+    const messages = await run(`SELECT id, name FROM \`${config.table}\``, { kind: 'all' }, null);
+    const set = ofType(messages, 'resultSet')[0];
+    expect(set, `no result: ${ofType(messages, 'failed')[0]?.message}`);
+    expect(set.sql.startsWith('SELECT id, name'), 'the result does not carry its statement');
+    const total = ofType(messages, 'resultDone')[0].rows;
+    const sorted = await backend.resultView(set.resultId, null, 1, true);
+    expect(sorted === total, `sorting changed the row count: ${sorted} of ${total}`);
+    const top = decodeCells(await backend.getRows(set.resultId, 0, 1), 2).values[1];
+    const filtered = await backend.resultView(set.resultId, 'grace', null, false);
+    expect(filtered === 1, `filter kept ${filtered} rows`);
+    const only = decodeCells(await backend.getRows(set.resultId, 0, 5), 2);
+    expect(only.rows === 1 && only.values[1] === 'Grace Hopper', `filtered rows were ${JSON.stringify(only)}`);
+    expect((await backend.resultView(set.resultId, null, null, false)) === total, 'clearing the view did not restore the rows');
+    await backend.closeResults([set.resultId]);
+    return { total, firstWhenSortedByNameDescending: top };
+  });
+
+  await step('edit rows through a result, in one transaction', async () => {
+    expect(workspace, 'not connected');
+    const setup = await run(
+      "DROP TABLE IF EXISTS selftest_edit; CREATE TABLE selftest_edit (id INT PRIMARY KEY, name VARCHAR(50) NULL); INSERT INTO selftest_edit VALUES (1, 'one'), (2, 'two')",
+      { kind: 'all' },
+      null,
+    );
+    expect(!ofType(setup, 'failed')[0], `setup failed: ${ofType(setup, 'failed')[0]?.message}`);
+    const read = await run('SELECT id, name FROM selftest_edit ORDER BY id', { kind: 'all' }, null);
+    const set = ofType(read, 'resultSet')[0];
+    expect(set.columns[0].primaryKey && set.columns[0].source?.table === 'selftest_edit', `column source was ${JSON.stringify(set.columns[0])}`);
+    const target = await backend.editTarget(workspace.id, set.resultId);
+    expect(target.table === 'selftest_edit' && target.keyColumns.join() === '0' && target.columns[1] === 'name', `target was ${JSON.stringify(target)}`);
+    const edits: RowEdit[] = [
+      { type: 'update', row: 0, changes: [{ column: 1, value: "it's uno" }] },
+      { type: 'delete', row: 1 },
+      { type: 'insert', values: [{ column: 0, value: '3' }, { column: 1, value: null }] },
+    ];
+    const preview = await backend.previewEdits(set.resultId, edits);
+    expect(preview.length === 3 && preview[0].includes("SET `name` = 'it''s uno' WHERE `id` = 1"), `preview was ${JSON.stringify(preview)}`);
+    const applied = await backend.applyEdits(workspace.id, tabId, set.resultId, edits);
+    expect(applied === 3, `applied ${applied} statements`);
+    const after = await run('SELECT id, name FROM selftest_edit ORDER BY id', { kind: 'all' }, null);
+    const rows = decodeCells(await backend.getRows(ofType(after, 'resultSet')[0].resultId, 0, 10), 4);
+    expect(rows.rows === 2 && rows.values.join('|') === "1|it's uno|3|", `rows after editing: ${JSON.stringify(rows)}`);
+    await run('DROP TABLE selftest_edit', { kind: 'all' }, null);
+    await backend.closeResults([set.resultId, ofType(after, 'resultSet')[0].resultId]);
+    return preview;
+  });
+
+  await step('table designer, keys, and drop/rename SQL', async () => {
+    expect(workspace, 'not connected');
+    const spec = await backend.tableSpec(workspace.id, config.schema, config.table);
+    expect(spec && spec.columns.length > 0 && spec.primaryKey.join() === 'id', `spec was ${JSON.stringify(spec)?.slice(0, 200)}`);
+    expect(spec.columns[0].autoIncrement && typeof spec.columns[0].dataType === 'string', 'column fields are misnamed');
+    const create = await backend.tableDdl(null, { ...spec, name: 'copy_of_table' });
+    expect(create.startsWith('CREATE TABLE') && create.includes('PRIMARY KEY (`id`)'), `create was ${create.slice(0, 120)}`);
+    try {
+      await backend.tableDdl(spec, spec);
+      throw new Error('an unchanged table produced an ALTER');
+    } catch (e) {
+      expect(asUiError(e).message.includes('Nothing has been changed'), `unexpected: ${asUiError(e).message}`);
+    }
+    const changed = structuredClone(spec);
+    changed.columns.push({ ...changed.columns[0], name: 'extra', dataType: 'INT', autoIncrement: false, nullable: true, originalName: null });
+    const alter = await backend.tableDdl(spec, changed);
+    expect(alter.includes('ADD COLUMN `extra` INT NULL AFTER'), `alter was ${alter}`);
+    const keys = await backend.tableKeys(workspace.id, config.schema, config.table);
+    expect(keys && keys.primaryKey.join() === 'id' && Array.isArray(keys.foreignKeys), `keys were ${JSON.stringify(keys)}`);
+    const drop = await backend.objectDdl('drop', 'table', config.schema, 'x', null);
+    expect(drop === `DROP TABLE \`${config.schema}\`.\`x\`;`, `drop was ${drop}`);
+    const rename = await backend.objectDdl('rename', 'table', config.schema, 'x', 'y');
+    expect(rename.includes('RENAME TABLE') && rename.includes('`y`'), `rename was ${rename}`);
+    const names = await backend.completionColumns(workspace.id, config.schema);
+    expect(names.some(([t, c]) => t === config.table && c === 'email'), 'completion names are missing');
+    return { alter, indexes: keys.indexes.map((i) => i.name), completionNames: names.length };
+  });
+
+  await step('a read-only connection refuses changes', async () => {
+    const saved = await backend.profileSave({ ...config.profile, name: 'Self-test read-only', readOnly: true }, config.password);
+    try {
+      const readOnly = await backend.connect(saved.id, null);
+      expect(readOnly.readOnly, 'the connection does not report itself read-only');
+      const roTab = crypto.randomUUID();
+      const collect = async (sql: string) => {
+        const messages: RunMsg[] = [];
+        await backend.run(readOnly.id, roTab, sql, { kind: 'all' }, null, (m) => messages.push(m));
+        return messages;
+      };
+      const write = await collect('CREATE TABLE selftest_must_not_exist (id INT)');
+      const refused = ofType(write, 'failed')[0];
+      expect(refused && refused.message.includes('read-only'), `the change was not refused: ${JSON.stringify(write)}`);
+      const read = await collect('SELECT 1');
+      const set = ofType(read, 'resultSet')[0];
+      expect(set, 'a plain read was refused');
+      try {
+        await backend.editTarget(readOnly.id, set.resultId);
+        throw new Error('a read-only connection offered editing');
+      } catch (e) {
+        expect(asUiError(e).kind === 'not-editable', `unexpected: ${asUiError(e).message}`);
+      }
+      await backend.closeResults([set.resultId]);
+      await backend.disconnect(readOnly.id);
+      return refused.message;
+    } finally {
+      await backend.profileDelete(saved.id);
+    }
   });
 
   await step('run a script of two statements', async () => {

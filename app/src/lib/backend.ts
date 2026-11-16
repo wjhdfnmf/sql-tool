@@ -9,8 +9,15 @@ import type {
   CellValue,
   Charset,
   ColumnEntry,
+  Concern,
+  EditTarget,
+  ExportFormat,
   HistoryEntry,
+  ObjectAction,
   ObjectKind,
+  RowEdit,
+  TableKeys,
+  TableSpec,
   Profile,
   RunMode,
   RunMsg,
@@ -65,6 +72,24 @@ export interface Backend {
   scriptOpen(): Promise<ScriptFile | null>;
   /** Saves to `path`, or asks where if `path` is null. Null if the user cancels. */
   scriptSave(path: string | null, suggestedName: string, text: string): Promise<ScriptFile | null>;
+  /** What a production connection should confirm before running this. */
+  reviewScript(script: string, mode: RunMode): Promise<Concern[]>;
+  /** Sorts and filters what the grid shows; resolves to the visible row count. */
+  resultView(resultId: number, filter: string | null, sortColumn: number | null, descending: boolean): Promise<number>;
+  /** Asks where to save and writes the visible rows. Null if cancelled. */
+  exportResult(resultId: number, format: ExportFormat, table: string): Promise<{ path: string; rows: number } | null>;
+  /** Rejects with kind `not-editable` and the reason if the result cannot be edited. */
+  editTarget(workspaceId: number, resultId: number): Promise<EditTarget>;
+  previewEdits(resultId: number, edits: RowEdit[]): Promise<string[]>;
+  /** Applies the edits in one transaction; resolves to the number of statements run. */
+  applyEdits(workspaceId: number, tabId: string, resultId: number, edits: RowEdit[]): Promise<number>;
+  tableKeys(workspaceId: number, schema: string, table: string): Promise<TableKeys | null>;
+  tableSpec(workspaceId: number, schema: string, table: string): Promise<TableSpec | null>;
+  /** CREATE TABLE when `original` is null, else the ALTER TABLE between the two. */
+  tableDdl(original: TableSpec | null, updated: TableSpec): Promise<string>;
+  objectDdl(action: ObjectAction, kind: ObjectKind, schema: string, name: string, newName: string | null): Promise<string>;
+  /** [table, column] pairs of a schema, for completion. */
+  completionColumns(workspaceId: number, schema: string): Promise<[string, string][]>;
   historyList(search: string | null, limit: number): Promise<HistoryEntry[]>;
   historyClear(): Promise<void>;
   selftestConfig(): Promise<SelfTestConfig | null>;
@@ -105,6 +130,17 @@ const tauriBackend: Backend = {
   createTemplate: (kind, schema) => invoke('create_template', { kind, schema }),
   scriptOpen: () => invoke('script_open'),
   scriptSave: (path, suggestedName, text) => invoke('script_save', { path, suggestedName, text }),
+  reviewScript: (script, mode) => invoke('review_script', { script, mode }),
+  resultView: (resultId, filter, sortColumn, descending) => invoke('result_view', { resultId, filter, sortColumn, descending }),
+  exportResult: (resultId, format, table) => invoke('export_result', { resultId, format, table }),
+  editTarget: (workspaceId, resultId) => invoke('edit_target', { workspaceId, resultId }),
+  previewEdits: (resultId, edits) => invoke('preview_edits', { resultId, edits }),
+  applyEdits: (workspaceId, tabId, resultId, edits) => invoke('apply_edits', { workspaceId, tabId, resultId, edits }),
+  tableKeys: (workspaceId, schema, table) => invoke('table_keys', { workspaceId, schema, table }),
+  tableSpec: (workspaceId, schema, table) => invoke('table_spec', { workspaceId, schema, table }),
+  tableDdl: (original, updated) => invoke('table_ddl', { original, updated }),
+  objectDdl: (action, kind, schema, name, newName) => invoke('object_ddl', { action, kind, schema, name, newName }),
+  completionColumns: (workspaceId, schema) => invoke('completion_columns', { workspaceId, schema }),
   historyList: (search, limit) => invoke('history_list', { search, limit }),
   historyClear: () => invoke('history_clear'),
   selftestConfig: () => invoke('selftest_config'),

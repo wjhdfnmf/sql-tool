@@ -23,6 +23,8 @@ let profiles: Profile[] = [
     cleartextRiskAccepted: true,
     savePassword: true,
     color: null,
+    readOnly: false,
+    production: false,
     hasPassword: true,
   },
   {
@@ -38,6 +40,8 @@ let profiles: Profile[] = [
     cleartextRiskAccepted: false,
     savePassword: false,
     color: 'red',
+    readOnly: false,
+    production: true,
     hasPassword: false,
   },
   {
@@ -53,6 +57,8 @@ let profiles: Profile[] = [
     cleartextRiskAccepted: false,
     savePassword: true,
     color: 'green',
+    readOnly: false,
+    production: false,
     hasPassword: true,
   },
 ];
@@ -113,14 +119,14 @@ const results = new Map<number, { columns: ColumnInfo[]; rows: number }>();
 const cancelled = new Set<string>();
 
 const demoColumns: ColumnInfo[] = [
-  { name: 'id', kind: 'number' },
-  { name: 'customer', kind: 'text' },
-  { name: 'status', kind: 'text' },
-  { name: 'total', kind: 'number' },
-  { name: 'placed_at', kind: 'date' },
-  { name: 'notes', kind: 'text' },
-  { name: 'attributes', kind: 'json' },
-  { name: 'receipt', kind: 'binary' },
+  { name: 'id', kind: 'number', source: { schema: 'sales', table: 'orders', column: 'id' }, primaryKey: true },
+  { name: 'customer', kind: 'text', source: { schema: 'sales', table: 'orders', column: 'customer' }, primaryKey: false },
+  { name: 'status', kind: 'text', source: { schema: 'sales', table: 'orders', column: 'status' }, primaryKey: false },
+  { name: 'total', kind: 'number', source: { schema: 'sales', table: 'orders', column: 'total' }, primaryKey: false },
+  { name: 'placed_at', kind: 'date', source: { schema: 'sales', table: 'orders', column: 'placed_at' }, primaryKey: false },
+  { name: 'notes', kind: 'text', source: { schema: 'sales', table: 'orders', column: 'notes' }, primaryKey: false },
+  { name: 'attributes', kind: 'json', source: { schema: 'sales', table: 'orders', column: 'attributes' }, primaryKey: false },
+  { name: 'receipt', kind: 'binary', source: { schema: 'sales', table: 'orders', column: 'receipt' }, primaryKey: false },
 ];
 
 function cellText(row: number, col: number): string | null {
@@ -197,6 +203,8 @@ export const mockBackend: Backend = {
       info: serverInfo(profile),
       security: profile.tls === 'disabled' ? 'none' : profile.tls === 'unverified' ? 'unverified' : 'verified',
       database: profile.database,
+      readOnly: profile.readOnly,
+      production: profile.production,
     } satisfies WorkspaceInfo;
   },
   connectDemo: async () => ({
@@ -208,6 +216,8 @@ export const mockBackend: Backend = {
     info: serverInfo(null),
     security: 'verified',
     database: null,
+    readOnly: false,
+    production: false,
   }),
   disconnect: async () => {},
   closeTab: async () => {},
@@ -248,7 +258,7 @@ export const mockBackend: Backend = {
         const columns = lower.includes('wide') ? Array.from({ length: 40 }, (_, i) => ({ ...demoColumns[i % 8], name: `${demoColumns[i % 8].name}_${i}` })) : demoColumns;
         const resultId = nextId++;
         results.set(resultId, { columns, rows: 0 });
-        onEvent({ type: 'resultSet', index, resultId, columns });
+        onEvent({ type: 'resultSet', index, resultId, columns, sql });
         for (let rows = Math.min(256, total); ; rows = Math.min(total, rows + 40_000)) {
           await wait(30);
           results.get(resultId)!.rows = rows;
@@ -366,6 +376,135 @@ export const mockBackend: Backend = {
     name: path ? path.split('\\').pop()! : suggestedName,
     text: '',
   }),
+  reviewScript: async (script) =>
+    splitNaive(script)
+      .map((sql, index) => {
+        const lower = sql.toLowerCase();
+        const first = lower.split(/\s+/)[0].toUpperCase();
+        if (/^(drop|truncate|alter|create|rename|grant|revoke)\b/.test(lower)) {
+          return { index, reason: `${first} changes structure, accounts or server settings`, sql };
+        }
+        if (/^(update|delete)\b/.test(lower) && !/\bwhere\b/.test(lower)) {
+          return { index, reason: `${first} without a WHERE clause affects every row`, sql };
+        }
+        return null;
+      })
+      .filter((c) => c !== null),
+  resultView: async (resultId, filter) => {
+    const rows = results.get(resultId)?.rows ?? 0;
+    return filter ? Math.ceil(rows / 3) : rows;
+  },
+  exportResult: async (resultId, format) => {
+    await wait(300);
+    return { path: `C:\\exports\\result.${format}`, rows: results.get(resultId)?.rows ?? 0 };
+  },
+  editTarget: async (_workspaceId, resultId) => {
+    await wait(120);
+    const result = results.get(resultId);
+    if (!result) throw fail('no-result', 'This result is no longer available.');
+    if (result.columns.length > demoColumns.length) throw fail('not-editable', 'The result combines more than one table.');
+    return {
+      schema: 'sales',
+      table: 'orders',
+      keyColumns: [0],
+      columns: result.columns.map((c) => (c.kind === 'binary' ? null : c.name)),
+    };
+  },
+  previewEdits: async (_resultId, edits) =>
+    edits.map((edit) => {
+      const literal = (v: string | null) => (v === null ? 'NULL' : `'${v.replaceAll("'", "''")}'`);
+      const name = (column: number) => `\`${demoColumns[column % demoColumns.length].name}\``;
+      if (edit.type === 'delete') return `DELETE FROM \`sales\`.\`orders\` WHERE \`id\` = ${edit.row + 1} LIMIT 1;`;
+      if (edit.type === 'insert') {
+        return `INSERT INTO \`sales\`.\`orders\` (${edit.values.map((v) => name(v.column)).join(', ')}) VALUES (${edit.values.map((v) => literal(v.value)).join(', ')});`;
+      }
+      return `UPDATE \`sales\`.\`orders\` SET ${edit.changes.map((c) => `${name(c.column)} = ${literal(c.value)}`).join(', ')} WHERE \`id\` = ${edit.row + 1} LIMIT 1;`;
+    }),
+  applyEdits: async (_workspaceId, _tabId, _resultId, edits) => {
+    await wait(300);
+    return edits.length;
+  },
+  tableKeys: async (_workspaceId, _schema, table) => ({
+    primaryKey: table === 'order_lines' ? ['order_id', 'line_no'] : [table === 'products' ? 'sku' : 'id'],
+    indexes:
+      table === 'orders'
+        ? [
+            { name: 'idx_customer', columns: ['customer_id'], unique: false, originalName: 'idx_customer', locked: false },
+            { name: 'idx_status_placed', columns: ['status', 'placed_at'], unique: false, originalName: 'idx_status_placed', locked: false },
+          ]
+        : table === 'customers'
+          ? [{ name: 'uq_email', columns: ['email'], unique: true, originalName: 'uq_email', locked: false }]
+          : [],
+    foreignKeys:
+      table === 'orders'
+        ? [{ name: 'fk_orders_customer', columns: ['customer_id'], referencedSchema: 'sales', referencedTable: 'customers', referencedColumns: ['id'], onUpdate: 'RESTRICT', onDelete: 'CASCADE' }]
+        : [],
+  }),
+  tableSpec: async (_workspaceId, schema, table) => {
+    await wait(150);
+    const columns = schemas[schema]?.[table];
+    if (!columns) return null;
+    return {
+      schema,
+      name: table,
+      columns: columns.map(([name, dataType, nullable]) => ({
+        name,
+        dataType,
+        nullable,
+        default: name === 'status' ? "'open'" : name === 'created_at' ? 'CURRENT_TIMESTAMP' : null,
+        onUpdate: null,
+        autoIncrement: name === 'id',
+        comment: '',
+        collation: null,
+        originalName: name,
+        locked: false,
+      })),
+      primaryKey: columns.filter(([, , , key]) => key === 'PRI').map(([name]) => name),
+      indexes: columns
+        .filter(([, , , key]) => key === 'MUL' || key === 'UNI')
+        .map(([name, , , key]) => ({ name: `idx_${name}`, columns: [name], unique: key === 'UNI', originalName: `idx_${name}`, locked: false })),
+      engine: 'InnoDB',
+      collation: 'utf8mb4_0900_ai_ci',
+      comment: table === 'orders' ? 'One row per customer order' : '',
+    };
+  },
+  tableDdl: async (original, updated) => {
+    if (updated.name.trim() === '') throw fail('other', 'Enter a name.');
+    const blank = updated.columns.find((c) => c.name.trim() === '' || c.dataType.trim() === '');
+    if (blank) throw fail('other', 'Every column needs a name and a type.');
+    const define = (c: (typeof updated.columns)[number]) =>
+      `\`${c.name}\` ${c.dataType}${c.nullable ? ' NULL' : ' NOT NULL'}${c.default ? ` DEFAULT ${c.default}` : ''}${c.autoIncrement ? ' AUTO_INCREMENT' : ''}`;
+    if (!original) {
+      const lines = updated.columns.map(define);
+      if (updated.primaryKey.length) lines.push(`PRIMARY KEY (${updated.primaryKey.map((n) => `\`${n}\``).join(', ')})`);
+      for (const i of updated.indexes) lines.push(`${i.unique ? 'UNIQUE ' : ''}INDEX \`${i.name}\` (${i.columns.map((n) => `\`${n}\``).join(', ')})`);
+      return `CREATE TABLE \`${updated.schema}\`.\`${updated.name}\` (\n  ${lines.join(',\n  ')}\n);`;
+    }
+    const clauses: string[] = [];
+    for (const before of original.columns) {
+      if (!updated.columns.some((c) => c.originalName === before.name)) clauses.push(`DROP COLUMN \`${before.name}\``);
+    }
+    for (const c of updated.columns) {
+      const before = original.columns.find((b) => b.name === c.originalName);
+      if (!before) clauses.push(`ADD COLUMN ${define(c)}`);
+      else if (before.name !== c.name) clauses.push(`CHANGE COLUMN \`${before.name}\` ${define(c)}`);
+      else if (define(before) !== define(c)) clauses.push(`MODIFY COLUMN ${define(c)}`);
+    }
+    if (updated.name !== original.name) clauses.push(`RENAME TO \`${updated.schema}\`.\`${updated.name}\``);
+    if (clauses.length === 0) throw fail('other', 'Nothing has been changed.');
+    return `ALTER TABLE \`${original.schema}\`.\`${original.name}\`\n  ${clauses.join(',\n  ')};`;
+  },
+  objectDdl: async (action, kind, schema, name, newName) => {
+    if (action === 'dropSchema') return `DROP SCHEMA \`${schema}\`;`;
+    if (action === 'truncate') return `TRUNCATE TABLE \`${schema}\`.\`${name}\`;`;
+    if (action === 'rename') {
+      if (!newName?.trim()) throw fail('other', 'Enter a name.');
+      return `RENAME TABLE \`${schema}\`.\`${name}\` TO \`${schema}\`.\`${newName.trim()}\`;`;
+    }
+    return `DROP ${kind.toUpperCase()} \`${schema}\`.\`${name}\`;`;
+  },
+  completionColumns: async (_workspaceId, schema) =>
+    Object.entries(schemas[schema] ?? {}).flatMap(([table, columns]) => columns.map(([column]): [string, string] => [table, column])),
   historyList: async (search) => {
     const needle = search?.toLowerCase();
     return history.filter((h) => !needle || h.sql.toLowerCase().includes(needle));

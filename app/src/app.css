@@ -11,6 +11,8 @@
   --accent: #1f5fbf;
   --accent-text: #ffffff;
   --selection: #e3edfb;
+  --changed: #fff3c4;
+  --deleted: #fde3e1;
   --danger: #b3261e;
   --ok: #1e7d3c;
   --warn-bg: #fff4d6;
@@ -42,6 +44,8 @@
     --accent: #6ea3f2;
     --accent-text: #0e1420;
     --selection: #1f2f4a;
+    --changed: #3b3418;
+    --deleted: #46211f;
     --danger: #f2877f;
     --ok: #6fcf8e;
     --warn-bg: #3a3115;

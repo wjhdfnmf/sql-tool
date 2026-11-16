@@ -9,6 +9,7 @@
     type ColumnEntry,
     type SchemaDefaults,
     type TableDetails,
+    type TableKeys,
   } from '../lib/types';
 
   interface Props {
@@ -21,6 +22,7 @@
   let details = $state<TableDetails | null>(null);
   let columns = $state<ColumnEntry[]>([]);
   let defaults = $state<SchemaDefaults | null>(null);
+  let keys = $state<TableKeys | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
 
@@ -42,6 +44,7 @@
     details = null;
     columns = [];
     defaults = null;
+    keys = null;
     error = null;
     if (!current) return;
     let stale = false;
@@ -52,13 +55,15 @@
           const value = await backend.schemaDefaults(info.id, current.schema);
           if (!stale) defaults = value;
         } else if ((current.kind === 'table' || current.kind === 'view') && current.name) {
-          const [d, c] = await Promise.all([
+          const [d, c, k] = await Promise.all([
             backend.tableDetails(info.id, current.schema, current.name),
             backend.tableColumns(info.id, current.schema, current.name),
+            current.kind === 'table' ? backend.tableKeys(info.id, current.schema, current.name) : null,
           ]);
           if (!stale) {
             details = d;
             columns = c;
+            keys = k;
           }
         }
       } catch (e) {
@@ -156,6 +161,33 @@
             {/each}
           </tbody>
         </table>
+      {/if}
+
+      {#if keys && (keys.indexes.length > 0 || keys.primaryKey.length > 0)}
+        <h4>Indexes</h4>
+        <dl class="stacked">
+          {#if keys.primaryKey.length > 0}
+            <dt>PRIMARY</dt>
+            <dd>{keys.primaryKey.join(', ')}</dd>
+          {/if}
+          {#each keys.indexes as index (index.name)}
+            <dt>{index.name}{index.unique ? ' (unique)' : ''}</dt>
+            <dd>{index.columns.join(', ')}</dd>
+          {/each}
+        </dl>
+      {/if}
+
+      {#if keys && keys.foreignKeys.length > 0}
+        <h4>Foreign keys</h4>
+        <dl class="stacked">
+          {#each keys.foreignKeys as key (key.name)}
+            <dt>{key.name}</dt>
+            <dd>
+              {key.columns.join(', ')} &rarr; {key.referencedTable} ({key.referencedColumns.join(', ')})
+              <span class="muted">on delete {key.onDelete.toLowerCase()}</span>
+            </dd>
+          {/each}
+        </dl>
       {/if}
     {/if}
   </div>
@@ -260,6 +292,31 @@
   dd {
     margin: 0;
     overflow-wrap: anywhere;
+  }
+
+  h4 {
+    margin: 12px 0 2px;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  dl.stacked {
+    display: block;
+    margin: 4px 0;
+    font-size: 12px;
+  }
+
+  dl.stacked dt {
+    color: var(--text);
+    font-weight: 600;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  dl.stacked dd {
+    margin: 0 0 4px 10px;
   }
 
   table {

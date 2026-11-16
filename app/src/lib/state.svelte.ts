@@ -7,6 +7,7 @@ import {
   formatCount,
   type AppInfo,
   type ColumnInfo,
+  type Concern,
   type Profile,
   type RunMode,
   type RunMsg,
@@ -22,6 +23,8 @@ export interface ResultTab {
   done: boolean;
   truncated: boolean;
   elapsedMs: number | null;
+  /** The statement that produced this result, to run it again after edits. */
+  sql: string;
 }
 
 export interface MessageLine {
@@ -79,11 +82,33 @@ export class WorkspaceState {
   selected = $state<TreeTarget | null>(null);
   /** Bumped to make the schema tree reload. */
   treeVersion = $state(0);
+  /** Table and column names per schema, for editor completion. */
+  catalog = $state<Record<string, Record<string, string[]>>>({});
+  /**
+   * Set by the workspace screen: asks the user to confirm risky statements
+   * on a production connection. Resolves to true to go ahead.
+   */
+  confirmRun: ((concerns: Concern[]) => Promise<boolean>) | null = null;
 
   constructor(info: WorkspaceInfo) {
     this.info = info;
     this.database = info.database;
     this.addTab();
+    if (info.database) void this.loadCatalog(info.database);
+  }
+
+  /** Loads a schema's table and column names for completion, once. */
+  async loadCatalog(schema: string, force = false): Promise<void> {
+    if (!force && this.catalog[schema]) return;
+    try {
+      const tables: Record<string, string[]> = {};
+      for (const [table, column] of await backend.completionColumns(this.info.id, schema)) {
+        (tables[table] ??= []).push(column);
+      }
+      this.catalog[schema] = tables;
+    } catch {
+      // Completion is a convenience; a schema that cannot be read is skipped.
+    }
   }
 
   get activeTab(): EditorTab {
@@ -120,6 +145,18 @@ export class WorkspaceState {
    */
   async run(tab: EditorTab, script: string, mode: RunMode, keep = false): Promise<void> {
     if (tab.running || script.trim() === '') return;
+    if (this.info.production && this.confirmRun) {
+      try {
+        const concerns = await backend.reviewScript(script, mode);
+        if (concerns.length > 0 && !(await this.confirmRun(concerns))) {
+          tab.report('Cancelled. Nothing was run.', 'ok');
+          return;
+        }
+      } catch (e) {
+        tab.report(asUiError(e).message);
+        return;
+      }
+    }
     if (!keep) {
       this.releaseResults(tab);
       tab.messages = [];
@@ -181,6 +218,7 @@ export class WorkspaceState {
           done: false,
           truncated: false,
           elapsedMs: null,
+          sql: m.sql,
         });
         if (tab.activeResult === 'messages') tab.activeResult = m.resultId;
         break;
@@ -220,6 +258,7 @@ export class WorkspaceState {
       }
       case 'database':
         this.database = m.name;
+        if (m.name) void this.loadCatalog(m.name);
         break;
       case 'finished':
         tab.lastRunMs = m.elapsedMs;

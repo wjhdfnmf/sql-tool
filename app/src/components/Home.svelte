@@ -97,6 +97,8 @@
             {profile.user}@{profile.host}:{profile.port}
             &middot; {tlsLabels[profile.tls]}
             {#if profile.cleartextAuth}&middot; cleartext auth{/if}
+            {#if profile.readOnly}&middot; read-only{/if}
+            {#if profile.production}&middot; production{/if}
           </div>
           {#if errors[profile.id]}
             <p class="error-text" role="alert">{errors[profile.id]}</p>

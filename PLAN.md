@@ -2,6 +2,44 @@
 
 Status: Phase 1 first build working on Windows, 2026-11-15, tested against real MariaDB 11.8 and MySQL 8.4 (see "Phase 1 status"). MySQL Enterprise, MySQL 5.7, Linux and macOS checks are still open. Project name is still to be chosen.
 
+## Phase 2 status
+
+Schema and data tools are built. MySQL Enterprise 8.4.3 and 5.7.37 have both been connected to by the project owner with the released build (cleartext authentication over unverified TLS).
+
+### What works
+
+| Area | State |
+|---|---|
+| Completion | Schema, table and column names in the editor, for the default schema and any schema expanded in the tree |
+| Table designer | Create and alter tables in a form: columns, types, primary key, not null, auto increment, defaults, comments, indexes, engine, collation. Shows the SQL before it runs. Altering writes only the differences |
+| Editing data | In results that come from one table and include its primary key: edit a cell, set NULL, add a row, delete a row. Changes are staged, shown as SQL, and applied in one transaction |
+| Export | The rows shown, as CSV, TSV, JSON or SQL INSERT, written straight from the result store |
+| Sort and filter | Click a column header to sort; type to filter. Done on the stored result without running the query again |
+| Copy | Cell or whole row from the right-click menu |
+| Read-only connections | Changes are refused in the tool before they are sent, and the session is also put in read-only mode on the server |
+| Production connections | Structure changes, and UPDATE or DELETE without WHERE, ask for confirmation first |
+| Drop, truncate, rename | From the right-click menu, each with a confirmation that shows the SQL. Dropping a schema asks for its name to be typed |
+| Table details | Indexes and foreign keys in the information pane |
+
+### How it was verified
+
+| Check | Result |
+|---|---|
+| Core unit tests | 81 pass |
+| Login, TLS and run tests against the fake server | 17 pass, 1 known driver defect switched off |
+| Core against real MariaDB 11.8.6 and MySQL 8.4.13 | 5 of 5 pass, including edits that roll back on failure and a table that is created, altered, read back and rebuilt identically |
+| Desktop app end to end, on each real server | 27 of 27 steps pass |
+| UI type check | 0 errors, 0 warnings |
+
+### Not done or not verified
+
+- **The new screens have not been clicked through by hand in the built app.** The table designer, the edit dialogs and the confirmation dialogs were type-checked and their backend calls pass the end-to-end run; they were only partly looked at in the browser preview.
+- **Export to a file** uses the system save dialog, which the automated run cannot drive. The export formats themselves are unit tested.
+- **Table designer limits**: foreign keys, checks, generated columns and partitioning are not editable and are left untouched. Columns cannot be reordered. Per-column character sets are preserved but not shown.
+- **Editing limits**: binary columns and values too large to load in full cannot be edited. Tables without a primary key are read-only in the grid.
+- **Sorting and filtering are disabled while edits are pending**, because staged edits refer to rows by position.
+- **Completion** covers names only; it does not understand aliases.
+
 ## Phase 1 status
 
 The desktop app now connects, runs queries and browses schemas. It replaces the Phase 0 prototype; the prototype's grid was carried over, its benchmark mode was not.

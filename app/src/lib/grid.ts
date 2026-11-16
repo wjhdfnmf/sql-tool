@@ -39,6 +39,18 @@ export interface GridCallbacks {
   onActivate?(row: number, column: number): void;
   /** Ctrl/Cmd+C on the selected cell. */
   onCopy?(row: number, column: number): void;
+  /** A column header was clicked. */
+  onSort?(column: number): void;
+  /** A cell was right-clicked; x and y are viewport coordinates. */
+  onContext?(row: number, column: number, x: number, y: number): void;
+}
+
+/** Changes not yet saved, painted over the stored values. */
+export interface GridOverlay {
+  /** Key `row:column`; null means the cell will be set to NULL. */
+  cells: Map<string, string | null>;
+  /** Rows that will be deleted. */
+  deletedRows: Set<number>;
 }
 
 function formatBytes(n: number): string {
@@ -73,6 +85,8 @@ export class GridView {
   // assigned yet when field initialisers run.
   private colors!: ReturnType<GridView['readColors']>;
   private drag: { column: number; startX: number; startWidth: number } | null = null;
+  private sort: { column: number; descending: boolean } | null = null;
+  private overlay: GridOverlay = { cells: new Map(), deletedRows: new Set() };
   private readonly resizeObserver: ResizeObserver;
   private readonly cleanup: (() => void)[] = [];
 
@@ -101,6 +115,7 @@ export class GridView {
     on(scroller, 'mousedown', (e: MouseEvent) => this.onMouseDown(e));
     on(scroller, 'mousemove', (e: MouseEvent) => this.onHover(e));
     on(scroller, 'dblclick', (e: MouseEvent) => this.onDoubleClick(e));
+    on(scroller, 'contextmenu', (e: MouseEvent) => this.onContextMenu(e));
     on(scroller, 'keydown', (e: KeyboardEvent) => this.onKeyDown(e));
     on(window, 'mousemove', (e: MouseEvent) => this.onDragMove(e));
     on(window, 'mouseup', () => (this.drag = null));
@@ -139,6 +154,28 @@ export class GridView {
     this.selected = null;
     this.scroller.scrollLeft = 0;
     this.layout();
+  }
+
+  /** The rows behind the grid changed order or number (sort, filter): forget what was cached. */
+  resetRows(rows: number): void {
+    this.generation++;
+    this.pages.clear();
+    this.inflight.clear();
+    this.rows = rows;
+    this.top = 0;
+    this.selected = null;
+    this.layout();
+  }
+
+  /** Which column the rows are sorted by, to mark its header. */
+  setSort(sort: { column: number; descending: boolean } | null): void {
+    this.sort = sort;
+    this.invalidate();
+  }
+
+  setOverlay(overlay: GridOverlay): void {
+    this.overlay = overlay;
+    this.invalidate();
   }
 
   /** More rows have become available (the query is still streaming) or the count is final. */
@@ -269,7 +306,19 @@ export class GridView {
       e.preventDefault();
       return;
     }
+    if (hit.y < HEADER_H && hit.column >= 0) {
+      this.callbacks.onSort?.(hit.column);
+      return;
+    }
     if (hit.row >= 0 && hit.column >= 0) this.select(hit.row, hit.column);
+  }
+
+  private onContextMenu(e: MouseEvent): void {
+    const hit = this.hit(e);
+    if (hit.row < 0 || hit.column < 0) return;
+    e.preventDefault();
+    this.select(hit.row, hit.column);
+    this.callbacks.onContext?.(hit.row, hit.column, e.clientX, e.clientY);
   }
 
   private onHover(e: MouseEvent): void {
@@ -444,6 +493,8 @@ export class GridView {
       placeholder: get('--placeholder'),
       accent: get('--accent'),
       selection: get('--selection'),
+      changed: get('--changed'),
+      deleted: get('--deleted'),
     };
   }
 
@@ -498,14 +549,26 @@ export class GridView {
     for (let r = firstRow; r < lastRow; r++) {
       const y = y0 + (r - firstRow) * ROW_H;
       const selectedRow = this.selected?.row === r;
-      if (selectedRow || r % 2 === 1) {
-        ctx.fillStyle = selectedRow ? colors.selection : colors.zebra;
+      const deleted = this.overlay.deletedRows.has(r);
+      if (deleted || selectedRow || r % 2 === 1) {
+        ctx.fillStyle = deleted ? colors.deleted : selectedRow ? colors.selection : colors.zebra;
         ctx.fillRect(gutter, y, w - gutter, ROW_H);
       }
       const mid = y + ROW_H / 2;
       for (let c = firstCol; c < lastCol; c++) {
         const x = xOf(c);
         const width = this.widths[c];
+        const key = `${r}:${c}`;
+        if (this.overlay.cells.has(key)) {
+          // A change waiting to be applied: shown in place of the stored value.
+          const pending = this.overlay.cells.get(key);
+          ctx.fillStyle = colors.changed;
+          ctx.fillRect(x, y, width - 1, ROW_H);
+          ctx.fillStyle = colors.accent;
+          ctx.textAlign = 'left';
+          ctx.fillText(pending == null ? 'NULL' : this.fit(pending.replace(/\s+/g, ' '), width - PAD * 2), x + PAD, mid);
+          continue;
+        }
         const text = this.cell(r, c);
         if (text === undefined) {
           ctx.fillStyle = colors.placeholder;
@@ -564,7 +627,8 @@ export class GridView {
     for (let c = firstCol; c < lastCol; c++) {
       const x = xOf(c);
       const width = this.widths[c];
-      const name = this.fit(this.columns[c].name, width - PAD * 2);
+      const arrow = this.sort?.column === c ? (this.sort.descending ? ' \u25BE' : ' \u25B4') : '';
+      const name = this.fit(this.columns[c].name, width - PAD * 2 - (arrow ? 14 : 0)) + arrow;
       ctx.fillStyle = colors.text;
       if (this.columns[c].kind === 'number') {
         ctx.textAlign = 'right';

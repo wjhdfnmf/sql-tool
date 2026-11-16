@@ -217,6 +217,18 @@
       {/if}
     </fieldset>
 
+    <fieldset>
+      <legend>Safety</legend>
+      <label class="check">
+        <input type="checkbox" bind:checked={draft.readOnly} />
+        Read-only: refuse anything that changes data or structure
+      </label>
+      <label class="check">
+        <input type="checkbox" bind:checked={draft.production} />
+        Production: ask before structure changes, and before UPDATE or DELETE without WHERE
+      </label>
+    </fieldset>
+
     {#if testResult}
       <div class="test-result" role="status">
         <p class={testResult.ok ? 'ok-text' : 'error-text'}>{testResult.text}</p>
