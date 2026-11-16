@@ -3,7 +3,7 @@
 # servers and prints the report. Run from the repository root in Git Bash
 # (Windows) or any shell (Linux, macOS), after building the app:
 #
-#   (cd app && npm run build) && cargo build --release -p sqltool-app --features custom-protocol
+#   (cd app && npm run build) && cargo build --release -p sqltool-app --features custom-protocol,devtools
 #   bash tests/servers/selftest.sh mariadb
 #   bash tests/servers/selftest.sh mysql84
 #
@@ -52,7 +52,7 @@ APP="target/release/sqltool-app"
 timeout 180 "$APP" 2>/dev/null
 
 if [ ! -f "$OUT/report.json" ]; then
-  echo "The app wrote no report. Is the server running, and was the app built with --features custom-protocol?" >&2
+  echo "The app wrote no report. Is the server running, and was the app built with --features custom-protocol,devtools?" >&2
   exit 1
 fi
 
