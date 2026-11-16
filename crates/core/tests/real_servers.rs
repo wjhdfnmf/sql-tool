@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sqltool_core::{CaSource, ColumnKind, ConnectProfile, ResultStore, RunEvent, Session};
+use sqltool_core::{ddl, CaSource, ColumnKind, ConnectProfile, ObjectKind, ResultStore, RunEvent, Session};
 
 fn local_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/servers/.local")
@@ -117,6 +117,54 @@ async fn check_metadata(session: &mut Session, expect_procedure: bool) {
     assert!(!columns[1].nullable);
     assert!(columns[2].nullable);
     assert_eq!(columns[1].key, "MUL");
+
+    let details = session.table_details("sqltool_test", "people").await.unwrap().expect("details");
+    assert!(!details.is_view);
+    assert_eq!(details.engine.as_deref(), Some("InnoDB"));
+    assert!(details.collation.unwrap().starts_with("utf8mb4"));
+    assert!(session.table_details("sqltool_test", "people_names").await.unwrap().unwrap().is_view);
+    assert_eq!(session.table_details("sqltool_test", "missing").await.unwrap(), None);
+
+    let defaults = session.schema_defaults("sqltool_test").await.unwrap().expect("schema defaults");
+    assert!(defaults.charset.starts_with("utf8mb"), "{defaults:?}");
+    let charsets = session.charsets().await.unwrap();
+    let utf8mb4 = charsets.iter().find(|c| c.name == "utf8mb4").expect("utf8mb4 is offered");
+    let collations = session.collations("utf8mb4").await.unwrap();
+    assert!(collations.contains(&utf8mb4.default_collation));
+    assert!(session.collations("no'such").await.unwrap().is_empty());
+
+    let table = session.show_create(ObjectKind::Table, "sqltool_test", "people").await.unwrap();
+    assert!(table.starts_with("CREATE TABLE `people`"), "{table}");
+    let view = session.show_create(ObjectKind::View, "sqltool_test", "people_names").await.unwrap();
+    assert!(view.to_uppercase().contains("VIEW `PEOPLE_NAMES` AS"), "{view}");
+    if expect_procedure {
+        let procedure = session.show_create(ObjectKind::Procedure, "sqltool_test", "two_sets").await.unwrap();
+        assert!(procedure.contains("PROCEDURE `two_sets`"), "{procedure}");
+        // The alter script replaces the procedure in place (this is MariaDB).
+        // Run as it is, it either works or, when the procedure belongs to
+        // another account, is refused. Either way the procedure must survive.
+        let script = ddl::alter_script(ObjectKind::Procedure, "sqltool_test", "two_sets", &procedure, true);
+        let mut refused = false;
+        for statement in sqltool_core::split::split(&script) {
+            if let Err(e) = session.run(&statement.text, None, |_| {}).await {
+                assert!(e.to_string().contains("1227"), "unexpected failure: {e}");
+                refused = true;
+            }
+        }
+        assert_eq!(run(session, "CALL sqltool_test.two_sets()", None).await.sets.len(), 2, "still there");
+
+        if refused {
+            // Without the DEFINER clause the same script creates it as this account.
+            let start = script.find("DEFINER=").expect("definer clause");
+            let end = start + script[start..].find(" PROCEDURE").expect("end of definer clause") + 1;
+            let own = format!("{}{}", &script[..start], &script[end..]);
+            for statement in sqltool_core::split::split(&own) {
+                run(session, &statement.text, None).await;
+            }
+            assert_eq!(run(session, "CALL sqltool_test.two_sets()", None).await.sets.len(), 2);
+        }
+    }
+    assert!(session.show_create(ObjectKind::Table, "sqltool_test", "missing").await.is_err());
 
     // A name that needs escaping must not break, or leak into, the query.
     assert!(session.schema_objects("no'such`schema").await.unwrap().tables.is_empty());

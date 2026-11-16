@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { backend } from '../lib/backend';
-  import { asUiError, serverLabel, type Profile, type TlsSetting } from '../lib/types';
+  import { asUiError, explainConnectError, serverLabel, type Profile, type TlsSetting } from '../lib/types';
 
   interface Props {
     profile: Profile;
@@ -21,7 +21,8 @@
   let caFile = $state(initial.caFile ?? '');
   let saving = $state(false);
   let testing = $state(false);
-  let testResult = $state<{ ok: boolean; text: string } | null>(null);
+  /** `fix` names a one-click remedy to offer alongside the message. */
+  let testResult = $state<{ ok: boolean; text: string; fix?: 'unverified' | 'cleartext' } | null>(null);
   let saveError = $state<string | null>(null);
 
   const tlsOptions: { value: TlsSetting; label: string; help: string }[] = [
@@ -84,11 +85,24 @@
       const error = asUiError(e);
       testResult = {
         ok: false,
-        text: error.kind === 'password-required' ? 'Enter the password to test the connection.' : error.message,
+        text: error.kind === 'password-required' ? 'Enter the password to test the connection.' : explainConnectError(error),
+        fix: error.kind === 'tls' && verifies ? 'unverified' : error.kind === 'cleartext-not-enabled' ? 'cleartext' : undefined,
       };
     } finally {
       testing = false;
     }
+  }
+
+  function applyFix(fix: 'unverified' | 'cleartext') {
+    if (fix === 'unverified') draft.tls = 'unverified';
+    else draft.cleartextAuth = true;
+    testResult = {
+      ok: true,
+      text:
+        fix === 'unverified'
+          ? 'Encryption is now "Encrypted, not verified". Test the connection again.'
+          : 'Cleartext authentication is now allowed. Check the security section, then test again.',
+    };
   }
 
   async function save() {
@@ -204,7 +218,14 @@
     </fieldset>
 
     {#if testResult}
-      <p class={testResult.ok ? 'ok-text' : 'error-text'} role="status">{testResult.text}</p>
+      <div class="test-result" role="status">
+        <p class={testResult.ok ? 'ok-text' : 'error-text'}>{testResult.text}</p>
+        {#if testResult.fix === 'unverified'}
+          <button type="button" onclick={() => applyFix('unverified')}>Switch to "Encrypted, not verified"</button>
+        {:else if testResult.fix === 'cleartext'}
+          <button type="button" onclick={() => applyFix('cleartext')}>Allow cleartext authentication</button>
+        {/if}
+      </div>
     {/if}
     {#if saveError}<p class="error-text" role="alert">{saveError}</p>{/if}
     {#if problem}<p class="muted">{problem}</p>{/if}
@@ -294,6 +315,13 @@
 
   .ok-text {
     color: var(--ok);
+  }
+
+  .test-result {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
   }
 
   .buttons {

@@ -10,6 +10,7 @@ import {
   type Profile,
   type RunMode,
   type RunMsg,
+  type TreeTarget,
   type WorkspaceInfo,
 } from './types';
 
@@ -24,7 +25,7 @@ export interface ResultTab {
 }
 
 export interface MessageLine {
-  index: number;
+  id: number;
   sql: string;
   state: 'running' | 'ok' | 'error';
   text: string;
@@ -32,11 +33,16 @@ export interface MessageLine {
 }
 
 let tabCounter = 0;
+let lineCounter = 0;
 
 export class EditorTab {
   readonly id = crypto.randomUUID();
   title = $state('');
   text = $state('');
+  /** The file this tab was opened from or saved to, if any. */
+  filePath = $state<string | null>(null);
+  /** The text as last opened or saved, to tell whether there are unsaved changes. */
+  savedText = $state('');
   running = $state(false);
   results = $state<ResultTab[]>([]);
   messages = $state<MessageLine[]>([]);
@@ -47,6 +53,16 @@ export class EditorTab {
   constructor(title: string, text = '') {
     this.title = title;
     this.text = text;
+    this.savedText = text;
+  }
+
+  get dirty(): boolean {
+    return this.text !== this.savedText;
+  }
+
+  report(text: string, state: MessageLine['state'] = 'error'): void {
+    this.messages.push({ id: ++lineCounter, sql: '', state, text, elapsedMs: null });
+    if (state === 'error') this.activeResult = 'messages';
   }
 }
 
@@ -57,6 +73,12 @@ export class WorkspaceState {
   database = $state<string | null>(null);
   /** Rows kept per result set; null means no limit. */
   maxRows = $state<number | null>(10_000);
+  showNavigator = $state(true);
+  showOutput = $state(true);
+  /** What is selected in the schema tree, shown in the information pane. */
+  selected = $state<TreeTarget | null>(null);
+  /** Bumped to make the schema tree reload. */
+  treeVersion = $state(0);
 
   constructor(info: WorkspaceInfo) {
     this.info = info;
@@ -68,8 +90,8 @@ export class WorkspaceState {
     return this.tabs.find((t) => t.id === this.activeTabId) ?? this.tabs[0];
   }
 
-  addTab(text = ''): EditorTab {
-    const tab = new EditorTab(`Query ${++tabCounter}`, text);
+  addTab(text = '', title?: string): EditorTab {
+    const tab = new EditorTab(title ?? `Query ${++tabCounter}`, text);
     this.tabs.push(tab);
     this.activeTabId = tab.id;
     return tab;
@@ -91,21 +113,45 @@ export class WorkspaceState {
     if (ids.length > 0) void backend.closeResults(ids);
   }
 
-  async run(tab: EditorTab, script: string, mode: RunMode): Promise<void> {
+  /**
+   * Runs statements in the tab's own session. `keep` leaves the tab's
+   * current results and messages in place and only adds to the messages,
+   * for small actions such as changing the default schema.
+   */
+  async run(tab: EditorTab, script: string, mode: RunMode, keep = false): Promise<void> {
     if (tab.running || script.trim() === '') return;
-    this.releaseResults(tab);
-    tab.messages = [];
-    tab.activeResult = 'messages';
+    if (!keep) {
+      this.releaseResults(tab);
+      tab.messages = [];
+      tab.activeResult = 'messages';
+    }
     tab.lastRunMs = null;
     tab.running = true;
+    const lines = new Map<number, MessageLine>();
     try {
-      await backend.run(this.info.id, tab.id, script, mode, this.maxRows, (message) => this.onRunMsg(tab, message));
+      await backend.run(this.info.id, tab.id, script, mode, this.maxRows, (message) => this.onRunMsg(tab, lines, message));
     } catch (e) {
-      tab.messages.push({ index: tab.messages.length, sql: '', state: 'error', text: asUiError(e).message, elapsedMs: null });
-      tab.activeResult = 'messages';
+      tab.report(asUiError(e).message);
     } finally {
       tab.running = false;
     }
+  }
+
+  /**
+   * Runs statements on a separate connection, without touching any editor
+   * tab. For actions such as creating a schema. Returns the error, if any.
+   */
+  async execute(script: string): Promise<string | null> {
+    let error: string | null = null;
+    try {
+      await backend.run(this.info.id, `actions-${this.info.id}`, script, { kind: 'all' }, 1000, (message) => {
+        if (message.type === 'failed') error = message.message;
+        if (message.type === 'resultSet') void backend.closeResults([message.resultId]);
+      });
+    } catch (e) {
+      error = asUiError(e).message;
+    }
+    return error;
   }
 
   async cancel(tab: EditorTab): Promise<void> {
@@ -113,17 +159,19 @@ export class WorkspaceState {
     try {
       await backend.cancel(this.info.id, tab.id);
     } catch (e) {
-      tab.messages.push({ index: tab.messages.length, sql: '', state: 'error', text: 'Could not cancel: ' + asUiError(e).message, elapsedMs: null });
+      tab.report('Could not cancel: ' + asUiError(e).message);
     }
   }
 
-  private onRunMsg(tab: EditorTab, m: RunMsg): void {
-    const line = (index: number) => tab.messages.find((l) => l.index === index);
+  private onRunMsg(tab: EditorTab, lines: Map<number, MessageLine>, m: RunMsg): void {
     const result = (id: number) => tab.results.find((r) => r.id === id);
     switch (m.type) {
-      case 'started':
-        tab.messages.push({ index: m.index, sql: m.sql, state: 'running', text: 'Running…', elapsedMs: null });
+      case 'started': {
+        tab.messages.push({ id: ++lineCounter, sql: m.sql, state: 'running', text: 'Running…', elapsedMs: null });
+        // Read the line back so later updates go through the reactive copy.
+        lines.set(m.index, tab.messages[tab.messages.length - 1]);
         break;
+      }
       case 'resultSet':
         tab.results.push({
           id: m.resultId,
@@ -144,7 +192,7 @@ export class WorkspaceState {
       case 'resultDone': {
         const r = result(m.resultId);
         if (r) Object.assign(r, { rows: m.rows, done: true, truncated: m.truncated, elapsedMs: m.elapsedMs });
-        const l = line(m.index);
+        const l = lines.get(m.index);
         if (l) {
           l.state = 'ok';
           l.elapsedMs = m.elapsedMs;
@@ -153,7 +201,7 @@ export class WorkspaceState {
         break;
       }
       case 'done': {
-        const l = line(m.index);
+        const l = lines.get(m.index);
         if (l) {
           l.state = 'ok';
           l.elapsedMs = m.elapsedMs;
@@ -165,7 +213,7 @@ export class WorkspaceState {
         break;
       }
       case 'failed': {
-        const l = line(m.index);
+        const l = lines.get(m.index);
         if (l) Object.assign(l, { state: 'error', text: m.message, elapsedMs: m.elapsedMs });
         tab.activeResult = 'messages';
         break;
@@ -175,9 +223,7 @@ export class WorkspaceState {
         break;
       case 'finished':
         tab.lastRunMs = m.elapsedMs;
-        if (m.total === 0) {
-          tab.messages.push({ index: 0, sql: '', state: 'error', text: 'Nothing to run: no statement found.', elapsedMs: null });
-        }
+        if (m.total === 0) tab.report('Nothing to run: no statement found.');
         break;
     }
   }

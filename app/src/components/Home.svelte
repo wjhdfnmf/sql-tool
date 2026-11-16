@@ -1,7 +1,7 @@
 <script lang="ts">
   import { backend } from '../lib/backend';
   import { app } from '../lib/state.svelte';
-  import { asUiError, newProfile, type Profile, type TlsSetting, type UiError } from '../lib/types';
+  import { asUiError, explainConnectError, newProfile, type Profile, type TlsSetting } from '../lib/types';
   import ConnectionDialog from './ConnectionDialog.svelte';
   import PasswordPrompt from './PasswordPrompt.svelte';
 
@@ -19,20 +19,6 @@
     unverified: 'Encrypted, not verified',
     disabled: 'Not encrypted',
   };
-
-  /** Adds a next step to errors the user can fix in the connection settings. */
-  function explain(error: UiError): string {
-    switch (error.kind) {
-      case 'tls':
-        return `${error.message}. The server's certificate could not be verified. If the server uses a default or self-signed certificate, edit the connection and choose "Encrypted, not verified", or supply its CA file.`;
-      case 'cleartext-not-enabled':
-        return `${error.message}. Edit the connection and turn on "Allow cleartext authentication" (LDAP and PAM accounts need it).`;
-      case 'no-tls':
-        return `${error.message}. Edit the connection and choose "Not encrypted" only if that is acceptable on this network.`;
-      default:
-        return error.message;
-    }
-  }
 
   async function connect(profile: Profile, password: string | null = null, remember = false) {
     busyId = profile.id;
@@ -55,7 +41,7 @@
         promptError = error.message;
       } else {
         asking = null;
-        errors[profile.id] = explain(error);
+        errors[profile.id] = explainConnectError(error);
       }
     } finally {
       busyId = null;
@@ -114,6 +100,7 @@
           </div>
           {#if errors[profile.id]}
             <p class="error-text" role="alert">{errors[profile.id]}</p>
+            <p><button onclick={() => (editing = { ...profile })}>Edit connection settings</button></p>
           {/if}
         </div>
         <div class="actions">

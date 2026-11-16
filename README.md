@@ -14,7 +14,9 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **Editor**: tabs, MySQL and MariaDB syntax highlighting, run the statement at the cursor (Ctrl+Enter) or the whole script (Ctrl+Shift+Enter), `DELIMITER` support, stop a running statement.
 - **Results**: rows appear while they stream, in a grid that stays smooth with millions of rows. Resizable columns, full-value viewer, one tab per result set.
 - **Row limit**: 1,000 to 100,000 rows per result, or none. At the limit the query is interrupted on the server.
-- **Schema browser**: schemas, tables, views, columns, routines, triggers and events, loaded on demand.
+- **Schema browser**: schemas, tables, views, columns, routines, triggers and events, loaded on demand, with right-click actions and an information pane for the selected object.
+- **Schema changes**: create and alter schemas in a dialog that shows the SQL first; create and alter tables, views and routines from generated scripts.
+- **Menus and toolbars**: menu bar, toolbars, open and save script files, explain the statement under the cursor, reformat a query.
 - **History**: searchable. Statements that contain a password are not stored in full.
 
 ## Security defaults

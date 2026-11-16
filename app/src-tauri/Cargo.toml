@@ -28,3 +28,4 @@ secrecy = "0.10"
 sqltool-core = { path = "../../crates/core" }
 sqltool-secrets = { path = "../../crates/secrets" }
 sqltool-fakeserver = { path = "../../crates/fakeserver", optional = true }
+tauri-plugin-dialog = "2"

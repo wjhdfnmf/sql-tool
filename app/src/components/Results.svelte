@@ -35,7 +35,7 @@
       openCell = { column: result.columns[column].name, row, value, pretty };
       viewer?.showModal();
     } catch (e) {
-      tab.messages.push({ index: tab.messages.length, sql: '', state: 'error', text: asUiError(e).message, elapsedMs: null });
+      tab.report(asUiError(e).message);
     }
   }
 
@@ -75,7 +75,7 @@
       </p>
     {:else}
       <ol class="messages">
-        {#each tab.messages as line (line.index)}
+        {#each tab.messages as line (line.id)}
           <li class={line.state}>
             <span class="status" aria-hidden="true">{line.state === 'ok' ? '✓' : line.state === 'error' ? '✗' : '…'}</span>
             <div class="body">
