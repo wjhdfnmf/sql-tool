@@ -82,7 +82,7 @@ INSERT INTO sqltool_test.people (id, name, email, born, notes, avatar, profile) 
   (2, 'Grace Hopper', NULL, '1906-12-09', NULL, NULL, '{"languages": ["cobol"], "active": true}'),
   (3, 'Zoë Müller', 'zoe@example.test', NULL, 'Non-ASCII name: ß, 漢字, 😀', NULL, NULL)
   ON DUPLICATE KEY UPDATE name = VALUES(name);
-CREATE OR REPLACE VIEW sqltool_test.people_names AS SELECT id, name FROM sqltool_test.people;
+CREATE OR REPLACE SQL SECURITY INVOKER VIEW sqltool_test.people_names AS SELECT id, name FROM sqltool_test.people;
 SQL
 
 cat > "$BASE/my.cnf" <<CNF
