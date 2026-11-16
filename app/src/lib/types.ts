@@ -17,6 +17,10 @@ export interface Profile {
   cleartextRiskAccepted: boolean;
   savePassword: boolean;
   color: string | null;
+  /** Refuse anything that is not a read. */
+  readOnly: boolean;
+  /** Ask before structure changes and before UPDATE or DELETE without WHERE. */
+  production: boolean;
   /** Whether the keychain holds a password. Set by the backend. */
   hasPassword?: boolean;
 }
@@ -35,6 +39,8 @@ export function newProfile(): Profile {
     cleartextRiskAccepted: false,
     savePassword: true,
     color: null,
+    readOnly: false,
+    production: false,
   };
 }
 
@@ -65,6 +71,8 @@ export interface WorkspaceInfo {
   info: ServerInfo;
   security: 'verified' | 'unverified' | 'none';
   database: string | null;
+  readOnly: boolean;
+  production: boolean;
 }
 
 export type ColumnKind = 'number' | 'text' | 'date' | 'json' | 'binary';
@@ -72,13 +80,95 @@ export type ColumnKind = 'number' | 'text' | 'date' | 'json' | 'binary';
 export interface ColumnInfo {
   name: string;
   kind: ColumnKind;
+  /** The table column behind this result column; null for computed columns. */
+  source: { schema: string; table: string; column: string } | null;
+  primaryKey: boolean;
 }
+
+/** Something to confirm before running on a production connection. */
+export interface Concern {
+  index: number;
+  reason: string;
+  sql: string;
+}
+
+export type ExportFormat = 'csv' | 'tsv' | 'json' | 'sql';
+
+/** Where edits made in a result grid go. */
+export interface EditTarget {
+  schema: string;
+  table: string;
+  keyColumns: number[];
+  /** Per result column: the table column it edits, or null if not editable. */
+  columns: (string | null)[];
+}
+
+export interface CellChange {
+  column: number;
+  /** null sets the cell to NULL. */
+  value: string | null;
+}
+
+export type RowEdit =
+  | { type: 'update'; row: number; changes: CellChange[] }
+  | { type: 'delete'; row: number }
+  | { type: 'insert'; values: CellChange[] };
+
+export interface ColumnSpec {
+  name: string;
+  dataType: string;
+  nullable: boolean;
+  default: string | null;
+  onUpdate: string | null;
+  autoIncrement: boolean;
+  comment: string;
+  collation: string | null;
+  originalName: string | null;
+  locked: boolean;
+}
+
+export interface IndexSpec {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  originalName: string | null;
+  locked: boolean;
+}
+
+export interface TableSpec {
+  schema: string;
+  name: string;
+  columns: ColumnSpec[];
+  primaryKey: string[];
+  indexes: IndexSpec[];
+  engine: string | null;
+  collation: string | null;
+  comment: string;
+}
+
+export interface ForeignKey {
+  name: string;
+  columns: string[];
+  referencedSchema: string;
+  referencedTable: string;
+  referencedColumns: string[];
+  onUpdate: string;
+  onDelete: string;
+}
+
+export interface TableKeys {
+  primaryKey: string[];
+  indexes: IndexSpec[];
+  foreignKeys: ForeignKey[];
+}
+
+export type ObjectAction = 'drop' | 'dropSchema' | 'truncate' | 'rename';
 
 export type RunMode = { kind: 'all' } | { kind: 'at'; offset: number } | { kind: 'explainAt'; offset: number };
 
 export type RunMsg =
   | { type: 'started'; index: number; total: number; sql: string }
-  | { type: 'resultSet'; index: number; resultId: number; columns: ColumnInfo[] }
+  | { type: 'resultSet'; index: number; resultId: number; columns: ColumnInfo[]; sql: string }
   | { type: 'progress'; resultId: number; rows: number }
   | { type: 'resultDone'; index: number; resultId: number; rows: number; truncated: boolean; elapsedMs: number }
   | {

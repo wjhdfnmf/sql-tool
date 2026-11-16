@@ -10,6 +10,7 @@ use crate::ddl::ObjectKind;
 use crate::error::Error;
 use crate::session::Session;
 use crate::split::quote_identifier;
+use crate::table::{ColumnSpec, IndexSpec, TableSpec};
 use crate::version::Flavor;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -283,5 +284,180 @@ impl Session {
                 extra: cell(&mut row, 5),
             })
             .collect())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyEntry {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    pub on_update: String,
+    pub on_delete: String,
+}
+
+/// The MySQL column types whose defaults are written without quotes.
+fn is_numeric_type(column_type: &str) -> bool {
+    let base = column_type.split(['(', ' ']).next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        base.as_str(),
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "decimal" | "numeric" | "float" | "double" | "real" | "bit" | "year"
+    )
+}
+
+impl Session {
+    /// Table and column names of one schema, for editor completion.
+    pub async fn completion_columns(&mut self, schema: &str) -> Result<Vec<(String, String)>, Error> {
+        Ok(self
+            .query_params(
+                "SELECT table_name, column_name FROM information_schema.columns \
+                 WHERE table_schema = ? ORDER BY table_name, ordinal_position",
+                (schema,),
+            )
+            .await?
+            .into_iter()
+            .map(|mut row| (cell(&mut row, 0), cell(&mut row, 1)))
+            .collect())
+    }
+
+    pub async fn foreign_keys(&mut self, schema: &str, table: &str) -> Result<Vec<ForeignKeyEntry>, Error> {
+        let rows = self
+            .query_params(
+                "SELECT k.constraint_name, k.column_name, k.referenced_table_schema, k.referenced_table_name, \
+                        k.referenced_column_name, r.update_rule, r.delete_rule \
+                 FROM information_schema.key_column_usage k \
+                 JOIN information_schema.referential_constraints r \
+                   ON r.constraint_schema = k.constraint_schema AND r.constraint_name = k.constraint_name \
+                  AND r.table_name = k.table_name \
+                 WHERE k.table_schema = ? AND k.table_name = ? AND k.referenced_table_name IS NOT NULL \
+                 ORDER BY k.constraint_name, k.ordinal_position",
+                (schema, table),
+            )
+            .await?;
+        let mut keys: Vec<ForeignKeyEntry> = Vec::new();
+        for mut row in rows {
+            let name = cell(&mut row, 0);
+            if keys.last().is_none_or(|k| k.name != name) {
+                keys.push(ForeignKeyEntry {
+                    name,
+                    columns: Vec::new(),
+                    referenced_schema: cell(&mut row, 2),
+                    referenced_table: cell(&mut row, 3),
+                    referenced_columns: Vec::new(),
+                    on_update: cell(&mut row, 5),
+                    on_delete: cell(&mut row, 6),
+                });
+            }
+            let key = keys.last_mut().expect("just pushed");
+            key.columns.push(cell(&mut row, 1));
+            key.referenced_columns.push(cell(&mut row, 4));
+        }
+        Ok(keys)
+    }
+
+    /// Reads a table into the designer's model. `None` if it does not exist.
+    pub async fn table_spec(&mut self, schema: &str, table: &str) -> Result<Option<TableSpec>, Error> {
+        let Some(details) = self.table_details(schema, table).await? else {
+            return Ok(None);
+        };
+        let mariadb = self.info().version.flavor == Flavor::MariaDb;
+
+        let columns = self
+            .query_params(
+                "SELECT column_name, column_type, is_nullable, column_default, extra, column_comment, collation_name \
+                 FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
+                (schema, table),
+            )
+            .await?
+            .into_iter()
+            .map(|mut row| {
+                let name = cell(&mut row, 0);
+                let data_type = cell(&mut row, 1);
+                let raw_default = row.get_mut(3).and_then(Option::take);
+                let extra = cell(&mut row, 4);
+                let extra_lower = extra.to_ascii_lowercase();
+                let collation = row.get_mut(6).and_then(Option::take);
+
+                // MariaDB reports defaults as SQL text ('abc', 0, NULL).
+                // MySQL reports the bare value and flags expressions in `extra`.
+                let default = raw_default.and_then(|value| {
+                    if mariadb {
+                        (!value.eq_ignore_ascii_case("NULL")).then_some(value)
+                    } else if value.to_ascii_uppercase().starts_with("CURRENT_TIMESTAMP") {
+                        Some(value)
+                    } else if extra_lower.contains("default_generated") {
+                        Some(format!("({value})"))
+                    } else if is_numeric_type(&data_type) {
+                        Some(value)
+                    } else {
+                        Some(crate::export::sql_literal(Some(value.as_bytes()), crate::store::ColumnKind::Text))
+                    }
+                });
+                let on_update = extra_lower
+                    .find("on update ")
+                    .map(|at| extra[at + "on update ".len()..].trim().to_string());
+
+                ColumnSpec {
+                    original_name: Some(name.clone()),
+                    name,
+                    data_type,
+                    nullable: cell(&mut row, 2).eq_ignore_ascii_case("YES"),
+                    default,
+                    on_update,
+                    auto_increment: extra_lower.contains("auto_increment"),
+                    comment: cell(&mut row, 5),
+                    collation: collation.filter(|c| Some(c) != details.collation.as_ref()),
+                    locked: extra_lower.contains("generated") && !extra_lower.contains("default_generated")
+                        || extra_lower.contains("persistent"),
+                }
+            })
+            .collect();
+
+        let mut primary_key = Vec::new();
+        let mut indexes: Vec<IndexSpec> = Vec::new();
+        let rows = self
+            .query_params(
+                "SELECT index_name, non_unique, column_name, sub_part, index_type FROM information_schema.statistics \
+                 WHERE table_schema = ? AND table_name = ? ORDER BY index_name, seq_in_index",
+                (schema, table),
+            )
+            .await?;
+        for mut row in rows {
+            let name = cell(&mut row, 0);
+            let column = row.get_mut(2).and_then(Option::take);
+            let prefix = row.get_mut(3).and_then(Option::take);
+            let index_type = cell(&mut row, 4).to_ascii_uppercase();
+            if name == "PRIMARY" {
+                primary_key.extend(column);
+                continue;
+            }
+            if indexes.last().is_none_or(|i| i.name != name) {
+                indexes.push(IndexSpec {
+                    original_name: Some(name.clone()),
+                    name,
+                    columns: Vec::new(),
+                    unique: cell(&mut row, 1) == "0",
+                    locked: !matches!(index_type.as_str(), "BTREE" | "HASH"),
+                });
+            }
+            let index = indexes.last_mut().expect("just pushed");
+            // Prefix lengths and expression parts are beyond the designer.
+            index.locked |= prefix.is_some() || column.is_none();
+            index.columns.extend(column);
+        }
+
+        Ok(Some(TableSpec {
+            schema: schema.to_string(),
+            name: table.to_string(),
+            columns,
+            primary_key,
+            indexes,
+            engine: details.engine,
+            collation: details.collation,
+            comment: details.comment,
+        }))
     }
 }

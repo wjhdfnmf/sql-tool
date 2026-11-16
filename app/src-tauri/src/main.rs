@@ -16,7 +16,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sqltool_core::metadata::{Charset, ColumnEntry, SchemaDefaults, SchemaObjects, TableDetails};
+use sqltool_core::edit::{self, EditTarget, RowEdit};
+use sqltool_core::export::{self, ExportFormat};
+use sqltool_core::guard::{self, Concern};
+use sqltool_core::metadata::{Charset, ColumnEntry, ForeignKeyEntry, SchemaDefaults, SchemaObjects, TableDetails};
+use sqltool_core::table::{self, IndexSpec, TableSpec};
 use sqltool_core::{
     ddl, split, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
     ResultStore, RunEvent, SavedProfile, ServerInfo, Session, TlsMode,
@@ -65,6 +69,8 @@ struct Tab {
 struct Workspace {
     profile: ConnectProfile,
     name: String,
+    /// Refuse anything that is not a read.
+    read_only: bool,
     /// Used for the schema browser, so it stays responsive while tabs run.
     utility: tokio::sync::Mutex<Session>,
     tabs: tokio::sync::Mutex<HashMap<String, Arc<Tab>>>,
@@ -76,7 +82,10 @@ impl Workspace {
         if let Some(tab) = tabs.get(tab_id) {
             return Ok(tab.clone());
         }
-        let session = Session::connect(&self.profile).await?;
+        let mut session = Session::connect(&self.profile).await?;
+        if self.read_only {
+            session.set_read_only().await?;
+        }
         let tab = Arc::new(Tab {
             canceller: session.canceller(),
             session: tokio::sync::Mutex::new(session),
@@ -218,6 +227,9 @@ struct WorkspaceDto {
     /// `verified`, `unverified` or `none`.
     security: &'static str,
     database: Option<String>,
+    read_only: bool,
+    /// Ask before risky statements.
+    production: bool,
 }
 
 async fn open_workspace(
@@ -225,8 +237,13 @@ async fn open_workspace(
     profile: ConnectProfile,
     name: String,
     color: Option<String>,
+    read_only: bool,
+    production: bool,
 ) -> Result<WorkspaceDto, UiError> {
     let mut session = Session::connect(&profile).await?;
+    if read_only {
+        session.set_read_only().await?;
+    }
     let info = session.info().clone();
     let database = session.current_database().await.ok().flatten();
     let security = match profile.tls {
@@ -243,12 +260,15 @@ async fn open_workspace(
         info,
         security,
         database,
+        read_only,
+        production,
     };
     state.workspaces.lock().unwrap().insert(
         dto.id,
         Arc::new(Workspace {
             profile,
             name,
+            read_only,
             utility: tokio::sync::Mutex::new(session),
             tabs: tokio::sync::Mutex::new(HashMap::new()),
         }),
@@ -282,7 +302,15 @@ async fn connect(
     } else {
         saved.name.clone()
     };
-    open_workspace(&state, saved.to_connect_profile(password), name, saved.color.clone()).await
+    open_workspace(
+        &state,
+        saved.to_connect_profile(password),
+        name,
+        saved.color.clone(),
+        saved.read_only,
+        saved.production,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -325,6 +353,8 @@ enum RunMsg {
         index: usize,
         result_id: u64,
         columns: Vec<ColumnInfo>,
+        /// The whole statement, so the UI can run it again after edits.
+        sql: String,
     },
     Progress {
         result_id: u64,
@@ -377,6 +407,39 @@ fn preview(sql: &str) -> String {
     out
 }
 
+/// The statements a run in this mode would execute.
+fn select_statements(script: &str, mode: &RunMode) -> Vec<split::Statement> {
+    let all = split::split(script);
+    match mode {
+        RunMode::All => all,
+        RunMode::At { offset } => {
+            let byte_offset = split::utf16_to_byte_offset(script, *offset);
+            split::statement_at(&all, byte_offset).cloned().into_iter().collect()
+        }
+        RunMode::ExplainAt { offset } => {
+            let byte_offset = split::utf16_to_byte_offset(script, *offset);
+            split::statement_at(&all, byte_offset)
+                .cloned()
+                .map(|mut statement| {
+                    if split::first_keyword(&statement.text) != "EXPLAIN" {
+                        statement.text = format!("EXPLAIN {}", statement.text);
+                    }
+                    statement
+                })
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+/// What a production connection should confirm before running this:
+/// structure changes, and UPDATE or DELETE without a WHERE clause.
+#[tauri::command]
+fn review_script(script: String, mode: RunMode) -> Vec<Concern> {
+    let statements = select_statements(&script, &mode);
+    guard::review(statements.iter().map(|s| s.text.as_str()))
+}
+
 /// Runs the script's statements one after another in the tab's session,
 /// stopping at the first failure. Progress is reported through `on_event`;
 /// the command itself returns when everything has finished.
@@ -391,27 +454,7 @@ async fn run(
     on_event: Channel<RunMsg>,
 ) -> Result<(), UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let all = split::split(&script);
-    let statements: Vec<split::Statement> = match mode {
-        RunMode::All => all,
-        RunMode::At { offset } => {
-            let byte_offset = split::utf16_to_byte_offset(&script, offset);
-            split::statement_at(&all, byte_offset).cloned().into_iter().collect()
-        }
-        RunMode::ExplainAt { offset } => {
-            let byte_offset = split::utf16_to_byte_offset(&script, offset);
-            split::statement_at(&all, byte_offset)
-                .cloned()
-                .map(|mut statement| {
-                    if split::first_keyword(&statement.text) != "EXPLAIN" {
-                        statement.text = format!("EXPLAIN {}", statement.text);
-                    }
-                    statement
-                })
-                .into_iter()
-                .collect()
-        }
-    };
+    let statements = select_statements(&script, &mode);
 
     let tab = workspace.tab(&tab_id).await?;
     let mut session = tab
@@ -436,6 +479,18 @@ async fn run(
         let mut summary = String::new();
         let mut current_result = 0u64;
 
+        if workspace.read_only && !guard::allowed_when_read_only(&statement.text) {
+            // Refused here, before anything is sent. The server would refuse
+            // it too, since the session is in read-only mode.
+            failed = true;
+            let _ = on_event.send(RunMsg::Failed {
+                index,
+                message: "Not run: this connection is read-only, and this statement is not a plain read.".into(),
+                elapsed_ms: 0,
+            });
+            break;
+        }
+
         let outcome = session
             .run(&statement.text, max_rows, |event| {
                 let message = match event {
@@ -447,6 +502,7 @@ async fn run(
                             index,
                             result_id: current_result,
                             columns,
+                            sql: statement.text.clone(),
                         }
                     }
                     RunEvent::Progress { rows } => RunMsg::Progress {
@@ -785,6 +841,221 @@ async fn script_save(
     }))
 }
 
+// ---------- sorting, filtering and exporting results ----------
+
+/// Sorts and filters what the grid shows. Returns the number of visible rows.
+#[tauri::command]
+fn result_view(
+    state: State<'_, AppState>,
+    result_id: u64,
+    filter: Option<String>,
+    sort_column: Option<usize>,
+    descending: bool,
+) -> Result<u64, UiError> {
+    let store = state.result(result_id)?;
+    Ok(store.set_view(filter.as_deref(), sort_column.map(|column| (column, descending))))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Exported {
+    path: String,
+    rows: u64,
+}
+
+/// Asks where to save, then writes the result's visible rows in `format`.
+/// `None` if the user cancels.
+#[tauri::command]
+async fn export_result(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    result_id: u64,
+    format: ExportFormat,
+    table: String,
+) -> Result<Option<Exported>, UiError> {
+    use tauri_plugin_dialog::DialogExt;
+    let store = state.result(result_id)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter(format.extension().to_uppercase(), &[format.extension()])
+        .set_file_name(format!("result.{}", format.extension()))
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = rx.await.ok().flatten().and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
+    let file = std::fs::File::create(&path).map_err(storage)?;
+    let mut writer = std::io::BufWriter::new(file);
+    let rows = export::write(&store, format, &table, &mut writer).map_err(storage)?;
+    std::io::Write::flush(&mut writer).map_err(storage)?;
+    Ok(Some(Exported {
+        path: path.to_string_lossy().into_owned(),
+        rows,
+    }))
+}
+
+// ---------- editing rows ----------
+
+/// Whether a result can be edited, and which table the edits would go to.
+#[tauri::command]
+async fn edit_target(state: State<'_, AppState>, workspace_id: u64, result_id: u64) -> Result<EditTarget, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    if workspace.read_only {
+        return Err(ui_error("not-editable", "This connection is read-only."));
+    }
+    let store = state.result(result_id)?;
+    let mut session = workspace.utility.lock().await;
+    session
+        .edit_target(&store)
+        .await
+        .map_err(|e| ui_error("not-editable", e.to_string()))
+}
+
+/// The statements the edits would run, with values written in, for review.
+#[tauri::command]
+fn preview_edits(state: State<'_, AppState>, result_id: u64, edits: Vec<RowEdit>) -> Result<Vec<String>, UiError> {
+    let store = state.result(result_id)?;
+    let target = edit::edit_target(&store.status().columns).map_err(|e| ui_error("not-editable", e))?;
+    Ok(edit::plan(&target, &store, &edits)?.into_iter().map(|s| s.preview).collect())
+}
+
+/// Applies the edits in one transaction in the tab's own session.
+#[tauri::command]
+async fn apply_edits(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    tab_id: String,
+    result_id: u64,
+    edits: Vec<RowEdit>,
+) -> Result<usize, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    if workspace.read_only {
+        return Err(ui_error("not-editable", "This connection is read-only."));
+    }
+    let store = state.result(result_id)?;
+    let tab = workspace.tab(&tab_id).await?;
+    let mut session = tab
+        .session
+        .try_lock()
+        .map_err(|_| ui_error("busy", "A query is running in this tab. Wait for it to finish."))?;
+    let started = Instant::now();
+    let target = session
+        .edit_target(&store)
+        .await
+        .map_err(|e| ui_error("not-editable", e.to_string()))?;
+    let planned = edit::plan(&target, &store, &edits)?;
+    let outcome = session.apply(&planned).await;
+    for statement in &planned {
+        let _ = state.history.append(HistoryEntry {
+            at_ms: now_ms(),
+            profile_name: workspace.name.clone(),
+            sql: statement.preview.clone(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            ok: outcome.is_ok(),
+            summary: match &outcome {
+                Ok(()) => "applied from the grid".into(),
+                Err(e) => format!("not applied: {e}"),
+            },
+        });
+    }
+    outcome?;
+    Ok(planned.len())
+}
+
+// ---------- table designer and destructive actions ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TableKeys {
+    primary_key: Vec<String>,
+    indexes: Vec<IndexSpec>,
+    foreign_keys: Vec<ForeignKeyEntry>,
+}
+
+/// Keys and indexes of a table, for the information pane.
+#[tauri::command]
+async fn table_keys(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    schema: String,
+    table: String,
+) -> Result<Option<TableKeys>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    let Some(spec) = session.table_spec(&schema, &table).await? else {
+        return Ok(None);
+    };
+    Ok(Some(TableKeys {
+        primary_key: spec.primary_key,
+        indexes: spec.indexes,
+        foreign_keys: session.foreign_keys(&schema, &table).await?,
+    }))
+}
+
+/// A table as the designer edits it. `None` if it does not exist.
+#[tauri::command]
+async fn table_spec(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    schema: String,
+    table: String,
+) -> Result<Option<TableSpec>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    Ok(session.table_spec(&schema, &table).await?)
+}
+
+/// SQL for the designer: CREATE TABLE without `original`, otherwise the
+/// ALTER TABLE that turns `original` into `updated`.
+#[tauri::command]
+fn table_ddl(original: Option<TableSpec>, updated: TableSpec) -> Result<String, UiError> {
+    Ok(match original {
+        Some(original) => table::alter_table(&original, &updated)?,
+        None => table::create_table(&updated)?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ObjectAction {
+    Drop,
+    DropSchema,
+    Truncate,
+    Rename,
+}
+
+/// SQL for dropping, truncating or renaming, for the confirmation dialog.
+#[tauri::command]
+fn object_ddl(
+    action: ObjectAction,
+    kind: ObjectKind,
+    schema: String,
+    name: String,
+    new_name: Option<String>,
+) -> Result<String, UiError> {
+    Ok(match action {
+        ObjectAction::Drop => table::drop_object(kind, &schema, &name),
+        ObjectAction::DropSchema => table::drop_schema(&schema),
+        ObjectAction::Truncate => table::truncate_table(&schema, &name),
+        ObjectAction::Rename => table::rename_table(&schema, &name, new_name.as_deref().unwrap_or(""))?,
+    })
+}
+
+/// Table and column names of a schema, for editor completion.
+#[tauri::command]
+async fn completion_columns(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    schema: String,
+) -> Result<Vec<(String, String)>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    Ok(session.completion_columns(&schema).await?)
+}
+
 // ---------- history ----------
 
 #[tauri::command]
@@ -847,7 +1118,7 @@ async fn connect_demo(state: State<'_, AppState>) -> Result<WorkspaceDto, UiErro
         let mut profile = ConnectProfile::new("127.0.0.1", demo.server.port(), "demo", PASSWORD.to_string().into());
         profile.ca = Some(CaSource::Pem(demo.ca_pem.clone().into_bytes()));
         profile.allow_cleartext_auth = true;
-        open_workspace(&state, profile, "Demo server".into(), None).await
+        open_workspace(&state, profile, "Demo server".into(), None, false, false).await
     }
     #[cfg(not(feature = "devtools"))]
     {
@@ -954,6 +1225,17 @@ fn main() {
             create_template,
             script_open,
             script_save,
+            review_script,
+            result_view,
+            export_result,
+            edit_target,
+            preview_edits,
+            apply_edits,
+            table_keys,
+            table_spec,
+            table_ddl,
+            object_ddl,
+            completion_columns,
             history_list,
             history_clear,
             selftest_config,

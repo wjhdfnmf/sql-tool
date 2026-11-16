@@ -4,7 +4,7 @@
   import { MariaSQL, MySQL, sql } from '@codemirror/lang-sql';
   import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language';
   import { highlightSelectionMatches, openSearchPanel, searchKeymap } from '@codemirror/search';
-  import { EditorState, Prec } from '@codemirror/state';
+  import { Compartment, EditorState, Prec } from '@codemirror/state';
   import {
     drawSelection,
     EditorView,
@@ -19,12 +19,30 @@
   interface Props {
     value: string;
     mariadb: boolean;
+    /** Table and column names per schema, offered as completions. */
+    catalog: Record<string, Record<string, string[]>>;
+    defaultSchema: string | null;
     onchange: (text: string) => void;
     /** Ctrl/Cmd+Enter runs the statement at the cursor; with Shift, the whole script. */
     onrun: (all: boolean) => void;
   }
 
-  let { value, mariadb, onchange, onrun }: Props = $props();
+  let { value, mariadb, catalog, defaultSchema, onchange, onrun }: Props = $props();
+
+  // The language support is swapped out whenever the known names change.
+  const language = new Compartment();
+  const languageSupport = () =>
+    sql({
+      dialect: mariadb ? MariaSQL : MySQL,
+      upperCaseKeywords: true,
+      schema: $state.snapshot(catalog),
+      defaultSchema: defaultSchema ?? undefined,
+    });
+
+  $effect(() => {
+    const support = languageSupport();
+    view?.dispatch({ effects: language.reconfigure(support) });
+  });
 
   let host: HTMLDivElement;
   let view: EditorView | undefined;
@@ -73,7 +91,7 @@
           closeBrackets(),
           autocompletion(),
           highlightSelectionMatches(),
-          sql({ dialect: mariadb ? MariaSQL : MySQL, upperCaseKeywords: true }),
+          language.of(languageSupport()),
           syntaxHighlighting(highlight),
           theme,
           EditorView.contentAttributes.of({ 'aria-label': 'SQL editor' }),

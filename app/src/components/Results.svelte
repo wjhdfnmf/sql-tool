@@ -1,47 +1,14 @@
 <script lang="ts">
-  import { backend } from '../lib/backend';
-  import type { EditorTab, ResultTab } from '../lib/state.svelte';
-  import { asUiError, formatCount, formatDuration, type CellValue } from '../lib/types';
-  import Grid from './Grid.svelte';
+  import type { EditorTab, WorkspaceState } from '../lib/state.svelte';
+  import { formatCount, formatDuration } from '../lib/types';
+  import ResultView from './ResultView.svelte';
 
   interface Props {
+    workspace: WorkspaceState;
     tab: EditorTab;
   }
 
-  let { tab }: Props = $props();
-
-  interface OpenCell {
-    column: string;
-    row: number;
-    value: CellValue;
-    pretty: string | null;
-  }
-
-  let viewer: HTMLDialogElement | undefined = $state();
-  let openCell = $state<OpenCell | null>(null);
-  let selection = $state<Record<number, string>>({});
-
-  async function showCell(result: ResultTab, row: number, column: number) {
-    try {
-      const value = await backend.getCell(result.id, row, column);
-      let pretty: string | null = null;
-      if (value.text !== null && result.columns[column].kind === 'json' && !value.truncated) {
-        try {
-          pretty = JSON.stringify(JSON.parse(value.text), null, 2);
-        } catch {
-          // Not valid JSON after all; show it as it is.
-        }
-      }
-      openCell = { column: result.columns[column].name, row, value, pretty };
-      viewer?.showModal();
-    } catch (e) {
-      tab.report(asUiError(e).message);
-    }
-  }
-
-  async function copyOpenCell() {
-    if (openCell?.value.text != null) await navigator.clipboard.writeText(openCell.pretty ?? openCell.value.text);
-  }
+  let { workspace, tab }: Props = $props();
 </script>
 
 <section class="results">
@@ -71,7 +38,8 @@
   <div class="panel" hidden={tab.activeResult !== 'messages'}>
     {#if tab.messages.length === 0}
       <p class="hint muted">
-        Run a statement with Ctrl+Enter, or the whole script with Ctrl+Shift+Enter. Results appear here.
+        Run the statement under the cursor with Ctrl+Enter, or the selection or whole script with Ctrl+Shift+Enter.
+        Results appear here.
       </p>
     {:else}
       <ol class="messages">
@@ -92,50 +60,11 @@
   </div>
 
   {#each tab.results as result (result.id)}
-    <div class="panel grid-panel" hidden={tab.activeResult !== result.id}>
-      <div class="grid-area">
-        <Grid
-          {result}
-          onactivate={(row, column) => showCell(result, row, column)}
-          onselect={(row, column) => (selection[result.id] = `Row ${formatCount(row + 1)}, ${result.columns[column].name}`)}
-        />
-      </div>
-      <footer>
-        <span>
-          {formatCount(result.rows)} {result.rows === 1 ? 'row' : 'rows'}{result.done ? '' : ', still loading…'}
-        </span>
-        {#if result.truncated}
-          <span class="limit">Row limit reached. More rows exist; raise the limit and run again to fetch them.</span>
-        {/if}
-        {#if result.elapsedMs !== null}<span class="muted">{formatDuration(result.elapsedMs)}</span>{/if}
-        <span class="spacer"></span>
-        {#if selection[result.id]}<span class="muted">{selection[result.id]}</span>{/if}
-        <span class="muted">Double-click a cell to see its full value</span>
-      </footer>
+    <div class="panel result-panel" hidden={tab.activeResult !== result.id}>
+      <ResultView {workspace} {tab} {result} />
     </div>
   {/each}
 </section>
-
-<dialog bind:this={viewer} class="viewer" aria-labelledby="cell-title" onclose={() => (openCell = null)}>
-  {#if openCell}
-    <header>
-      <h2 id="cell-title">{openCell.column} <span class="muted">row {formatCount(openCell.row + 1)}</span></h2>
-      <span class="muted">
-        {openCell.value.text === null ? 'NULL' : `${formatCount(openCell.value.bytes)} bytes`}
-        {#if openCell.value.truncated}(showing the first part only){/if}
-      </span>
-    </header>
-    {#if openCell.value.text === null}
-      <p class="null muted">NULL</p>
-    {:else}
-      <pre>{openCell.pretty ?? openCell.value.text}</pre>
-    {/if}
-    <div class="buttons">
-      <button onclick={copyOpenCell} disabled={openCell.value.text === null}>Copy</button>
-      <button class="primary" onclick={() => viewer?.close()}>Close</button>
-    </div>
-  {/if}
-</dialog>
 
 <style>
   .results {
@@ -187,42 +116,8 @@
     overflow: auto;
   }
 
-  .grid-panel {
-    display: flex;
-    flex-direction: column;
+  .result-panel {
     overflow: hidden;
-  }
-
-  .grid-area {
-    flex: 1;
-    min-height: 0;
-  }
-
-  footer {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 4px 10px;
-    border-top: 1px solid var(--border);
-    background: var(--panel);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    overflow: hidden;
-  }
-
-  footer .limit {
-    color: var(--warn-text);
-    background: var(--warn-bg);
-    border: 1px solid var(--warn-border);
-    border-radius: 4px;
-    padding: 0 6px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .spacer {
-    flex: 1;
   }
 
   .hint {
@@ -279,45 +174,5 @@
   .outcome {
     overflow-wrap: anywhere;
     user-select: text;
-  }
-
-  .viewer {
-    width: min(760px, calc(100vw - 32px));
-  }
-
-  .viewer header {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 14px 16px 8px;
-  }
-
-  .viewer h2 {
-    margin: 0;
-    font-size: 15px;
-  }
-
-  pre,
-  .null {
-    margin: 0 16px;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--panel);
-    font-family: var(--mono);
-    font-size: 12px;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    max-height: 55vh;
-    overflow: auto;
-    user-select: text;
-  }
-
-  .buttons {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 12px 16px 16px;
   }
 </style>

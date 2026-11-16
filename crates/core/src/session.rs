@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mysql_async::consts::ColumnType;
+use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Column, Conn, Opts, OptsBuilder, Params, Row, SslOpts, Value};
 use secrecy::ExposeSecret;
@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::policy;
 use crate::profile::{CaSource, ConnectProfile, TlsMode};
-use crate::store::{ColumnInfo, ColumnKind, ResultStore, RowBatch};
+use crate::store::{ColumnInfo, ColumnKind, ColumnSource, ResultStore, RowBatch};
 use crate::version::ServerVersion;
 
 /// MySQL's error code for a statement stopped by `KILL QUERY`.
@@ -129,9 +129,19 @@ fn column_info(column: &Column) -> ColumnInfo {
         _ if column.character_set() == BINARY_CHARSET => ColumnKind::Binary,
         _ => ColumnKind::Text,
     };
+    // The server names the table column behind a result column, unless the
+    // column is computed. That is what makes a result editable.
+    let (schema, table, source_column) = (column.schema_str(), column.org_table_str(), column.org_name_str());
+    let source = (!schema.is_empty() && !table.is_empty() && !source_column.is_empty()).then(|| ColumnSource {
+        schema: schema.into_owned(),
+        table: table.into_owned(),
+        column: source_column.into_owned(),
+    });
     ColumnInfo {
         name: column.name_str().into_owned(),
         kind,
+        primary_key: source.is_some() && column.flags().contains(ColumnFlags::PRI_KEY_FLAG),
+        source,
     }
 }
 
@@ -198,6 +208,25 @@ impl Session {
             .into_iter()
             .map(|row| row.unwrap().into_iter().map(text).collect())
             .collect())
+    }
+
+    /// Runs a parameterised statement that returns no rows; gives back the
+    /// number of rows it affected.
+    pub(crate) async fn exec_params(&mut self, sql: &str, params: Vec<Option<Vec<u8>>>) -> Result<u64, Error> {
+        let values: Vec<Value> = params
+            .into_iter()
+            .map(|p| p.map_or(Value::NULL, Value::Bytes))
+            .collect();
+        let params = if values.is_empty() { Params::Empty } else { Params::Positional(values) };
+        self.conn.exec_drop(sql, params).await?;
+        Ok(self.conn.affected_rows())
+    }
+
+    /// Makes the server refuse changes on this session. A second line of
+    /// defence behind the client-side check for read-only connections.
+    pub async fn set_read_only(&mut self) -> Result<(), Error> {
+        self.conn.query_drop("SET SESSION TRANSACTION READ ONLY").await?;
+        Ok(())
     }
 
     /// The default database of this session, if one is selected.

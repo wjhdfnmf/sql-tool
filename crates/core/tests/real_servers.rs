@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sqltool_core::edit::{self, CellChange, RowEdit};
+use sqltool_core::table::{self, ColumnSpec, IndexSpec, TableSpec};
 use sqltool_core::{ddl, CaSource, ColumnKind, ConnectProfile, ObjectKind, ResultStore, RunEvent, Session};
 
 fn local_dir() -> PathBuf {
@@ -243,6 +245,258 @@ async fn check_row_limit(session: &mut Session, big_query: &str) {
         let next = run(session, &format!("SELECT {expected}"), None).await;
         assert_eq!(cell(&next.sets[0].0, 0, 0).as_deref(), Some(expected));
     }
+}
+
+fn change(column: usize, value: Option<&str>) -> CellChange {
+    CellChange {
+        column,
+        value: value.map(str::to_string),
+    }
+}
+
+fn texts(store: &ResultStore) -> Vec<Vec<Option<String>>> {
+    let status = store.status();
+    (0..status.rows)
+        .map(|row| (0..status.columns.len()).map(|column| cell(store, row, column)).collect())
+        .collect()
+}
+
+/// Editing rows through the grid: planned statements run in one transaction.
+async fn check_editing(session: &mut Session) {
+    run(session, "DROP TABLE IF EXISTS sqltool_test.edit_scratch", None).await;
+    run(
+        session,
+        "CREATE TABLE sqltool_test.edit_scratch (id INT PRIMARY KEY, name VARCHAR(50) NULL, qty INT NOT NULL DEFAULT 0)",
+        None,
+    )
+    .await;
+    run(session, "INSERT INTO sqltool_test.edit_scratch VALUES (1, 'one', 10), (2, 'two', 20), (3, 'three', 30)", None).await;
+
+    let read = run(session, "SELECT id, name, qty, qty * 2 AS doubled FROM sqltool_test.edit_scratch ORDER BY id", None).await;
+    let store = &read.sets[0].0;
+    let target = session.edit_target(store).await.expect("editable");
+    assert_eq!(target.table, "edit_scratch");
+    assert_eq!(target.key_columns, [0]);
+    assert_eq!(target.columns[3], None, "a computed column cannot be edited");
+
+    let awkward = "O'Neil \\ ünï; DROP TABLE x --";
+    let planned = edit::plan(
+        &target,
+        store,
+        &[
+            RowEdit::Update { row: 0, changes: vec![change(1, Some(awkward))] },
+            RowEdit::Update { row: 1, changes: vec![change(1, None), change(2, Some("25"))] },
+            RowEdit::Delete { row: 2 },
+            RowEdit::Insert { values: vec![change(0, Some("4")), change(1, Some("four"))] },
+        ],
+    )
+    .unwrap();
+    session.apply(&planned).await.unwrap();
+
+    let after = run(session, "SELECT id, name, qty FROM sqltool_test.edit_scratch ORDER BY id", None).await;
+    let s = |v: &str| Some(v.to_string());
+    assert_eq!(
+        texts(&after.sets[0].0),
+        [vec![s("1"), s(awkward), s("10")], vec![s("2"), None, s("25")], vec![s("4"), s("four"), s("0")]]
+    );
+
+    // A failure part way through leaves everything as it was: the delete
+    // targets row 3, which the batch above already removed.
+    let doomed = edit::plan(
+        &target,
+        store,
+        &[RowEdit::Update { row: 0, changes: vec![change(1, Some("should not stick"))] }, RowEdit::Delete { row: 2 }],
+    )
+    .unwrap();
+    assert!(session.apply(&doomed).await.unwrap_err().to_string().contains("no longer exists"));
+    let unchanged = run(session, "SELECT name FROM sqltool_test.edit_scratch WHERE id = 1", None).await;
+    assert_eq!(cell(&unchanged.sets[0].0, 0, 0).as_deref(), Some(awkward));
+
+    // Results that cannot name a row are not editable.
+    let no_key = run(session, "SELECT name FROM sqltool_test.edit_scratch", None).await;
+    assert!(session.edit_target(&no_key.sets[0].0).await.is_err());
+    let view = run(session, "SELECT id, name FROM sqltool_test.people_names", None).await;
+    assert!(session.edit_target(&view.sets[0].0).await.is_err());
+    let computed = run(session, "SELECT 1 AS one", None).await;
+    assert!(session.edit_target(&computed.sets[0].0).await.is_err());
+
+    run(session, "DROP TABLE sqltool_test.edit_scratch", None).await;
+}
+
+fn new_column(name: &str, data_type: &str) -> ColumnSpec {
+    ColumnSpec {
+        name: name.into(),
+        data_type: data_type.into(),
+        ..ColumnSpec::default()
+    }
+}
+
+/// What must survive a round trip through the server.
+fn essentials(spec: &TableSpec) -> Vec<String> {
+    let mut out: Vec<String> = spec
+        .columns
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {} null={} default={:?} on_update={:?} ai={} comment={}",
+                c.name,
+                c.data_type,
+                c.nullable,
+                c.default.as_ref().map(|d| d.to_ascii_lowercase()),
+                c.on_update.as_ref().map(|d| d.to_ascii_lowercase()),
+                c.auto_increment,
+                c.comment
+            )
+        })
+        .collect();
+    out.push(format!("pk {:?}", spec.primary_key));
+    out.extend(spec.indexes.iter().map(|i| format!("index {} unique={} {:?}", i.name, i.unique, i.columns)));
+    out.push(format!("comment {}", spec.comment));
+    out
+}
+
+/// The table designer: create, read back, alter by difference, read back.
+async fn check_table_designer(session: &mut Session) {
+    for name in ["design_a", "design_b", "design_child"] {
+        run(session, &format!("DROP TABLE IF EXISTS sqltool_test.{name}"), None).await;
+    }
+    let spec = TableSpec {
+        schema: "sqltool_test".into(),
+        name: "design_a".into(),
+        columns: vec![
+            ColumnSpec { auto_increment: true, ..new_column("id", "INT") },
+            ColumnSpec { default: Some("'untitled'".into()), ..new_column("title", "VARCHAR(100)") },
+            ColumnSpec { default: Some("0".into()), ..new_column("qty", "INT") },
+            ColumnSpec { nullable: true, ..new_column("note", "TEXT") },
+            ColumnSpec {
+                default: Some("CURRENT_TIMESTAMP".into()),
+                on_update: Some("CURRENT_TIMESTAMP".into()),
+                comment: "last change; it's kept".into(),
+                ..new_column("changed_at", "TIMESTAMP")
+            },
+        ],
+        primary_key: vec!["id".into()],
+        indexes: vec![
+            IndexSpec { name: "idx_title".into(), columns: vec!["title".into()], ..IndexSpec::default() },
+            IndexSpec { name: "uq_qty_title".into(), columns: vec!["qty".into(), "title".into()], unique: true, ..IndexSpec::default() },
+        ],
+        engine: Some("InnoDB".into()),
+        collation: None,
+        comment: "designer test".into(),
+    };
+    run(session, &table::create_table(&spec).unwrap(), None).await;
+
+    let read = session.table_spec("sqltool_test", "design_a").await.unwrap().expect("table exists");
+    assert_eq!(read.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "title", "qty", "note", "changed_at"]);
+    assert!(read.columns[0].auto_increment && !read.columns[0].nullable);
+    assert_eq!(read.columns[1].default.as_deref(), Some("'untitled'"));
+    assert_eq!(read.columns[2].default.as_deref(), Some("0"));
+    assert!(read.columns[3].nullable && read.columns[3].default.is_none());
+    assert!(read.columns[4].default.as_ref().unwrap().to_ascii_lowercase().starts_with("current_timestamp"));
+    assert!(read.columns[4].on_update.as_ref().unwrap().to_ascii_lowercase().starts_with("current_timestamp"));
+    assert_eq!(read.columns[4].comment, "last change; it's kept");
+    assert_eq!(read.primary_key, ["id"]);
+    assert_eq!(read.indexes.len(), 2);
+    assert!(read.indexes.iter().any(|i| i.name == "uq_qty_title" && i.unique && i.columns == ["qty", "title"]));
+    assert!(read.columns.iter().all(|c| !c.locked) && read.indexes.iter().all(|i| !i.locked));
+    assert_eq!(read.comment, "designer test");
+    assert!(table::alter_table(&read, &read).is_err(), "nothing changed, so nothing to run");
+
+    // Rename a column, widen one, drop one, add one, add an index, change the comment.
+    let mut updated = read.clone();
+    updated.columns[1].name = "heading".into();
+    updated.columns[2].data_type = "BIGINT".into();
+    updated.columns.remove(3);
+    updated.columns.insert(1, ColumnSpec { nullable: true, ..new_column("code", "VARCHAR(10)") });
+    for index in &mut updated.indexes {
+        for column in &mut index.columns {
+            if column == "title" {
+                *column = "heading".into();
+            }
+        }
+    }
+    updated.indexes.push(IndexSpec { name: "idx_code".into(), columns: vec!["code".into()], ..IndexSpec::default() });
+    updated.comment = "changed".into();
+    let alter = table::alter_table(&read, &updated).unwrap();
+    assert!(!alter.contains("DROP INDEX"), "indexes follow the renamed column: {alter}");
+    run(session, &alter, None).await;
+
+    let after = session.table_spec("sqltool_test", "design_a").await.unwrap().unwrap();
+    assert_eq!(after.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "code", "heading", "qty", "changed_at"]);
+    assert!(after.columns[3].data_type.to_ascii_lowercase().starts_with("bigint"));
+    assert_eq!(after.columns[3].default.as_deref(), Some("0"), "the default survives the type change");
+    assert!(after.indexes.iter().any(|i| i.name == "idx_title" && i.columns == ["heading"]));
+    assert!(after.indexes.iter().any(|i| i.name == "idx_code"));
+    assert_eq!(after.comment, "changed");
+    assert!(after.columns[4].on_update.is_some(), "an untouched column keeps its ON UPDATE");
+
+    // What was read back is enough to build an identical table.
+    let mut copy = after.clone();
+    copy.name = "design_b".into();
+    run(session, &table::create_table(&copy).unwrap(), None).await;
+    let rebuilt = session.table_spec("sqltool_test", "design_b").await.unwrap().unwrap();
+    assert_eq!(essentials(&rebuilt), essentials(&after));
+
+    // Foreign keys are reported for the information pane.
+    run(
+        session,
+        "CREATE TABLE sqltool_test.design_child (id INT PRIMARY KEY, parent INT NOT NULL, \
+         CONSTRAINT fk_parent FOREIGN KEY (parent) REFERENCES sqltool_test.design_a (id) ON DELETE CASCADE)",
+        None,
+    )
+    .await;
+    let keys = session.foreign_keys("sqltool_test", "design_child").await.unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!((keys[0].name.as_str(), keys[0].referenced_table.as_str()), ("fk_parent", "design_a"));
+    assert_eq!((keys[0].columns.as_slice(), keys[0].referenced_columns.as_slice()), (&["parent".to_string()][..], &["id".to_string()][..]));
+    assert_eq!(keys[0].on_delete, "CASCADE");
+    assert!(session.foreign_keys("sqltool_test", "design_a").await.unwrap().is_empty());
+
+    for name in ["design_child", "design_b", "design_a"] {
+        run(session, &table::drop_object(ObjectKind::Table, "sqltool_test", name), None).await;
+    }
+    assert_eq!(session.table_spec("sqltool_test", "design_a").await.unwrap(), None);
+}
+
+/// Completion data, sorting and filtering, and the read-only switch.
+async fn check_extras(profile: &ConnectProfile) {
+    let mut session = Session::connect(profile).await.unwrap();
+    let completion = session.completion_columns("sqltool_test").await.unwrap();
+    assert!(completion.contains(&("people".to_string(), "email".to_string())));
+
+    let out = run(&mut session, "SELECT id, name FROM sqltool_test.people", None).await;
+    let store = &out.sets[0].0;
+    assert_eq!(store.set_view(None, Some((1, true))), 3);
+    assert_eq!(cell(store, 0, 1).as_deref(), Some("Zoë Müller"), "sorted by name, descending");
+    assert_eq!(store.set_view(Some("grace"), None), 1);
+    assert_eq!(cell(store, 0, 0).as_deref(), Some("2"));
+
+    session.set_read_only().await.unwrap();
+    assert!(session.run("SELECT COUNT(*) FROM sqltool_test.people", None, |_| {}).await.is_ok());
+    let refused = session
+        .run("INSERT INTO sqltool_test.people (name) VALUES ('must not appear')", None, |_| {})
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("READ ONLY") || refused.contains("read-only") || refused.contains("1792"), "{refused}");
+}
+
+#[tokio::test]
+#[ignore = "needs the MariaDB test server from tests/servers/mariadb-pam.sh"]
+async fn mariadb_editing_designer_and_extras() {
+    let mut session = Session::connect(&mariadb()).await.unwrap();
+    check_editing(&mut session).await;
+    check_table_designer(&mut session).await;
+    check_extras(&mariadb()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs the MySQL 8.4 test server from tests/servers/mysql84.sh"]
+async fn mysql84_editing_designer_and_extras() {
+    let mut session = Session::connect(&mysql84()).await.unwrap();
+    check_editing(&mut session).await;
+    check_table_designer(&mut session).await;
+    check_extras(&mysql84()).await;
 }
 
 #[tokio::test]

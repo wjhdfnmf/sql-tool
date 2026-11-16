@@ -17,9 +17,11 @@
     onuse: (schema: string) => void;
     /** A right-click (or the menu key). `target` is null on empty space. */
     oncontext: (target: TreeTarget | null, x: number, y: number) => void;
+    /** A schema was expanded; its names are worth loading for completion. */
+    onloaded: (schema: string) => void;
   }
 
-  let { workspaceId, current, version, selected, onselect, onopen, onuse, oncontext }: Props = $props();
+  let { workspaceId, current, version, selected, onselect, onopen, onuse, oncontext, onloaded }: Props = $props();
 
   type Loaded<T> = { state: 'loading' } | { state: 'error'; message: string } | { state: 'ready'; value: T };
 
@@ -35,6 +37,7 @@
     objects[schema] = { state: 'loading' };
     try {
       objects[schema] = { state: 'ready', value: await backend.schemaObjects(workspaceId, schema) };
+      onloaded(schema);
     } catch (e) {
       objects[schema] = { state: 'error', message: asUiError(e).message };
     }

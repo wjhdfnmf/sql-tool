@@ -34,7 +34,7 @@ impl ObjectKind {
     }
 }
 
-fn check_name(name: &str) -> Result<(), Error> {
+pub(crate) fn check_name(name: &str) -> Result<(), Error> {
     if name.trim().is_empty() {
         return Err(Error::Other("Enter a name.".into()));
     }
@@ -46,7 +46,7 @@ fn check_name(name: &str) -> Result<(), Error> {
 
 /// Character set and collation names go into SQL unquoted, so only plain
 /// words are accepted.
-fn check_word(what: &str, value: &str) -> Result<(), Error> {
+pub(crate) fn check_word(what: &str, value: &str) -> Result<(), Error> {
     if !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         Ok(())
     } else {

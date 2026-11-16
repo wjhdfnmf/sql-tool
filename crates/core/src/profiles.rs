@@ -43,6 +43,10 @@ pub struct SavedProfile {
     pub save_password: bool,
     /// Colour tag shown in the UI, for example to mark production.
     pub color: Option<String>,
+    /// Refuse anything that is not a read, in the tool and on the server.
+    pub read_only: bool,
+    /// Ask before structure changes and before UPDATE or DELETE without WHERE.
+    pub production: bool,
 }
 
 impl Default for SavedProfile {
@@ -60,6 +64,8 @@ impl Default for SavedProfile {
             cleartext_risk_accepted: false,
             save_password: false,
             color: None,
+            read_only: false,
+            production: false,
         }
     }
 }

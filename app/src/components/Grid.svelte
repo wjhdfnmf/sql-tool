@@ -1,22 +1,31 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { backend } from '../lib/backend';
-  import { GridView } from '../lib/grid';
+  import { GridView, type GridOverlay } from '../lib/grid';
   import type { ResultTab } from '../lib/state.svelte';
 
   interface Props {
     result: ResultTab;
+    /** Rows to show: the result's rows, or fewer while a filter is on. */
+    rows: number;
+    /** Changes whenever the rows change order or number, so the grid reloads. */
+    viewVersion: number;
+    sort: { column: number; descending: boolean } | null;
+    overlay: GridOverlay;
     /** A cell was opened (double-click or Enter). */
     onactivate: (row: number, column: number) => void;
     onselect: (row: number, column: number) => void;
+    onsort: (column: number) => void;
+    oncontext: (row: number, column: number, x: number, y: number) => void;
   }
 
-  let { result, onactivate, onselect }: Props = $props();
+  let { result, rows, viewVersion, sort, overlay, onactivate, onselect, onsort, oncontext }: Props = $props();
 
   let canvas: HTMLCanvasElement;
   let scroller: HTMLDivElement;
   let spacer: HTMLDivElement;
   let grid = $state<GridView | undefined>();
+  let seenVersion = 0;
 
   async function copyCell(row: number, column: number) {
     try {
@@ -29,9 +38,11 @@
 
   onMount(() => {
     const view = new GridView(canvas, scroller, spacer, (offset, count) => backend.getRows(result.id, offset, count), {
-      onActivate: onactivate,
-      onSelect: onselect,
+      onActivate: (row, column) => onactivate(row, column),
+      onSelect: (row, column) => onselect(row, column),
       onCopy: copyCell,
+      onSort: (column) => onsort(column),
+      onContext: (row, column, x, y) => oncontext(row, column, x, y),
     });
     view.setColumns(result.columns);
     grid = view;
@@ -39,14 +50,29 @@
   });
 
   $effect(() => {
-    grid?.setRowCount(result.rows);
+    if (!grid) return;
+    if (viewVersion !== seenVersion) {
+      // Sorted or filtered: everything cached is for the old order.
+      seenVersion = viewVersion;
+      grid.resetRows(rows);
+    } else {
+      grid.setRowCount(rows);
+    }
+  });
+
+  $effect(() => {
+    grid?.setSort(sort);
+  });
+
+  $effect(() => {
+    grid?.setOverlay(overlay);
   });
 </script>
 
 <div class="grid">
   <canvas bind:this={canvas}></canvas>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="scroller" bind:this={scroller} tabindex="0" role="grid" aria-label={`${result.title}, ${result.rows} rows`}>
+  <div class="scroller" bind:this={scroller} tabindex="0" role="grid" aria-label={`${result.title}, ${rows} rows`}>
     <div bind:this={spacer}></div>
   </div>
 </div>

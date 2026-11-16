@@ -4,8 +4,18 @@
   import { backend } from '../lib/backend';
   import { separator, type MenuDef, type MenuItem } from '../lib/menu';
   import { app, type EditorTab, type WorkspaceState } from '../lib/state.svelte';
-  import { asUiError, formatDuration, quoteIdentifier, serverLabel, type ObjectKind, type TreeTarget } from '../lib/types';
+  import {
+    asUiError,
+    formatDuration,
+    quoteIdentifier,
+    serverLabel,
+    type Concern,
+    type ObjectAction,
+    type ObjectKind,
+    type TreeTarget,
+  } from '../lib/types';
   import AdminPanel from './AdminPanel.svelte';
+  import ConfirmSqlDialog from './ConfirmSqlDialog.svelte';
   import Editor from './Editor.svelte';
   import HistoryPanel from './HistoryPanel.svelte';
   import InfoPane from './InfoPane.svelte';
@@ -14,6 +24,7 @@
   import Results from './Results.svelte';
   import SchemaDialog from './SchemaDialog.svelte';
   import SchemaTree from './SchemaTree.svelte';
+  import TableDesigner from './TableDesigner.svelte';
 
   interface Props {
     workspace: WorkspaceState;
@@ -29,6 +40,12 @@
   let contextMenu = $state<{ items: MenuItem[]; x: number; y: number } | null>(null);
   /** Open schema dialog: `schema` null creates, a name alters. */
   let schemaDialog = $state<{ schema: string | null } | null>(null);
+  /** Open table designer: `table` null creates, a name alters. */
+  let designer = $state<{ schema: string; table: string | null } | null>(null);
+  /** Open drop, truncate or rename confirmation. */
+  let danger = $state<{ action: ObjectAction; kind: ObjectKind; schema: string; name: string } | null>(null);
+  /** Statements waiting for a go-ahead on a production connection. */
+  let confirmation = $state<{ concerns: Concern[]; resolve: (go: boolean) => void } | null>(null);
   let closing = $state<EditorTab | null>(null);
   let closeDialog: HTMLDialogElement;
   let aboutDialog: HTMLDialogElement;
@@ -51,6 +68,19 @@
     { label: '100,000 rows', value: 100_000 },
     { label: 'No limit', value: null },
   ];
+
+  // On a production connection, risky statements wait for a go-ahead here.
+  $effect(() => {
+    workspace.confirmRun = (concerns) => new Promise((resolve) => (confirmation = { concerns, resolve }));
+    return () => {
+      workspace.confirmRun = null;
+    };
+  });
+
+  function answerConfirmation(go: boolean) {
+    confirmation?.resolve(go);
+    confirmation = null;
+  }
 
   // ---------- running ----------
 
@@ -166,11 +196,19 @@
     }
   }
 
-  async function alterObject(target: TreeTarget) {
-    if (target.kind === 'schema' || target.name === null) {
-      schemaDialog = { schema: target.schema };
-      return;
-    }
+  function openDesigner(table: string | null, schema?: string) {
+    designer = { schema: schema ?? workspace.selected?.schema ?? workspace.database ?? '', table };
+  }
+
+  /** Opens the designer for tables and the schema dialog for schemas. */
+  function alterObject(target: TreeTarget) {
+    if (target.kind === 'schema' || target.name === null) schemaDialog = { schema: target.schema };
+    else if (target.kind === 'table') openDesigner(target.name, target.schema);
+    else void alterAsScript(target);
+  }
+
+  async function alterAsScript(target: TreeTarget) {
+    if (target.kind === 'schema' || target.name === null) return;
     try {
       workspace.addTab(await backend.alterScript(info.id, target.kind, target.schema, target.name), `Alter ${target.name}`);
     } catch (e) {
@@ -181,7 +219,11 @@
   async function applySchemaChange(sql: string): Promise<string | null> {
     const error = await workspace.execute(sql);
     if (error === null) {
+      const changed = designer?.schema ?? danger?.schema;
       schemaDialog = null;
+      designer = null;
+      danger = null;
+      if (changed) void workspace.loadCatalog(changed, true);
       workspace.treeVersion++;
       historyKey++;
       tab.report(`Done: ${sql}`, 'ok');
@@ -212,24 +254,42 @@
         return [
           { label: 'Set as Default Schema', checked: workspace.database === target.schema, action: () => void useSchema(target.schema) },
           separator,
-          { label: 'Alter Schema…', action: () => void alterObject(target) },
-          create('Create Table…', 'table'),
+          { label: 'Alter Schema…', action: () => alterObject(target) },
+          { label: 'Create Table…', action: () => openDesigner(null, target.schema) },
           create('Create View…', 'view'),
           create('Create Stored Procedure…', 'procedure'),
           create('Create Function…', 'function'),
           separator,
           copyName,
           separator,
+          { label: 'Drop Schema…', action: () => (danger = { action: 'dropSchema', kind: 'table', schema: target.schema, name: target.schema }) },
+          separator,
           ...always,
         ];
       case 'table':
       case 'view': {
         const name = target.name ?? '';
+        const kind = target.kind;
+        const ask = (action: ObjectAction) => () => (danger = { action, kind, schema: target.schema, name });
         return [
           { label: 'Select Rows (Limit 1000)', action: () => openTable(target.schema, name) },
           separator,
-          { label: target.kind === 'table' ? 'Alter Table…' : 'Alter View…', action: () => void alterObject(target) },
-          create(target.kind === 'table' ? 'Create Table…' : 'Create View…', target.kind),
+          ...(kind === 'table'
+            ? [
+                { label: 'Alter Table…', action: () => alterObject(target) },
+                { label: 'Alter Table (SQL Script)…', action: () => void alterAsScript(target) },
+                { label: 'Create Table…', action: () => openDesigner(null, target.schema) },
+                separator,
+                { label: 'Rename Table…', action: ask('rename') },
+                { label: 'Truncate Table…', action: ask('truncate') },
+                { label: 'Drop Table…', action: ask('drop') },
+              ]
+            : [
+                { label: 'Alter View…', action: () => alterObject(target) },
+                create('Create View…', 'view'),
+                separator,
+                { label: 'Drop View…', action: ask('drop') },
+              ]),
           separator,
           copyName,
           separator,
@@ -238,9 +298,12 @@
       }
       default: {
         const label = { procedure: 'Stored Procedure', function: 'Function', trigger: 'Trigger', event: 'Event' }[target.kind];
+        const kind = target.kind;
         return [
-          { label: `Alter ${label}…`, action: () => void alterObject(target) },
+          { label: `Alter ${label}…`, action: () => alterObject(target) },
           create(`Create ${label}…`, target.kind),
+          separator,
+          { label: `Drop ${label}…`, action: () => (danger = { action: 'drop', kind, schema: target.schema, name: target.name ?? '' }) },
           separator,
           copyName,
           separator,
@@ -314,7 +377,7 @@
         { label: 'Refresh All Schemas', action: refreshSchemas },
         { label: 'Create Schema…', action: () => (schemaDialog = { schema: null }) },
         separator,
-        { label: 'Create Table…', action: () => void createFromTemplate('table') },
+        { label: 'Create Table…', action: () => openDesigner(null) },
         { label: 'Create View…', action: () => void createFromTemplate('view') },
         { label: 'Create Stored Procedure…', action: () => void createFromTemplate('procedure') },
         { label: 'Create Function…', action: () => void createFromTemplate('function') },
@@ -372,6 +435,10 @@
     handle.addEventListener('pointerup', stop);
   }
 
+  function modal(node: HTMLDialogElement) {
+    node.showModal();
+  }
+
   function resizeByKey(e: KeyboardEvent) {
     if (e.key === 'ArrowUp') editorHeight = Math.max(90, editorHeight - 24);
     else if (e.key === 'ArrowDown') editorHeight = Math.min(main.clientHeight - 200, editorHeight + 24);
@@ -390,7 +457,7 @@
     <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open Script</button>
     <span class="divider"></span>
     <button onclick={() => (schemaDialog = { schema: null })} title="Create a new schema">Create Schema</button>
-    <button onclick={() => createFromTemplate('table')} title="Start a CREATE TABLE script">Create Table</button>
+    <button onclick={() => openDesigner(null)} title="Design a new table">Create Table</button>
     <button onclick={() => createFromTemplate('view')} title="Start a CREATE VIEW script">Create View</button>
     <button onclick={() => createFromTemplate('procedure')} title="Start a CREATE PROCEDURE script">Create Procedure</button>
   </div>
@@ -418,6 +485,7 @@
           onopen={openTable}
           onuse={useSchema}
           oncontext={(target, x, y) => (contextMenu = { items: treeMenu(target), x, y })}
+          onloaded={(schema) => void workspace.loadCatalog(schema)}
         />
       </div>
       <div class="side-body" hidden={navTab !== 'admin'}>
@@ -503,6 +571,8 @@
             bind:this={editors[t.id]}
             value={t.text}
             {mariadb}
+            catalog={workspace.catalog}
+            defaultSchema={workspace.database}
             onchange={(text) => (t.text = text)}
             onrun={(all) => run(t, all ? 'script' : 'statement')}
           />
@@ -525,7 +595,7 @@
 
       {#each workspace.tabs as t (t.id)}
         <div class="results-area" hidden={!workspace.showOutput || t.id !== workspace.activeTabId}>
-          <Results tab={t} />
+          <Results {workspace} tab={t} />
         </div>
       {/each}
     </div>
@@ -536,6 +606,8 @@
     <span>{info.user}@{info.host}</span>
     <span class={`security ${security.level}`}>{security.text}</span>
     <span>Schema: {workspace.database ?? 'none selected'}</span>
+    {#if info.readOnly}<span class="badge" title="Only reads are allowed on this connection">Read-only</span>{/if}
+    {#if info.production}<span class="badge production" title="Risky statements ask for confirmation">Production</span>{/if}
     <span class="spacer"></span>
     {#if tab.running}
       <span>Running&hellip;</span>
@@ -551,6 +623,35 @@
 
 {#if schemaDialog}
   <SchemaDialog workspaceId={info.id} schema={schemaDialog.schema} onclose={() => (schemaDialog = null)} onapply={applySchemaChange} />
+{/if}
+
+{#if designer}
+  <TableDesigner workspaceId={info.id} schema={designer.schema} table={designer.table} onclose={() => (designer = null)} onapply={applySchemaChange} />
+{/if}
+
+{#if danger}
+  <ConfirmSqlDialog {...danger} onclose={() => (danger = null)} onapply={applySchemaChange} />
+{/if}
+
+{#if confirmation}
+  <dialog use:modal aria-labelledby="confirm-run-title" oncancel={() => answerConfirmation(false)}>
+    <div class="prompt confirm">
+      <h2 id="confirm-run-title">Run this on {info.name}?</h2>
+      <p class="warning-box">This connection is marked as production. Check these statements before they run.</p>
+      <ul>
+        {#each confirmation.concerns as concern (concern.index)}
+          <li>
+            <strong>{concern.reason}</strong>
+            <code>{concern.sql}</code>
+          </li>
+        {/each}
+      </ul>
+      <div class="buttons">
+        <button onclick={() => answerConfirmation(false)}>Cancel</button>
+        <button class="danger" onclick={() => answerConfirmation(true)}>Run Anyway</button>
+      </div>
+    </div>
+  </dialog>
 {/if}
 
 <dialog bind:this={closeDialog} aria-labelledby="close-title" onclose={() => (closing = null)}>
@@ -831,6 +932,45 @@
   .security.bad {
     color: var(--danger);
     font-weight: 600;
+  }
+
+  .badge {
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 5px;
+  }
+
+  .badge.production {
+    color: var(--danger);
+    border-color: var(--danger);
+    font-weight: 600;
+  }
+
+  .prompt.confirm {
+    width: 560px;
+  }
+
+  .prompt ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 40vh;
+    overflow: auto;
+  }
+
+  .prompt li {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .prompt code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
   }
 
   .prompt {

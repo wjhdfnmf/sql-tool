@@ -14,6 +14,9 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **Editor**: tabs, MySQL and MariaDB syntax highlighting, run the statement at the cursor (Ctrl+Enter) or the whole script (Ctrl+Shift+Enter), `DELIMITER` support, stop a running statement.
 - **Results**: rows appear while they stream, in a grid that stays smooth with millions of rows. Resizable columns, full-value viewer, one tab per result set.
 - **Row limit**: 1,000 to 100,000 rows per result, or none. At the limit the query is interrupted on the server.
+- **Working with results**: sort and filter without re-running, export as CSV, TSV, JSON or SQL INSERT, and edit rows in place with changes reviewed as SQL and applied in one transaction.
+- **Table designer**: create and alter tables in a form that shows the SQL before it runs.
+- **Safety**: read-only connections, and confirmation of risky statements on connections marked as production.
 - **Schema browser**: schemas, tables, views, columns, routines, triggers and events, loaded on demand, with right-click actions and an information pane for the selected object.
 - **Schema changes**: create and alter schemas in a dialog that shows the SQL first; create and alter tables, views and routines from generated scripts.
 - **Menus and toolbars**: menu bar, toolbars, open and save script files, explain the statement under the cursor, reformat a query.
@@ -32,7 +35,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - "Verify CA" mode currently behaves like full verification, because of a defect in the database driver. Servers using MySQL's auto-generated certificates can only be reached with "encrypted, not verified".
 - `sha256_password` accounts are not supported.
 - Results are held in memory. With the row limit set to "none", a very large table can exhaust it.
-- No automatic reconnect, no commit/rollback controls, no table designer, no data editing, no export yet.
+- No automatic reconnect and no commit/rollback controls yet.
 - Release binaries are not code-signed, so Windows shows a warning when you run one.
 
 [PLAN.md](PLAN.md) has the design, the roadmap and the test results in detail.
