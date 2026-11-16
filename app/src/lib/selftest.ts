@@ -489,6 +489,38 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { lostMessage: failure.message.slice(0, 80), cancelMs: elapsed };
   });
 
+  await step('the default schema is the connection\'s: new and other tabs adopt it', async () => {
+    expect(workspace, 'not connected');
+    const schemaOf = async (tab: string) => {
+      const messages: RunMsg[] = [];
+      await backend.run(workspace!.id, tab, 'SELECT DATABASE() AS db', { kind: 'all' }, null, (m) => messages.push(m));
+      const set = ofType(messages, 'resultSet')[0];
+      expect(set, `no result in ${tab}: ${ofType(messages, 'failed')[0]?.message}`);
+      const value = decodeCells(await backend.getRows(set.resultId, 0, 1), 1).values[0];
+      await backend.closeResults([set.resultId]);
+      return value;
+    };
+    await backend.setDefaultSchema(workspace.id, 'information_schema');
+    // A tab that has never run anything: its connection is opened now.
+    const fresh = `selftest-fresh-${workspace.id}`;
+    const inNewTab = await schemaOf(fresh);
+    // A tab that already had the old default.
+    const inOldTab = await schemaOf(tabId);
+    await backend.closeTab(workspace.id, fresh);
+    await backend.setDefaultSchema(workspace.id, config.schema);
+    const back = await schemaOf(tabId);
+    expect(inNewTab === 'information_schema', `a new tab had default schema ${inNewTab}`);
+    expect(inOldTab === 'information_schema', `an existing tab kept default schema ${inOldTab}`);
+    expect(back === config.schema, `after switching back the tab had ${back}`);
+    try {
+      await backend.setDefaultSchema(workspace.id, 'no_such_schema_selftest');
+      throw new Error('a schema that does not exist was accepted');
+    } catch (e) {
+      expect(asUiError(e).message.includes('no_such_schema_selftest') || asUiError(e).kind === 'server' || asUiError(e).kind === 'access-denied', `unexpected: ${asUiError(e).message}`);
+    }
+    return { inNewTab, inOldTab, back };
+  });
+
   await step('default schema follows USE', async () => {
     const messages = await run(`USE \`${config.schema}\``, { kind: 'all' }, null);
     const changed = ofType(messages, 'database')[0];

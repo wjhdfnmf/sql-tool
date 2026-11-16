@@ -74,10 +74,33 @@ function loadSavedTabs(profileId: string | null): SavedTab[] {
   }
 }
 
-/** Forgets the query tabs kept for a connection that has been deleted. */
+/** The default schema last chosen for each saved connection, selected again when it is next opened. */
+const SCHEMA_KEY = 'sqltool.schema.';
+
+function rememberSchema(profileId: string | null, schema: string | null): void {
+  if (!profileId) return;
+  try {
+    if (schema) localStorage.setItem(SCHEMA_KEY + profileId, schema);
+    else localStorage.removeItem(SCHEMA_KEY + profileId);
+  } catch {
+    // Remembering it is a convenience.
+  }
+}
+
+function rememberedSchema(profileId: string | null): string | null {
+  if (!profileId) return null;
+  try {
+    return localStorage.getItem(SCHEMA_KEY + profileId);
+  } catch {
+    return null;
+  }
+}
+
+/** Forgets what was kept for a connection that has been deleted: its query tabs and default schema. */
 export function forgetSavedTabs(profileId: string): void {
   try {
     localStorage.removeItem(TABS_KEY + profileId);
+    localStorage.removeItem(SCHEMA_KEY + profileId);
   } catch {
     // Nothing was stored.
   }
@@ -154,6 +177,24 @@ export class WorkspaceState {
     if (saved.length === 0) this.addTab();
     else this.activeTabId = this.tabs[0].id;
     if (info.database) void this.loadCatalog(info.database);
+    // The default schema chosen last time, if the connection does not name one itself.
+    const schema = rememberedSchema(info.profileId);
+    if (schema && schema !== info.database) {
+      // It may have been dropped since; then there is simply no default.
+      this.setDefaultSchema(schema).catch(() => rememberSchema(info.profileId, null));
+    }
+  }
+
+  /**
+   * Makes a schema the default for every tab of this connection. Each tab
+   * has a session of its own; the backend selects the schema in each before
+   * its next run, and in tabs opened later.
+   */
+  async setDefaultSchema(schema: string): Promise<void> {
+    await backend.setDefaultSchema(this.info.id, schema);
+    this.database = schema;
+    rememberSchema(this.info.profileId, schema);
+    void this.loadCatalog(schema);
   }
 
   /** Writes the open tabs' text to local storage, for the next time this connection is opened. */
@@ -388,6 +429,7 @@ export class WorkspaceState {
         break;
       case 'database':
         this.database = m.name;
+        rememberSchema(this.info.profileId, m.name);
         if (m.name) void this.loadCatalog(m.name);
         break;
       case 'finished':
@@ -406,6 +448,10 @@ class AppState {
   active = $state<'home' | number>('home');
   /** The Settings screen is open. */
   showSettings = $state(false);
+  /** The help screen (shortcuts and where things are) is open. */
+  showHelp = $state(false);
+  /** The end of the row of connection tabs, where the connection in front shows its buttons. */
+  toolsHost = $state<HTMLElement | undefined>();
 
   get activeWorkspace(): WorkspaceState | null {
     return this.workspaces.find((w) => w.info.id === this.active) ?? null;

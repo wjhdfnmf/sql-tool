@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { applyTheme, defaultSettings, settings, themes } from '../lib/settings.svelte';
+  import { applyTheme, defaultSettings, settings, themeGroups, themes } from '../lib/settings.svelte';
   import { asUiError, type Settings } from '../lib/types';
 
   interface Props {
@@ -68,8 +68,12 @@
         <label>
           <span>Theme</span>
           <select bind:value={draft.theme}>
-            {#each themes as theme (theme.value)}
-              <option value={theme.value}>{theme.label}</option>
+            {#each themeGroups as group (group)}
+              <optgroup label={group}>
+                {#each themes.filter((t) => t.group === group) as theme (theme.value)}
+                  <option value={theme.value}>{theme.label}</option>
+                {/each}
+              </optgroup>
             {/each}
           </select>
           <span class="muted note">{themes.find((t) => t.value === draft.theme)?.note}</span>

@@ -18,12 +18,13 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **Working with results**: sort and filter without re-running, export as CSV, TSV, JSON or SQL INSERT, and edit rows in place with changes reviewed as SQL and applied in one transaction.
 - **Table designer**: create and alter tables in a tab of their own, next to the query tabs. Columns, indexes and foreign keys each have a section; index and key columns are picked from the table's columns. The SQL that will run is always in view, and nothing runs until Apply is clicked.
 - **Safety**: read-only connections, and confirmation of risky statements on connections marked as production.
-- **Schema browser**: schemas, tables, views, columns, routines, triggers and events, loaded on demand, with right-click actions. Clicking a table shows its columns and indexes in the information pane below the tree.
+- **Schema browser**: schemas with their tables, views, stored procedures and functions, loaded on demand; every group has a + to add one. Filter by table, or by `schema.table`. Clicking a table shows its columns and indexes in the object info pane below, which can be dragged taller or shorter; the whole navigator can be dragged wider or narrower. Right-click for everything else.
 - **Schema changes**: create and alter schemas in a tab that shows the SQL first; create and alter views and routines from generated scripts.
-- **Menus and toolbars**: menu bar, toolbars, open and save script files, explain the statement under the cursor, reformat a query.
+- **Layout**: no menu bar. Navigator, Output and one menu button (history, connection info, create, server information, settings, help) sit at the end of the row of connection tabs. Query tabs stay on one row, with first/previous/next/last arrows and a list of all open tabs; a tab with a query running is coloured. Tabs run independently, so several can run at once. The output appears when a tab first has something to show, and its filter, export and copy controls share the row of result tabs.
 - **History**: searchable. Statements that contain a password are not stored in full.
 - **Timeouts and dropped connections**: connecting gives up after 15 seconds (adjustable). A query runs until it finishes or is stopped, unless a query timeout is set, in which case it is interrupted on the server. A connection the server has closed for sitting idle is reopened before the next statement is sent, with a note in the output; an optional keep-alive prevents the closing.
-- **Settings and themes**: light, dark, midnight, sepia and high-contrast themes, or follow the system; size of text; editor indent and wrapping; default row limit; timeouts; whether history and open tabs are kept.
+- **Settings and themes**: sixteen themes, soft to bold, light and dark, each checked for readable contrast in the editor and grid (`python tools/themes.py . --check`); size of text; editor indent and wrapping; default row limit; timeouts; whether history and open tabs are kept.
+- **Default schema**: one per connection, used by every query tab, and remembered for the next time the connection is opened.
 
 ## Security defaults
 
