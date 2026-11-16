@@ -134,75 +134,117 @@ fn json_value(value: Option<&[u8]>, kind: ColumnKind) -> serde_json::Value {
     }
 }
 
-/// Writes the store's visible rows to `out`. `table` names the target of the
-/// INSERT statements and is ignored by the other formats. Returns the number
-/// of rows written.
-pub fn write(store: &ResultStore, format: ExportFormat, table: &str, out: &mut impl Write) -> io::Result<u64> {
-    let columns: Vec<ColumnInfo> = store.status().columns;
-    let kind = |index: usize| columns.get(index).map_or(ColumnKind::Text, |c| c.kind);
+/// Writes rows in one export format, one row at a time. The rows can come
+/// from a result store or straight off the connection, so a result far
+/// larger than memory can be exported.
+pub struct RowWriter {
+    format: ExportFormat,
+    columns: Vec<ColumnInfo>,
+    /// The start of each INSERT statement.
+    insert: String,
+    rows: u64,
+}
 
-    match format {
-        ExportFormat::Csv | ExportFormat::Tsv => {
-            let separator: &[u8] = if format == ExportFormat::Csv { b"," } else { b"\t" };
-            for (i, column) in columns.iter().enumerate() {
-                if i > 0 {
-                    out.write_all(separator)?;
-                }
-                if format == ExportFormat::Csv {
-                    csv_field(out, Some(column.name.as_bytes()), ColumnKind::Text)?;
-                } else {
-                    tsv_field(out, Some(column.name.as_bytes()), ColumnKind::Text)?;
-                }
-            }
-            out.write_all(b"\n")?;
-            store.for_each_row(|cells| {
-                for (i, cell) in cells.enumerate() {
+impl RowWriter {
+    /// `table` names the target of the INSERT statements and is ignored by the other formats.
+    pub fn new(format: ExportFormat, columns: Vec<ColumnInfo>, table: &str) -> Self {
+        let target = quote_identifier(if table.trim().is_empty() { "table_name" } else { table.trim() });
+        let names: Vec<String> = columns.iter().map(|c| quote_identifier(&c.name)).collect();
+        Self {
+            format,
+            insert: format!("INSERT INTO {target} ({}) VALUES (", names.join(", ")),
+            columns,
+            rows: 0,
+        }
+    }
+
+    fn kind(&self, index: usize) -> ColumnKind {
+        self.columns.get(index).map_or(ColumnKind::Text, |c| c.kind)
+    }
+
+    /// Writes whatever comes before the first row: the header line, or the opening bracket.
+    pub fn begin(&mut self, out: &mut impl Write) -> io::Result<()> {
+        match self.format {
+            ExportFormat::Csv | ExportFormat::Tsv => {
+                for (i, column) in self.columns.iter().enumerate() {
                     if i > 0 {
-                        out.write_all(separator)?;
+                        out.write_all(if self.format == ExportFormat::Csv { b"," } else { b"\t" })?;
                     }
-                    if format == ExportFormat::Csv {
-                        csv_field(out, cell, kind(i))?;
+                    if self.format == ExportFormat::Csv {
+                        csv_field(out, Some(column.name.as_bytes()), ColumnKind::Text)?;
                     } else {
-                        tsv_field(out, cell, kind(i))?;
+                        tsv_field(out, Some(column.name.as_bytes()), ColumnKind::Text)?;
                     }
                 }
                 out.write_all(b"\n")
-            })
+            }
+            ExportFormat::Json => out.write_all(b"["),
+            ExportFormat::Sql => Ok(()),
         }
-        ExportFormat::Json => {
-            out.write_all(b"[")?;
-            let mut first = true;
-            let rows = store.for_each_row(|cells| {
+    }
+
+    pub fn row<'a>(&mut self, out: &mut impl Write, cells: impl Iterator<Item = Option<&'a [u8]>>) -> io::Result<()> {
+        match self.format {
+            ExportFormat::Csv | ExportFormat::Tsv => {
+                for (i, cell) in cells.enumerate() {
+                    if i > 0 {
+                        out.write_all(if self.format == ExportFormat::Csv { b"," } else { b"\t" })?;
+                    }
+                    if self.format == ExportFormat::Csv {
+                        csv_field(out, cell, self.kind(i))?;
+                    } else {
+                        tsv_field(out, cell, self.kind(i))?;
+                    }
+                }
+                out.write_all(b"\n")?;
+            }
+            ExportFormat::Json => {
                 let object: serde_json::Map<String, serde_json::Value> = cells
                     .enumerate()
                     .map(|(i, cell)| {
-                        let name = columns.get(i).map_or_else(|| format!("column_{i}"), |c| c.name.clone());
-                        (name, json_value(cell, kind(i)))
+                        let name = self.columns.get(i).map_or_else(|| format!("column_{i}"), |c| c.name.clone());
+                        (name, json_value(cell, self.kind(i)))
                     })
                     .collect();
-                out.write_all(if first { b"\n  " } else { b",\n  " })?;
-                first = false;
-                serde_json::to_writer(&mut *out, &object).map_err(io::Error::other)
-            })?;
-            out.write_all(if rows == 0 { b"]\n" } else { b"\n]\n" })?;
-            Ok(rows)
-        }
-        ExportFormat::Sql => {
-            let target = quote_identifier(if table.trim().is_empty() { "table_name" } else { table.trim() });
-            let names: Vec<String> = columns.iter().map(|c| quote_identifier(&c.name)).collect();
-            let prefix = format!("INSERT INTO {target} ({}) VALUES (", names.join(", "));
-            store.for_each_row(|cells| {
-                out.write_all(prefix.as_bytes())?;
+                out.write_all(if self.rows == 0 { b"\n  " } else { b",\n  " })?;
+                serde_json::to_writer(&mut *out, &object).map_err(io::Error::other)?;
+            }
+            ExportFormat::Sql => {
+                out.write_all(self.insert.as_bytes())?;
                 for (i, cell) in cells.enumerate() {
                     if i > 0 {
                         out.write_all(b", ")?;
                     }
-                    out.write_all(sql_literal(cell, kind(i)).as_bytes())?;
+                    out.write_all(sql_literal(cell, self.kind(i)).as_bytes())?;
                 }
-                out.write_all(b");\n")
-            })
+                out.write_all(b");\n")?;
+            }
         }
+        self.rows += 1;
+        Ok(())
     }
+
+    /// Writes whatever comes after the last row. Returns the number of rows written.
+    pub fn end(&mut self, out: &mut impl Write) -> io::Result<u64> {
+        if self.format == ExportFormat::Json {
+            out.write_all(if self.rows == 0 { b"]\n" } else { b"\n]\n" })?;
+        }
+        Ok(self.rows)
+    }
+}
+
+/// Writes the store's visible rows to `out`. `table` names the target of the
+/// INSERT statements and is ignored by the other formats. Returns the number
+/// of rows written.
+///
+/// This is what the store holds, which is not always everything the query
+/// returns: a result stopped at the row limit holds only the rows up to it.
+/// To export the whole result of a query, see [`crate::Session::export`].
+pub fn write(store: &ResultStore, format: ExportFormat, table: &str, out: &mut impl Write) -> io::Result<u64> {
+    let mut writer = RowWriter::new(format, store.status().columns, table);
+    writer.begin(out)?;
+    store.for_each_row(|cells| writer.row(&mut *out, cells))?;
+    writer.end(out)
 }
 
 #[cfg(test)]

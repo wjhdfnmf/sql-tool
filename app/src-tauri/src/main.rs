@@ -1055,18 +1055,9 @@ struct Exported {
     filtered: bool,
 }
 
-/// Asks where to save, then writes the result's visible rows in `format`.
-/// `None` if the user cancels.
-#[tauri::command]
-async fn export_result(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    result_id: u64,
-    format: ExportFormat,
-    table: String,
-) -> Result<Option<Exported>, UiError> {
+/// Asks where to save an export. `None` if the user cancels.
+async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat) -> Option<PathBuf> {
     use tauri_plugin_dialog::DialogExt;
-    let store = state.result(result_id)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -1075,7 +1066,97 @@ async fn export_result(
         .save_file(move |path| {
             let _ = tx.send(path);
         });
-    let Some(path) = rx.await.ok().flatten().and_then(|p| p.into_path().ok()) else {
+    rx.await.ok().flatten().and_then(|p| p.into_path().ok())
+}
+
+/// Asks where to save, then writes every row a query returns in `format`,
+/// by running the statement again and writing its rows straight to the file.
+/// The row limit does not apply and nothing is kept in memory, so this is
+/// the way to export a result of millions of rows. `None` if the user cancels.
+///
+/// It runs in a connection of its own under `tab_id`, so the tab that showed
+/// the result stays usable, and `cancel` with that id stops it.
+#[tauri::command]
+async fn export_query(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    tab_id: String,
+    sql: String,
+    format: ExportFormat,
+    table: String,
+    on_progress: Channel<u64>,
+) -> Result<Option<Exported>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    // Only a plain read is run a second time. A procedure call or a change
+    // could do something again that was meant to happen once.
+    if guard::classify(&sql) != guard::StatementKind::Read {
+        return Err(ui_error(
+            "not-exportable",
+            "Only a SELECT or another plain read can be run again to export all of its rows. \
+             Raise the row limit, run the statement again, and export the rows shown.",
+        ));
+    }
+    let Some(path) = pick_export_file(&app, format).await else {
+        return Ok(None);
+    };
+    let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
+
+    let tab = workspace.tab(&tab_id).await?;
+    let outcome = {
+        let mut session = tab.session.lock().await;
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&path).map_err(storage)?);
+        let rows = session
+            .export(&sql, format, &table, &mut writer, |rows| {
+                let _ = on_progress.send(rows);
+            })
+            .await;
+        if tab.cancel_requested.load(Ordering::Relaxed) {
+            session.absorb_stray_kill().await;
+        }
+        match rows {
+            Ok(rows) => std::io::Write::flush(&mut writer).map(|()| rows).map_err(storage),
+            Err(e) => Err(UiError::from(e)),
+        }
+    };
+    let stopped = tab.cancel_requested.load(Ordering::Relaxed);
+    // The export's own connection is no longer needed.
+    workspace.tabs.lock().await.remove(&tab_id);
+
+    match outcome {
+        Ok(rows) => Ok(Some(Exported {
+            path: path.to_string_lossy().into_owned(),
+            rows,
+            truncated: false,
+            filtered: false,
+        })),
+        Err(e) => {
+            // An incomplete file would pass for the whole result. Remove it.
+            let _ = std::fs::remove_file(&path);
+            Err(if stopped {
+                ui_error("stopped", "Export stopped. The incomplete file was removed.")
+            } else {
+                ui_error(&e.kind, format!("{} The incomplete file was removed.", e.message))
+            })
+        }
+    }
+}
+
+/// Asks where to save, then writes the result's visible rows in `format`.
+/// `None` if the user cancels.
+///
+/// These are the rows the app holds. For a result that stopped at the row
+/// limit that is not every row the query returns; `export_query` is.
+#[tauri::command]
+async fn export_result(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    result_id: u64,
+    format: ExportFormat,
+    table: String,
+) -> Result<Option<Exported>, UiError> {
+    let store = state.result(result_id)?;
+    let Some(path) = pick_export_file(&app, format).await else {
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
@@ -1509,6 +1590,7 @@ fn main() {
             copy_range,
             range_stats,
             export_result,
+            export_query,
             edit_target,
             preview_edits,
             apply_edits,

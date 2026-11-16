@@ -527,6 +527,59 @@ async fn check_extras(profile: &ConnectProfile) {
     assert!(refused.contains("READ ONLY") || refused.contains("read-only") || refused.contains("1792"), "{refused}");
 }
 
+/// Exporting a query writes every row it returns, however many, straight to
+/// the file. This is the case that went wrong: a result held to the row
+/// limit was exported as if it were the whole table.
+async fn check_full_export(profile: &ConnectProfile, sql: &str, expected: u64) {
+    use sqltool_core::export::ExportFormat;
+    use std::io::Write;
+
+    let mut session = Session::connect(profile).await.unwrap();
+    let path = std::env::temp_dir().join(format!("sqltool-export-{}-{expected}.csv", std::process::id()));
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    let started = Instant::now();
+    let mut last = 0;
+    let rows = session.export(sql, ExportFormat::Csv, "", &mut writer, |n| last = n).await.unwrap();
+    writer.flush().unwrap();
+    drop(writer);
+    assert_eq!(rows, expected);
+    assert_eq!(last, expected);
+
+    // Count the lines on disk rather than trust the number returned.
+    use std::io::BufRead;
+    let lines = std::io::BufReader::new(std::fs::File::open(&path).unwrap()).lines().count() as u64;
+    assert_eq!(lines, expected + 1, "a header line and every row");
+    let bytes = std::fs::metadata(&path).unwrap().len();
+    println!("exported {expected} rows, {bytes} bytes, in {:?}", started.elapsed());
+    let _ = std::fs::remove_file(&path);
+
+    // The connection is usable afterwards.
+    assert_eq!(session.query("SELECT 1").await.unwrap().rows[0][0].as_deref(), Some("1"));
+
+    // A statement with no result set is refused, not written as an empty file.
+    let mut none: Vec<u8> = Vec::new();
+    let refused = session.export("DO 0", ExportFormat::Csv, "", &mut none, |_| {}).await.unwrap_err();
+    assert!(refused.to_string().contains("no rows to export"), "{refused}");
+}
+
+#[tokio::test]
+#[ignore = "needs the MariaDB test server from tests/servers/mariadb-pam.sh"]
+async fn mariadb_exports_six_million_rows() {
+    check_full_export(&mariadb(), "SELECT seq, CONCAT('row ', seq) FROM seq_1_to_6000000", 6_000_000).await;
+}
+
+#[tokio::test]
+#[ignore = "needs the MySQL 8.4 test server from tests/servers/mysql84.sh"]
+async fn mysql84_exports_a_million_rows() {
+    check_full_export(
+        &mysql84(),
+        "WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000000) \
+         SELECT /*+ SET_VAR(cte_max_recursion_depth = 1000000) */ n, CONCAT('row ', n) FROM s",
+        1_000_000,
+    )
+    .await;
+}
+
 /// A connection the server has closed is noticed and reopened before its
 /// next use, and the handle for cancelling follows it.
 async fn check_reconnect(profile: &ConnectProfile) {

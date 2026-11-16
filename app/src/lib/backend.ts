@@ -88,6 +88,19 @@ export interface Backend {
   resultView(resultId: number, filter: string | null, sortColumn: number | null, descending: boolean): Promise<number>;
   /** Asks where to save and writes the visible rows. Null if cancelled. */
   exportResult(resultId: number, format: ExportFormat, table: string): Promise<Exported | null>;
+  /**
+   * Asks where to save, then runs the statement again and writes every row it returns, however many,
+   * regardless of the row limit. Runs in a connection of its own under `tabId`; `cancel` with that id stops it.
+   * `onProgress` gets the number of rows written so far. Null if the user cancels the file dialog.
+   */
+  exportQuery(
+    workspaceId: number,
+    tabId: string,
+    sql: string,
+    format: ExportFormat,
+    table: string,
+    onProgress: (rows: number) => void,
+  ): Promise<Exported | null>;
   /** The cells of a selection as text for the clipboard, built from the stored rows. */
   copyRange(resultId: number, range: CellRange, format: CopyFormat, headers: boolean, table: string): Promise<string>;
   /** Count, sum, average, smallest and largest of a selection. */
@@ -152,6 +165,11 @@ const tauriBackend: Backend = {
   reviewScript: (script, mode) => invoke('review_script', { script, mode }),
   resultView: (resultId, filter, sortColumn, descending) => invoke('result_view', { resultId, filter, sortColumn, descending }),
   exportResult: (resultId, format, table) => invoke('export_result', { resultId, format, table }),
+  exportQuery: (workspaceId, tabId, sql, format, table, onProgress) => {
+    const channel = new Channel<number>();
+    channel.onmessage = onProgress;
+    return invoke('export_query', { workspaceId, tabId, sql, format, table, onProgress: channel });
+  },
   copyRange: (resultId, range, format, headers, table) => invoke('copy_range', { resultId, range, format, headers, table }),
   rangeStats: (resultId, range) => invoke('range_stats', { resultId, range }),
   editTarget: (workspaceId, resultId) => invoke('edit_target', { workspaceId, resultId }),

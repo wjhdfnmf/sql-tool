@@ -770,10 +770,15 @@
     {#if info.readOnly}<span class="badge" title="Only reads are allowed on this connection">Read-only</span>{/if}
     {#if info.production}<span class="badge production" title="Risky statements ask for confirmation">Production</span>{/if}
     <span class="spacer"></span>
-    {#if tab.running}
-      <span>Running&hellip;</span>
-    {:else if tab.lastRunMs !== null}
-      <span class="muted">Last run {formatDuration(tab.lastRunMs)}</span>
+    <!-- The result in front puts its notices, selection totals, time, state and row count here. -->
+    <span class="result-status" bind:this={workspace.statusHost}></span>
+    {#if tab.design || tab.activeResult === 'messages' || !workspace.showOutput}
+      <!-- No result in front: say whether something is running, or how long the last run took. -->
+      {#if tab.running}
+        <span>Running&hellip;</span>
+      {:else if tab.lastRunMs !== null}
+        <span class="muted">Last run {formatDuration(tab.lastRunMs)}</span>
+      {/if}
     {/if}
   </footer>
 </div>
@@ -1153,8 +1158,20 @@
   }
 
   .status > span {
+    /* When the row is too narrow, the connection details give way well before the result's status does. */
+    flex-shrink: 6;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .status > .result-status {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .status > .result-status:empty {
+    display: none;
   }
 
   .security.good {

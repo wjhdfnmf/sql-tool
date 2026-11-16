@@ -152,6 +152,8 @@ export class WorkspaceState {
   maxRows = $state<number | null>(settings.current.defaultRowLimit);
   showNavigator = $state(true);
   showOutput = $state(true);
+  /** The place in the bottom row where the result in front shows its row count, state and notices. */
+  statusHost = $state<HTMLElement | undefined>();
   /** What is selected in the schema tree, shown in the information pane. */
   selected = $state<TreeTarget | null>(null);
   /** Bumped to make the schema tree reload. */

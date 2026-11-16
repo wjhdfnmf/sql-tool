@@ -167,15 +167,32 @@
   let exportTable = $state('');
   let exporting = $state(false);
 
-  async function exportRows() {
+  /** Open while the user chooses between every row the query returns and the rows held here. */
+  let exportChoice = $state(false);
+  /** Rows written so far by an export of the whole query; null when none is running. */
+  let exportProgress = $state<number | null>(null);
+  /** The connection the export of the whole query runs in, to stop it by. */
+  let exportTab: string | null = null;
+
+  function exportRows() {
+    // A result that stopped at the row limit is not what the query returns.
+    // Exporting it without asking is how a file of a thousand rows gets
+    // taken for a table of six million.
+    if (result.truncated) exportChoice = true;
+    else void exportShown();
+  }
+
+  /** Writes the rows held here: what the grid shows, in its order, with its filter. */
+  async function exportShown() {
+    exportChoice = false;
     exporting = true;
     try {
       const done = await backend.exportResult(result.id, format, tableName());
       if (done) {
-        // Say so when the file is not everything, rather than let it pass for the full data.
         note =
-          `Exported ${formatCount(done.rows)} rows to ${done.path}` +
-          (done.truncated ? '. The result stopped at the row limit, so the file does not hold every row the query returns' : '') +
+          (done.truncated ? `Exported only the first ${formatCount(done.rows)} rows` : `Exported ${formatCount(done.rows)} rows`) +
+          ` to ${done.path}` +
+          (done.truncated ? '. The query returns more: this result stopped at the row limit' : '') +
           (done.filtered ? '. Only the rows matching the filter were written' : '');
       }
     } catch (e) {
@@ -183,6 +200,31 @@
     } finally {
       exporting = false;
     }
+  }
+
+  /** Runs the query again and writes every row straight to the file, whatever the row limit. */
+  async function exportAll() {
+    exportChoice = false;
+    exporting = true;
+    exportProgress = 0;
+    exportTab = `export-${crypto.randomUUID()}`;
+    note = null;
+    try {
+      const done = await backend.exportQuery(workspace.info.id, exportTab, result.sql, format, tableName(), (rows) => {
+        exportProgress = rows;
+      });
+      if (done) note = `Exported all ${formatCount(done.rows)} rows to ${done.path}`;
+    } catch (e) {
+      note = asUiError(e).message;
+    } finally {
+      exporting = false;
+      exportProgress = null;
+      exportTab = null;
+    }
+  }
+
+  function stopExport() {
+    if (exportTab) void backend.cancel(workspace.info.id, exportTab);
   }
 
   // ---------- editing ----------
@@ -430,15 +472,19 @@
     {#if format === 'sql'}
       <input type="text" class="table" bind:value={exportTable} placeholder={target?.table ?? 'table name'} aria-label="Table name for the INSERT statements" />
     {/if}
-    <button
-      disabled={!result.done || exporting}
-      onclick={exportRows}
-      title={result.truncated
-        ? 'Save the rows shown to a file. The result stopped at the row limit, so that is not every row the query returns.'
-        : 'Save the rows shown to a file'}
-    >
-      {exporting ? 'Exporting…' : 'Export…'}
-    </button>
+    {#if exportProgress !== null}
+      <button class="danger" onclick={stopExport} title="Stop the export; the incomplete file is removed">&#9632; Stop Export</button>
+    {:else}
+      <button
+        disabled={!result.done || exporting}
+        onclick={exportRows}
+        title={result.truncated
+          ? 'Save to a file. This result stopped at the row limit; you will be asked whether to export every row the query returns.'
+          : 'Save the rows to a file'}
+      >
+        {exporting ? 'Exporting…' : 'Export…'}
+      </button>
+    {/if}
     <button disabled={!selection} onclick={() => void copy('tsv')} title="Copy the selected cells (Ctrl+C). Right-click the grid for CSV, SQL INSERT and other forms.">
       Copy
     </button>
@@ -467,27 +513,12 @@
     />
   </div>
 
-  <footer>
-    {#if !result.done}
-      <span class="state loading" role="status" aria-label="Loading rows" title="Rows are still arriving"></span>
-    {:else if result.truncated}
-      <span class="state partial" role="img" aria-label="Stopped at the row limit" title="Complete up to the row limit; more rows exist">&#9888;</span>
-    {:else}
-      <span class="state complete" role="img" aria-label="Complete" title="Every row has arrived">&#10003;</span>
+  <!-- Shown in the bottom row of the window while this result is in front. -->
+  <div class="status-items" use:placeIn={workspace.statusHost} hidden={!active || tab.id !== workspace.activeTabId}>
+    {#if note}<span class="note" role="status" title={note}>{note}</span>{/if}
+    {#if exportProgress !== null}
+      <span class="note" role="status">Exporting every row: {formatCount(exportProgress)} written&hellip;</span>
     {/if}
-    <span>
-      {#if visibleRows !== null && visibleRows !== result.rows}
-        {formatCount(visibleRows)} of {formatCount(result.rows)} rows shown
-      {:else}
-        {formatCount(result.rows)} {result.rows === 1 ? 'row' : 'rows'}{result.done ? '' : ', still loading…'}
-      {/if}
-    </span>
-    {#if result.truncated}
-      <span class="limit">Row limit reached. More rows exist; raise the limit and run again to fetch them.</span>
-    {/if}
-    {#if result.elapsedMs !== null}<span class="muted">{formatDuration(result.elapsedMs)}</span>{/if}
-    {#if note}<span class="note" role="status">{note}</span>{/if}
-    <span class="spacer"></span>
     {#if selection && selectedRows * selectedColumns > 1}
       <span>
         {formatCount(selectedRows)} {selectedRows === 1 ? 'row' : 'rows'} &times; {formatCount(selectedColumns)}
@@ -504,11 +535,52 @@
     {:else if focusCell}
       <span class="muted">Row {formatCount(focusCell.row + 1)}, {result.columns[focusCell.column]?.name}</span>
     {/if}
-    <span class="muted hint-text" title={whyNot ? `This result cannot be edited: ${whyNot}` : undefined}>
-      Drag to select &middot; Ctrl+C copies &middot; right-click for more{target ? ', including Add Row' : ''}
+    {#if result.truncated}
+      <span class="limit" title="More rows exist. Raise the limit and run again to see them, or use Export to write every row to a file.">
+        Row limit reached
+      </span>
+    {/if}
+    {#if result.elapsedMs !== null}<span class="muted" title="How long the statement took">{formatDuration(result.elapsedMs)}</span>{/if}
+    <span class="count" title={whyNot ? `This result cannot be edited: ${whyNot}` : undefined}>
+      {#if !result.done}
+        <span class="state loading" role="status" aria-label="Loading rows" title="Rows are still arriving"></span>
+      {:else if result.truncated}
+        <span class="state partial" role="img" aria-label="Stopped at the row limit" title="Complete up to the row limit; more rows exist">&#9888;</span>
+      {:else}
+        <span class="state complete" role="img" aria-label="Complete" title="Every row has arrived">&#10003;</span>
+      {/if}
+      {#if visibleRows !== null && visibleRows !== result.rows}
+        {formatCount(visibleRows)} of {formatCount(result.rows)} rows shown
+      {:else}
+        {formatCount(result.rows)} {result.rows === 1 ? 'row' : 'rows'}{result.done ? '' : ', still loading…'}
+      {/if}
     </span>
-  </footer>
+  </div>
 </div>
+
+{#if exportChoice}
+  <dialog use:modal aria-labelledby="export-title" onclose={() => (exportChoice = false)}>
+    <div class="choice">
+      <h2 id="export-title">Export which rows?</h2>
+      <p>
+        This result stopped at the row limit. It holds <strong>{formatCount(result.rows)}</strong>
+        {result.rows === 1 ? 'row' : 'rows'}; the query returns more.
+      </p>
+      <button class="option primary" onclick={() => void exportAll()}>
+        <strong>Every row the query returns</strong>
+        <span>Runs the query again and writes each row straight to the file. Works for millions of rows. The filter and sorting here do not apply.</span>
+      </button>
+      <button class="option" onclick={() => void exportShown()}>
+        <strong>Only the {formatCount(rows)} {rows === 1 ? 'row' : 'rows'} shown</strong>
+        <span>What the grid shows now, in its order.</span>
+      </button>
+      <div class="buttons">
+        <span class="spacer"></span>
+        <button onclick={() => (exportChoice = false)}>Cancel</button>
+      </div>
+    </div>
+  </dialog>
+{/if}
 
 {#if contextMenu}
   <Menu items={contextMenu.items} label="Grid actions" x={contextMenu.x} y={contextMenu.y} onclose={closeMenu} />
@@ -635,17 +707,54 @@
     min-height: 0;
   }
 
-  footer {
-    flex: none;
+  /* In the window's bottom row (see `placeIn`). */
+  .status-items {
     display: flex;
     align-items: center;
     gap: 14px;
-    padding: 4px 10px;
-    border-top: 1px solid var(--border);
-    background: var(--panel);
+    min-width: 0;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-    overflow: hidden;
+  }
+
+  .status-items > span {
+    flex: none;
+  }
+
+  .count {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+  }
+
+  .choice {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 18px 20px;
+    width: 500px;
+    max-width: 100%;
+  }
+
+  .choice p {
+    margin: 0;
+  }
+
+  .option {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    text-align: left;
+    white-space: normal;
+    font-weight: 400;
+  }
+
+  .option strong {
+    font-size: 14px;
   }
 
   .state {
@@ -653,9 +762,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 16px;
-    height: 16px;
-    margin-right: -8px;
+    width: 14px;
+    height: 14px;
     font-size: 13px;
     font-weight: 700;
     line-height: 1;
@@ -665,7 +773,7 @@
     border-radius: 50%;
     background: var(--ok);
     color: var(--bg);
-    font-size: 11px;
+    font-size: 10px;
   }
 
   .state.partial {
@@ -692,24 +800,19 @@
     }
   }
 
-  footer .limit {
+  .limit {
     color: var(--warn-text);
     background: var(--warn-bg);
     border: 1px solid var(--warn-border);
     border-radius: 4px;
     padding: 0 6px;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
-  .note {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* The first thing to give way when the footer runs out of room. */
-  .hint-text {
-    flex-shrink: 1000;
+  /* A notice (exported, copied, an error) is the one part that may be long:
+     it gives way first, and its full text is in its tooltip. */
+  .status-items > .note {
+    flex: 0 1 auto;
+    min-width: 60px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
