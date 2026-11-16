@@ -472,10 +472,50 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     await sleep(600);
     const footer = document.querySelector('.result footer')?.textContent ?? '';
     expect(/1\s+row\s+×\s+2\s+columns/.test(footer) && /Sum\s+1\b/.test(footer), `selecting everything showed: ${footer.replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+
+    // The table designer opens in a tab, creates a table, then alters it.
+    await state.execute(`DROP TABLE IF EXISTS \`${config.schema}\`.selftest_designed`);
+    const designTab = state.openDesign({ kind: 'table', schema: config.schema, table: null });
+    await sleep(900);
+    const designer = document.querySelector<HTMLElement>('.design-area:not([hidden]) .designer');
+    expect(designer, 'the table designer did not open in a tab');
+    const nameInput = designer.querySelector<HTMLInputElement>('.head input');
+    expect(nameInput, 'the table designer has no name field');
+    nameInput.value = 'selftest_designed';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(500);
+    const press = (label: string) =>
+      [...designer.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)?.click();
+    const shown = () => designer.querySelector('pre')?.textContent ?? '';
+    expect(shown().startsWith('CREATE TABLE') && shown().includes('selftest_designed'), `the designer's SQL was ${shown()}`);
+    press('Create Table');
+    await sleep(1500);
+    expect(
+      designTab.title === 'selftest_designed (table)' && !designTab.designDirty,
+      `after creating, the tab was "${designTab.title}": ${designer.querySelector('.actions')?.textContent?.trim()}`,
+    );
+    press('+ created_at');
+    await sleep(500);
+    expect(shown().includes('ADD COLUMN `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER `id`'), `the alter SQL was ${shown()}`);
+    press('Apply Changes');
+    await sleep(1500);
+    const designed = await backend.tableSpec(workspace.id, config.schema, 'selftest_designed');
+    const designedColumns = designed?.columns.map((c) => c.name).join();
+    expect(designedColumns === 'id,created_at', `the designed table has columns ${designedColumns}`);
+    await state.execute(`DROP TABLE \`${config.schema}\`.selftest_designed`);
+    state.closeTab(designTab);
+
+    // The schema editor is a tab too.
+    const schemaTab = state.openDesign({ kind: 'schema', schema: config.schema });
+    await sleep(800);
+    const schemaHeading = document.querySelector('.design-area:not([hidden]) .editor h2')?.textContent ?? '';
+    expect(schemaHeading.includes(config.schema), `the schema editor showed "${schemaHeading}"`);
+    state.closeTab(schemaTab);
+
     expect(violations.length === 0, `the content security policy blocked something: ${violations.join('; ')}`);
     await backend.closeResults(tab.results.map((r) => r.id));
     await backend.closeTab(workspace.id, tab.id);
-    return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes };
+    return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes, designedColumns };
   });
 
   await step('disconnect and remove the profile', async () => {

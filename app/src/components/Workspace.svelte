@@ -22,7 +22,7 @@
   import Menu from './Menu.svelte';
   import MenuBar from './MenuBar.svelte';
   import Results from './Results.svelte';
-  import SchemaDialog from './SchemaDialog.svelte';
+  import SchemaEditor from './SchemaEditor.svelte';
   import SchemaTree from './SchemaTree.svelte';
   import TableDesigner from './TableDesigner.svelte';
 
@@ -38,10 +38,6 @@
   let historyKey = $state(0);
   let main: HTMLDivElement;
   let contextMenu = $state<{ items: MenuItem[]; x: number; y: number } | null>(null);
-  /** Open schema dialog: `schema` null creates, a name alters. */
-  let schemaDialog = $state<{ schema: string | null } | null>(null);
-  /** Open table designer: `table` null creates, a name alters. */
-  let designer = $state<{ schema: string; table: string | null } | null>(null);
   /** Open drop, truncate or rename confirmation. */
   let danger = $state<{ action: ObjectAction; kind: ObjectKind; schema: string; name: string } | null>(null);
   /** Statements waiting for a go-ahead on a production connection. */
@@ -52,6 +48,13 @@
 
   const info = $derived(workspace.info);
   const tab = $derived(workspace.activeTab);
+  /** The tab that queries run in: the active one, unless that is a designer. */
+  const queryTab = $derived(tab.design ? (workspace.tabs.find((t) => !t.design) ?? null) : tab);
+
+  /** Shows a message in the query tab's output. A designer tab has no output of its own. */
+  function report(text: string, state: 'ok' | 'error' = 'error') {
+    (queryTab ?? workspace.addTab()).report(text, state);
+  }
   const mariadb = $derived(info.info.version.flavor === 'mariadb');
   const tls = $derived(info.info.tlsVersion?.replace('TLSv', 'TLS ') ?? null);
   const security = $derived(
@@ -120,8 +123,8 @@
   }
 
   async function useSchema(schema: string) {
-    // In the active tab's own session, without disturbing its results.
-    await workspace.run(tab, `USE ${quoteIdentifier(schema)}`, { kind: 'all' }, true);
+    // In the query tab's own session, without disturbing its results.
+    await workspace.run(queryTab ?? workspace.addTab(), `USE ${quoteIdentifier(schema)}`, { kind: 'all' }, true);
     historyKey++;
   }
 
@@ -134,11 +137,13 @@
       const created = workspace.addTab(file.text, file.name);
       created.filePath = file.path;
     } catch (e) {
-      tab.report(asUiError(e).message);
+      report(asUiError(e).message);
     }
   }
 
   async function saveScript(target: EditorTab, saveAs = false): Promise<boolean> {
+    // A designer is not a script; there is nothing to write to a file.
+    if (target.design) return false;
     const text = editors[target.id]?.getText() ?? target.text;
     try {
       const suggested = target.filePath ? target.title : `${target.title}.sql`;
@@ -155,6 +160,16 @@
   }
 
   function requestClose(target: EditorTab) {
+    if (target.design) {
+      // A designer with changes that were never applied asks first.
+      if (target.designDirty) {
+        closing = target;
+        closeDialog.showModal();
+      } else {
+        workspace.closeTab(target);
+      }
+      return;
+    }
     // Only a file on disk can lose work silently; scratch tabs just close.
     // Asked of the editor itself: `target.text` trails typing by a moment.
     const text = editors[target.id]?.getText() ?? target.text;
@@ -185,7 +200,7 @@
     const source = partial ? selection : editor.getText();
     if (source.trim() === '') return;
     if (/^\s*delimiter\s/im.test(source)) {
-      tab.report('A script that uses DELIMITER cannot be reformatted as a whole. Select the part to reformat.');
+      report('A script that uses DELIMITER cannot be reformatted as a whole. Select the part to reformat.');
       return;
     }
     try {
@@ -194,7 +209,7 @@
       else editor.replaceAll(formatted + '\n');
     } catch (e) {
       const reason = e instanceof Error ? e.message.split('\n')[0] : String(e);
-      tab.report(`Could not reformat: ${reason}`);
+      report(`Could not reformat: ${reason}`);
     }
   }
 
@@ -206,17 +221,23 @@
       const title = `New ${kind === 'procedure' ? 'procedure' : kind}`;
       workspace.addTab(await backend.createTemplate(kind, target ?? null), title);
     } catch (e) {
-      tab.report(asUiError(e).message);
+      report(asUiError(e).message);
     }
   }
 
+  /** Opens the table designer in a tab: `table` null for a new table. */
   function openDesigner(table: string | null, schema?: string) {
-    designer = { schema: schema ?? workspace.selected?.schema ?? workspace.database ?? '', table };
+    workspace.openDesign({ kind: 'table', schema: schema ?? workspace.selected?.schema ?? workspace.database ?? '', table });
   }
 
-  /** Opens the designer for tables and the schema dialog for schemas. */
+  /** Opens the schema editor in a tab: `schema` null for a new schema. */
+  function openSchemaEditor(schema: string | null) {
+    workspace.openDesign({ kind: 'schema', schema });
+  }
+
+  /** Opens the designer tab for tables and schemas, and a script for everything else. */
   function alterObject(target: TreeTarget) {
-    if (target.kind === 'schema' || target.name === null) schemaDialog = { schema: target.schema };
+    if (target.kind === 'schema' || target.name === null) openSchemaEditor(target.schema);
     else if (target.kind === 'table') openDesigner(target.name, target.schema);
     else void alterAsScript(target);
   }
@@ -226,21 +247,43 @@
     try {
       workspace.addTab(await backend.alterScript(info.id, target.kind, target.schema, target.name), `Alter ${target.name}`);
     } catch (e) {
-      tab.report(asUiError(e).message);
+      report(asUiError(e).message);
     }
   }
 
-  async function applySchemaChange(sql: string): Promise<string | null> {
+  /** Runs what a designer tab has shown for review. The designer reports the outcome itself. */
+  async function applyDesign(sql: string, schema: string | null): Promise<string | null> {
     const error = await workspace.execute(sql);
     if (error === null) {
-      const changed = designer?.schema ?? danger?.schema;
-      schemaDialog = null;
-      designer = null;
-      danger = null;
-      if (changed) void workspace.loadCatalog(changed, true);
+      if (schema) void workspace.loadCatalog(schema, true);
       workspace.treeVersion++;
       historyKey++;
-      tab.report(`Done: ${sql}`, 'ok');
+    }
+    return error;
+  }
+
+  /** Runs a confirmed drop, truncate or rename. */
+  async function applyDanger(sql: string): Promise<string | null> {
+    const error = await workspace.execute(sql);
+    if (error === null) {
+      const done = danger;
+      danger = null;
+      if (done) {
+        void workspace.loadCatalog(done.schema, true);
+        // A designer left open on something that is gone, or renamed, would only mislead.
+        for (const open of [...workspace.tabs]) {
+          const design = open.design;
+          if (!design || done.action === 'truncate') continue;
+          const gone =
+            done.action === 'dropSchema'
+              ? design.schema === done.schema
+              : design.kind === 'table' && design.schema === done.schema && design.table === done.name;
+          if (gone) workspace.closeTab(open);
+        }
+      }
+      workspace.treeVersion++;
+      historyKey++;
+      report(`Done: ${sql}`, 'ok');
     }
     return error;
   }
@@ -269,13 +312,13 @@
       const lead = current.trim() === '' || current.endsWith('\n') ? '' : '\n';
       insertIntoEditor(`${lead}SELECT\n${list}\nFROM ${qualified(schema, table)}\nLIMIT 1000;\n`);
     } catch (e) {
-      tab.report(asUiError(e).message);
+      report(asUiError(e).message);
     }
   }
 
   function treeMenu(target: TreeTarget | null): MenuItem[] {
     const always: MenuItem[] = [
-      { label: 'Create Schema…', action: () => (schemaDialog = { schema: null }) },
+      { label: 'Create Schema…', action: () => (openSchemaEditor(null)) },
       { label: 'Refresh All', action: refreshSchemas },
     ];
     if (!target) return always;
@@ -366,8 +409,8 @@
         { label: 'New Query Tab', shortcut: 'Ctrl+T', action: () => workspace.addTab() },
         { label: 'Open SQL Script…', shortcut: 'Ctrl+O', action: () => void openScript() },
         separator,
-        { label: 'Save Script', shortcut: 'Ctrl+S', action: () => void saveScript(tab) },
-        { label: 'Save Script As…', shortcut: 'Ctrl+Shift+S', action: () => void saveScript(tab, true) },
+        { label: 'Save Script', shortcut: 'Ctrl+S', disabled: !!tab.design, action: () => void saveScript(tab) },
+        { label: 'Save Script As…', shortcut: 'Ctrl+Shift+S', disabled: !!tab.design, action: () => void saveScript(tab, true) },
         separator,
         { label: 'Close Tab', shortcut: 'Ctrl+W', action: () => requestClose(tab) },
         { label: 'Close Connection', action: () => void app.close(workspace) },
@@ -382,7 +425,7 @@
         { label: 'Select All', shortcut: 'Ctrl+A', action: () => editors[tab.id]?.selectAll() },
         { label: 'Find and Replace…', shortcut: 'Ctrl+F', action: () => editors[tab.id]?.openSearch() },
         separator,
-        { label: 'Reformat Query', shortcut: 'Ctrl+B', action: reformat },
+        { label: 'Reformat Query', shortcut: 'Ctrl+B', disabled: !!tab.design, action: reformat },
       ],
     },
     {
@@ -399,9 +442,9 @@
     {
       label: 'Query',
       items: [
-        { label: 'Execute (All or Selection)', shortcut: 'Ctrl+Shift+Enter', disabled: tab.running, action: () => void run(tab, 'script') },
-        { label: 'Execute Current Statement', shortcut: 'Ctrl+Enter', disabled: tab.running, action: () => void run(tab, 'statement') },
-        { label: 'Explain Current Statement', shortcut: 'Ctrl+Alt+X', disabled: tab.running, action: () => void run(tab, 'explain') },
+        { label: 'Execute (All or Selection)', shortcut: 'Ctrl+Shift+Enter', disabled: tab.running || !!tab.design, action: () => void run(tab, 'script') },
+        { label: 'Execute Current Statement', shortcut: 'Ctrl+Enter', disabled: tab.running || !!tab.design, action: () => void run(tab, 'statement') },
+        { label: 'Explain Current Statement', shortcut: 'Ctrl+Alt+X', disabled: tab.running || !!tab.design, action: () => void run(tab, 'explain') },
         { label: 'Stop', disabled: !tab.running, action: () => void workspace.cancel(tab) },
         separator,
         ...rowLimits.map(
@@ -419,7 +462,7 @@
         { label: 'Manage Connections', action: () => (app.active = 'home') },
         separator,
         { label: 'Refresh All Schemas', action: refreshSchemas },
-        { label: 'Create Schema…', action: () => (schemaDialog = { schema: null }) },
+        { label: 'Create Schema…', action: () => (openSchemaEditor(null)) },
         separator,
         { label: 'Create Table…', action: () => openDesigner(null) },
         { label: 'Create View…', action: () => void createFromTemplate('view') },
@@ -500,7 +543,7 @@
     <button onclick={() => workspace.addTab()} title="New query tab (Ctrl+T)">New Tab</button>
     <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open Script</button>
     <span class="divider"></span>
-    <button onclick={() => (schemaDialog = { schema: null })} title="Create a new schema">Create Schema</button>
+    <button onclick={() => (openSchemaEditor(null))} title="Create a new schema">Create Schema</button>
     <button onclick={() => openDesigner(null)} title="Design a new table">Create Table</button>
     <button onclick={() => createFromTemplate('view')} title="Start a CREATE VIEW script">Create View</button>
     <button onclick={() => createFromTemplate('procedure')} title="Start a CREATE PROCEDURE script">Create Procedure</button>
@@ -545,16 +588,16 @@
 
     <div class="main" bind:this={main}>
       <div class="editor-tabs">
-        <div class="tab-strip" role="tablist" aria-label="Query tabs">
+        <div class="tab-strip" role="tablist" aria-label="Query and designer tabs">
           {#each workspace.tabs as t (t.id)}
             <div class="editor-tab" class:active={t.id === workspace.activeTabId}>
               <button
                 role="tab"
                 aria-selected={t.id === workspace.activeTabId}
-                title={t.filePath ?? t.title}
+                title={t.design ? (t.designDirty ? `${t.title}: changes not applied` : t.title) : (t.filePath ?? t.title)}
                 onclick={() => (workspace.activeTabId = t.id)}
               >
-                {t.title}{t.filePath && t.dirty ? ' •' : ''}{t.running ? ' …' : ''}
+                {t.title}{(t.filePath && t.dirty) || t.designDirty ? ' •' : ''}{t.running ? ' …' : ''}
               </button>
               <button class="quiet close" aria-label={`Close ${t.title}`} title="Close tab (Ctrl+W)" onclick={() => requestClose(t)}>&#215;</button>
             </div>
@@ -577,7 +620,7 @@
         </div>
       </div>
 
-      <div class="toolbar" role="toolbar" aria-label="Editor">
+      <div class="toolbar" role="toolbar" aria-label="Editor" hidden={!!tab.design}>
         <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open</button>
         <button onclick={() => saveScript(tab)} title="Save this script (Ctrl+S)">Save</button>
         <span class="divider"></span>
@@ -605,22 +648,33 @@
       </div>
 
       {#each workspace.tabs as t (t.id)}
-        <div
-          class="editor-area"
-          class:fill={!workspace.showOutput}
-          style:height={workspace.showOutput ? `${editorHeight}px` : undefined}
-          hidden={t.id !== workspace.activeTabId}
-        >
-          <Editor
-            bind:this={editors[t.id]}
-            value={t.text}
-            {mariadb}
-            catalog={workspace.catalog}
-            defaultSchema={workspace.database}
-            onchange={(text) => (t.text = text)}
-            onrun={(all) => run(t, all ? 'script' : 'statement')}
-          />
-        </div>
+        {#if t.design}
+          <!-- A designer has the whole area: it has no results of its own. -->
+          <div class="design-area" hidden={t.id !== workspace.activeTabId}>
+            {#if t.design.kind === 'table'}
+              <TableDesigner {workspace} tab={t} onapply={applyDesign} />
+            {:else}
+              <SchemaEditor {workspace} tab={t} onapply={applyDesign} />
+            {/if}
+          </div>
+        {:else}
+          <div
+            class="editor-area"
+            class:fill={!workspace.showOutput}
+            style:height={workspace.showOutput ? `${editorHeight}px` : undefined}
+            hidden={t.id !== workspace.activeTabId}
+          >
+            <Editor
+              bind:this={editors[t.id]}
+              value={t.text}
+              {mariadb}
+              catalog={workspace.catalog}
+              defaultSchema={workspace.database}
+              onchange={(text) => (t.text = text)}
+              onrun={(all) => run(t, all ? 'script' : 'statement')}
+            />
+          </div>
+        {/if}
       {/each}
 
       <!-- A focusable separator is an interactive widget (it resizes with the arrow keys). -->
@@ -632,15 +686,17 @@
         aria-label="Resize editor"
         aria-valuenow={editorHeight}
         tabindex="0"
-        hidden={!workspace.showOutput}
+        hidden={!workspace.showOutput || !!tab.design}
         onpointerdown={startResize}
         onkeydown={resizeByKey}
       ></div>
 
       {#each workspace.tabs as t (t.id)}
-        <div class="results-area" hidden={!workspace.showOutput || t.id !== workspace.activeTabId}>
-          <Results {workspace} tab={t} />
-        </div>
+        {#if !t.design}
+          <div class="results-area" hidden={!workspace.showOutput || t.id !== workspace.activeTabId}>
+            <Results {workspace} tab={t} />
+          </div>
+        {/if}
       {/each}
     </div>
   </div>
@@ -665,16 +721,8 @@
   <Menu items={contextMenu.items} label="Schema actions" x={contextMenu.x} y={contextMenu.y} onclose={() => (contextMenu = null)} />
 {/if}
 
-{#if schemaDialog}
-  <SchemaDialog workspaceId={info.id} schema={schemaDialog.schema} onclose={() => (schemaDialog = null)} onapply={applySchemaChange} />
-{/if}
-
-{#if designer}
-  <TableDesigner workspaceId={info.id} schema={designer.schema} table={designer.table} onclose={() => (designer = null)} onapply={applySchemaChange} />
-{/if}
-
 {#if danger}
-  <ConfirmSqlDialog {...danger} onclose={() => (danger = null)} onapply={applySchemaChange} />
+  <ConfirmSqlDialog {...danger} onclose={() => (danger = null)} onapply={applyDanger} />
 {/if}
 
 {#if confirmation}
@@ -700,13 +748,22 @@
 
 <dialog bind:this={closeDialog} aria-labelledby="close-title" onclose={() => (closing = null)}>
   <div class="prompt">
-    <h2 id="close-title">Save changes to {closing?.title}?</h2>
-    <p class="muted">Your changes will be lost if you do not save them.</p>
-    <div class="buttons">
-      <button onclick={() => closeDialog.close()}>Cancel</button>
-      <button class="danger" onclick={() => finishClose(false)}>Don't Save</button>
-      <button class="primary" onclick={() => finishClose(true)}>Save</button>
-    </div>
+    {#if closing?.design}
+      <h2 id="close-title">Close {closing.title} without applying?</h2>
+      <p class="muted">The changes made in this tab have not been applied. Closing it discards them; nothing on the server changes.</p>
+      <div class="buttons">
+        <button onclick={() => closeDialog.close()}>Keep Editing</button>
+        <button class="danger" onclick={() => finishClose(false)}>Discard Changes</button>
+      </div>
+    {:else}
+      <h2 id="close-title">Save changes to {closing?.title}?</h2>
+      <p class="muted">Your changes will be lost if you do not save them.</p>
+      <div class="buttons">
+        <button onclick={() => closeDialog.close()}>Cancel</button>
+        <button class="danger" onclick={() => finishClose(false)}>Don't Save</button>
+        <button class="primary" onclick={() => finishClose(true)}>Save</button>
+      </div>
+    {/if}
   </div>
 </dialog>
 
@@ -924,6 +981,11 @@
 
   .editor-area {
     flex: none;
+    min-height: 0;
+  }
+
+  .design-area {
+    flex: 1;
     min-height: 0;
   }
 

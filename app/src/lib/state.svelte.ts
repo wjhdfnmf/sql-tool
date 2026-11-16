@@ -27,6 +27,9 @@ export interface ResultTab {
   sql: string;
 }
 
+/** What a designer tab is editing. A null name means something new is being made. */
+export type TabDesign = { kind: 'table'; schema: string; table: string | null } | { kind: 'schema'; schema: string | null };
+
 export interface MessageLine {
   id: number;
   sql: string;
@@ -95,6 +98,10 @@ export class EditorTab {
   /** A result id, or 'messages'. */
   activeResult = $state<number | 'messages'>('messages');
   lastRunMs = $state<number | null>(null);
+  /** Set when this tab is a table or schema designer instead of a query. */
+  design = $state<TabDesign | null>(null);
+  /** The designer has changes that have not been applied. */
+  designDirty = $state(false);
 
   constructor(title: string, text = '') {
     this.title = title;
@@ -156,6 +163,8 @@ export class WorkspaceState {
     let total = 0;
     for (const tab of this.tabs) {
       const text = tab.text;
+      // Designers are not remembered: they are reopened from the table or schema.
+      if (tab.design) continue;
       if (text.trim() === '' || text.length > MAX_SAVED_TAB_CHARS || HOLDS_PASSWORD.test(text)) continue;
       total += text.length;
       if (total > MAX_SAVED_CHARS || saved.length >= MAX_SAVED_TABS) break;
@@ -189,6 +198,32 @@ export class WorkspaceState {
 
   addTab(text = '', title?: string): EditorTab {
     const tab = new EditorTab(title ?? `Query ${++tabCounter}`, text);
+    this.tabs.push(tab);
+    this.activeTabId = tab.id;
+    return tab;
+  }
+
+  /** Opens a designer tab, or goes to the one already open for the same table or schema. */
+  openDesign(design: TabDesign): EditorTab {
+    const existing = this.tabs.find((t) => {
+      const open = t.design;
+      if (!open) return false;
+      if (open.kind === 'schema' && design.kind === 'schema') return open.schema !== null && open.schema === design.schema;
+      if (open.kind === 'table' && design.kind === 'table') {
+        return open.table !== null && open.table === design.table && open.schema === design.schema;
+      }
+      return false;
+    });
+    if (existing) {
+      this.activeTabId = existing.id;
+      return existing;
+    }
+    const title =
+      design.kind === 'table'
+        ? design.table === null ? 'New table' : `${design.table} (table)`
+        : design.schema === null ? 'New schema' : `${design.schema} (schema)`;
+    const tab = new EditorTab(title);
+    tab.design = design;
     this.tabs.push(tab);
     this.activeTabId = tab.id;
     return tab;
