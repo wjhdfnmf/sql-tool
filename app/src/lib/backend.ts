@@ -7,12 +7,16 @@ import { mockBackend } from './mock';
 import type {
   AppInfo,
   CertificateInfo,
+  CellRange,
   CellValue,
   Charset,
   ColumnEntry,
   Concern,
+  CopyFormat,
   EditTarget,
+  Exported,
   ExportFormat,
+  RangeStats,
   HistoryEntry,
   ObjectAction,
   ObjectKind,
@@ -80,7 +84,11 @@ export interface Backend {
   /** Sorts and filters what the grid shows; resolves to the visible row count. */
   resultView(resultId: number, filter: string | null, sortColumn: number | null, descending: boolean): Promise<number>;
   /** Asks where to save and writes the visible rows. Null if cancelled. */
-  exportResult(resultId: number, format: ExportFormat, table: string): Promise<{ path: string; rows: number } | null>;
+  exportResult(resultId: number, format: ExportFormat, table: string): Promise<Exported | null>;
+  /** The cells of a selection as text for the clipboard, built from the stored rows. */
+  copyRange(resultId: number, range: CellRange, format: CopyFormat, headers: boolean, table: string): Promise<string>;
+  /** Count, sum, average, smallest and largest of a selection. */
+  rangeStats(resultId: number, range: CellRange): Promise<RangeStats>;
   /** Rejects with kind `not-editable` and the reason if the result cannot be edited. */
   editTarget(workspaceId: number, resultId: number): Promise<EditTarget>;
   previewEdits(resultId: number, edits: RowEdit[]): Promise<string[]>;
@@ -137,6 +145,8 @@ const tauriBackend: Backend = {
   reviewScript: (script, mode) => invoke('review_script', { script, mode }),
   resultView: (resultId, filter, sortColumn, descending) => invoke('result_view', { resultId, filter, sortColumn, descending }),
   exportResult: (resultId, format, table) => invoke('export_result', { resultId, format, table }),
+  copyRange: (resultId, range, format, headers, table) => invoke('copy_range', { resultId, range, format, headers, table }),
+  rangeStats: (resultId, range) => invoke('range_stats', { resultId, range }),
   editTarget: (workspaceId, resultId) => invoke('edit_target', { workspaceId, resultId }),
   previewEdits: (resultId, edits) => invoke('preview_edits', { resultId, edits }),
   applyEdits: (workspaceId, tabId, resultId, edits) => invoke('apply_edits', { workspaceId, tabId, resultId, edits }),

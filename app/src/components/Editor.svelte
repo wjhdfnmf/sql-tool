@@ -47,6 +47,17 @@
   let host: HTMLDivElement;
   let view: EditorView | undefined;
 
+  // The text is handed on shortly after typing stops, not on every key:
+  // copying a script of several megabytes out per keystroke would make
+  // typing in it drag. Anything that needs the text this instant (running,
+  // saving) asks with getText().
+  let changeTimer: ReturnType<typeof setTimeout> | undefined;
+  function reportChange() {
+    clearTimeout(changeTimer);
+    changeTimer = undefined;
+    if (view) onchange(view.state.doc.toString());
+  }
+
   // Colours come from CSS variables so the editor follows light and dark mode.
   const theme = EditorView.theme({
     '&': { height: '100%', fontSize: '13px', backgroundColor: 'var(--bg)', color: 'var(--text)' },
@@ -103,12 +114,17 @@
           ),
           keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
           EditorView.updateListener.of((update) => {
-            if (update.docChanged) onchange(update.state.doc.toString());
+            if (!update.docChanged) return;
+            clearTimeout(changeTimer);
+            changeTimer = setTimeout(reportChange, 200);
           }),
         ],
       }),
     });
-    return () => view?.destroy();
+    return () => {
+      if (changeTimer !== undefined) reportChange();
+      view?.destroy();
+    };
   });
 
   export function getText(): string {

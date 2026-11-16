@@ -42,6 +42,9 @@
         Results appear here.
       </p>
     {:else}
+      {#if tab.hiddenMessages > 0}
+        <p class="hint muted">{formatCount(tab.hiddenMessages)} earlier messages are not shown. The History tab has every statement.</p>
+      {/if}
       <ol class="messages">
         {#each tab.messages as line (line.id)}
           <li class={line.state}>

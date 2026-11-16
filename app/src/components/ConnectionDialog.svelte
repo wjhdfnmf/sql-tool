@@ -52,7 +52,7 @@
     {
       value: 'unverified',
       label: 'Encrypted, not verified',
-      help: 'Stops eavesdropping, but not a server that impersonates yours. This is what most MySQL tools do by default.',
+      help: 'Stops eavesdropping, but not a server that impersonates yours: one that does can read your password and everything you send. This is what most MySQL tools do by default. Pinning the certificate closes that gap and needs no CA file.',
     },
     {
       value: 'disabled',

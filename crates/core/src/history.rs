@@ -57,7 +57,9 @@ pub fn redact(sql: &str) -> String {
 
 pub struct History {
     path: PathBuf,
-    lock: Mutex<()>,
+    /// The file, kept open between statements. A script of thousands of
+    /// statements would otherwise open and close it for each one.
+    file: Mutex<Option<std::fs::File>>,
 }
 
 fn storage(e: impl std::fmt::Display) -> Error {
@@ -68,35 +70,46 @@ impl History {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            lock: Mutex::new(()),
+            file: Mutex::new(None),
         }
     }
 
     pub fn append(&self, mut entry: HistoryEntry) -> Result<(), Error> {
         entry.sql = redact(&entry.sql);
-        let _guard = self.lock.lock().unwrap();
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(storage)?;
+        let mut line = serde_json::to_string(&entry).map_err(storage)?;
+        line.push('\n');
+
+        let mut guard = self.file.lock().unwrap();
+        if guard.is_none() {
+            if let Some(dir) = self.path.parent() {
+                std::fs::create_dir_all(dir).map_err(storage)?;
+            }
+            *guard = Some(crate::files::append_private(&self.path).map_err(storage)?);
         }
-        if std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
+        let too_large = guard
+            .as_ref()
+            .and_then(|file| file.metadata().ok())
+            .is_some_and(|m| m.len() > MAX_FILE_BYTES);
+        if too_large {
+            // Closed first: the file is replaced, not written through this handle.
+            *guard = None;
             let text = std::fs::read_to_string(&self.path).map_err(storage)?;
             let lines: Vec<&str> = text.lines().collect();
             let newer = lines[lines.len() / 2..].join("\n") + "\n";
-            std::fs::write(&self.path, newer).map_err(storage)?;
+            crate::files::write_private(&self.path, newer.as_bytes()).map_err(storage)?;
+            *guard = Some(crate::files::append_private(&self.path).map_err(storage)?);
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(storage)?;
-        let mut line = serde_json::to_string(&entry).map_err(storage)?;
-        line.push('\n');
-        file.write_all(line.as_bytes()).map_err(storage)
+        let written = guard.as_mut().expect("opened above").write_all(line.as_bytes());
+        if written.is_err() {
+            // Open it afresh next time rather than keep a handle that fails.
+            *guard = None;
+        }
+        written.map_err(storage)
     }
 
     /// Newest first. `search` matches anywhere in the statement, ignoring case.
     pub fn list(&self, search: Option<&str>, limit: usize) -> Result<Vec<HistoryEntry>, Error> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.file.lock().unwrap();
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -114,7 +127,9 @@ impl History {
     }
 
     pub fn clear(&self) -> Result<(), Error> {
-        let _guard = self.lock.lock().unwrap();
+        let mut guard = self.file.lock().unwrap();
+        // Closed first: an open file cannot be removed on Windows.
+        *guard = None;
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -195,6 +210,32 @@ mod tests {
         history.append(entry("CREATE USER a IDENTIFIED BY 'hunter2'", 1)).unwrap();
         let raw = std::fs::read_to_string(&history.path).unwrap();
         assert!(!raw.contains("hunter2"));
+    }
+
+    #[test]
+    fn a_history_that_has_grown_too_large_keeps_its_newer_half() {
+        let history = temp_history("trim");
+        let filler = "x".repeat(10_000);
+        let count = (MAX_FILE_BYTES as usize / 10_000) + 60;
+        for i in 0..count {
+            history.append(entry(&format!("SELECT '{filler}', {i}"), i as u64)).unwrap();
+        }
+        assert!(std::fs::metadata(&history.path).unwrap().len() <= MAX_FILE_BYTES + 20_000);
+        let kept = history.list(None, usize::MAX).unwrap();
+        assert!(kept.len() < count && kept.len() > count / 3, "kept {} of {count}", kept.len());
+        assert_eq!(kept[0].at_ms, count as u64 - 1, "the newest entry is still there");
+        // And it goes on taking entries after the trim.
+        history.append(entry("SELECT 'after'", 9_999_999)).unwrap();
+        assert_eq!(history.list(None, 1).unwrap()[0].sql, "SELECT 'after'");
+    }
+
+    #[test]
+    fn entries_can_be_added_again_after_clearing() {
+        let history = temp_history("reopen");
+        history.append(entry("SELECT 1", 1)).unwrap();
+        history.clear().unwrap();
+        history.append(entry("SELECT 2", 2)).unwrap();
+        assert_eq!(history.list(None, 10).unwrap().len(), 1);
     }
 
     #[test]

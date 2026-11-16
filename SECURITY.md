@@ -27,9 +27,12 @@ A report is most useful when it shows one of these being broken:
 ## Known limits
 
 - Release builds are not code-signed.
-- With "Encrypted, not verified" or "Not encrypted", the server is not authenticated. The tool says so in the connection dialog and the status bar.
+- With "Encrypted, not verified" or "Not encrypted", the server is not authenticated. Something on the network path that impersonates the server can then read the password of any account, not only of accounts that use cleartext authentication, along with everything else sent. The tool says so in the connection dialog and the status bar. Pinning the server's certificate closes this without needing a CA file.
+- Query history and the text of open query tabs are kept on the computer without encryption, so that they survive a restart. Statements that contain a password are left out of both. On Linux and macOS the history and saved-connection files are readable by their owner only.
+- SQL INSERT statements produced by export and copy are escaped for the server's default SQL mode. They are not safe to run on a server set to `NO_BACKSLASH_ESCAPES` if the data contains backslashes.
 - Large results spill to a temporary file that is private to the user and removed when the result is closed, but is not encrypted.
 - The database driver keeps the password in memory for the life of a connection.
+- The database driver is a patched copy of `mysql_async` taken from its development branch (see `vendor/mysql_async/PATCHES.md`), not a published release.
 - The tool has not had an independent security review.
 
 ## Supported versions

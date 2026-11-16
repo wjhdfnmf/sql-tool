@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sqltool_core::edit::{self, CellChange, RowEdit};
-use sqltool_core::table::{self, ColumnSpec, IndexSpec, TableSpec};
-use sqltool_core::{ddl, CaSource, ColumnKind, ConnectProfile, ObjectKind, ResultStore, RunEvent, Session};
+use sqltool_core::table::{self, ColumnSpec, ForeignKeySpec, IndexSpec, TableSpec};
+use sqltool_core::{ddl, split, CaSource, ColumnKind, ConnectProfile, ObjectKind, ResultStore, RunEvent, Session};
 
 fn local_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/servers/.local")
@@ -380,6 +380,7 @@ async fn check_table_designer(session: &mut Session) {
             IndexSpec { name: "idx_title".into(), columns: vec!["title".into()], ..IndexSpec::default() },
             IndexSpec { name: "uq_qty_title".into(), columns: vec!["qty".into(), "title".into()], unique: true, ..IndexSpec::default() },
         ],
+        foreign_keys: Vec::new(),
         engine: Some("InnoDB".into()),
         collation: None,
         comment: "designer test".into(),
@@ -451,6 +452,51 @@ async fn check_table_designer(session: &mut Session) {
     assert_eq!((keys[0].columns.as_slice(), keys[0].referenced_columns.as_slice()), (&["parent".to_string()][..], &["id".to_string()][..]));
     assert_eq!(keys[0].on_delete, "CASCADE");
     assert!(session.foreign_keys("sqltool_test", "design_a").await.unwrap().is_empty());
+
+    // The designer reads the key and leaves it alone unless it is changed.
+    let child = session.table_spec("sqltool_test", "design_child").await.unwrap().unwrap();
+    assert_eq!(child.foreign_keys.len(), 1);
+    assert_eq!(child.foreign_keys[0].original_name.as_deref(), Some("fk_parent"));
+    assert!(table::alter_table(&child, &child).is_err(), "an untouched key is not rebuilt");
+
+    // Change one key's rule and add a second key on a new column.
+    let mut changed = child.clone();
+    changed.foreign_keys[0].on_delete = "RESTRICT".into();
+    changed.columns.push(ColumnSpec { nullable: true, ..new_column("other", "INT") });
+    changed.foreign_keys.push(ForeignKeySpec {
+        name: "fk_other".into(),
+        columns: vec!["other".into()],
+        referenced_table: "design_b".into(),
+        referenced_columns: vec!["id".into()],
+        on_delete: "SET NULL".into(),
+        ..ForeignKeySpec::default()
+    });
+    let alter = table::alter_table(&child, &changed).unwrap();
+    let statements = split::split(&alter);
+    assert_eq!(statements.len(), 2, "the changed key is dropped in a statement of its own: {alter}");
+    for statement in &statements {
+        run(session, &statement.text, None).await;
+    }
+    let keys = session.foreign_keys("sqltool_test", "design_child").await.unwrap();
+    let rule = |name: &str| keys.iter().find(|k| k.name == name).map(|k| (k.referenced_table.as_str(), k.on_delete.as_str()));
+    assert_eq!(rule("fk_parent"), Some(("design_a", "RESTRICT")));
+    assert_eq!(rule("fk_other"), Some(("design_b", "SET NULL")));
+
+    // What the server reports back is again "nothing to change".
+    let reread = session.table_spec("sqltool_test", "design_child").await.unwrap().unwrap();
+    assert!(table::alter_table(&reread, &reread).is_err());
+
+    // Removing a column together with its key and the index the server made for it.
+    let mut dropped = reread.clone();
+    dropped.foreign_keys.retain(|k| k.name != "fk_other");
+    dropped.indexes.retain(|i| !i.columns.contains(&"other".to_string()));
+    dropped.columns.retain(|c| c.name != "other");
+    for statement in split::split(&table::alter_table(&reread, &dropped).unwrap()) {
+        run(session, &statement.text, None).await;
+    }
+    let left = session.table_spec("sqltool_test", "design_child").await.unwrap().unwrap();
+    assert_eq!(left.foreign_keys.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["fk_parent"]);
+    assert!(left.columns.iter().all(|c| c.name != "other"));
 
     for name in ["design_child", "design_b", "design_a"] {
         run(session, &table::drop_object(ObjectKind::Table, "sqltool_test", name), None).await;

@@ -79,6 +79,16 @@
     };
   });
 
+  // Remember the query tabs shortly after they change.
+  $effect(() => {
+    for (const t of workspace.tabs) {
+      void t.text;
+      void t.title;
+    }
+    const timer = setTimeout(() => workspace.saveTabs(), 800);
+    return () => clearTimeout(timer);
+  });
+
   function answerConfirmation(go: boolean) {
     confirmation?.resolve(go);
     confirmation = null;
@@ -146,7 +156,9 @@
 
   function requestClose(target: EditorTab) {
     // Only a file on disk can lose work silently; scratch tabs just close.
-    if (target.filePath && target.dirty) {
+    // Asked of the editor itself: `target.text` trails typing by a moment.
+    const text = editors[target.id]?.getText() ?? target.text;
+    if (target.filePath && text !== target.savedText) {
       closing = target;
       closeDialog.showModal();
     } else {
@@ -237,6 +249,30 @@
     workspace.treeVersion++;
   }
 
+  // ---------- writing names into the editor ----------
+
+  function insertIntoEditor(text: string) {
+    editors[tab.id]?.insert(text);
+  }
+
+  /** A table's name as a query needs it: with its schema unless that is the default. */
+  function qualified(schema: string, name: string): string {
+    return schema === workspace.database ? quoteIdentifier(name) : `${quoteIdentifier(schema)}.${quoteIdentifier(name)}`;
+  }
+
+  /** Writes a SELECT that names every column, ready to trim down. */
+  async function insertSelect(schema: string, table: string) {
+    try {
+      const columns = await backend.tableColumns(info.id, schema, table);
+      const list = columns.length > 0 ? columns.map((c) => `  ${quoteIdentifier(c.name)}`).join(',\n') : '  *';
+      const current = editors[tab.id]?.getText() ?? '';
+      const lead = current.trim() === '' || current.endsWith('\n') ? '' : '\n';
+      insertIntoEditor(`${lead}SELECT\n${list}\nFROM ${qualified(schema, table)}\nLIMIT 1000;\n`);
+    } catch (e) {
+      tab.report(asUiError(e).message);
+    }
+  }
+
   function treeMenu(target: TreeTarget | null): MenuItem[] {
     const always: MenuItem[] = [
       { label: 'Create Schema…', action: () => (schemaDialog = { schema: null }) },
@@ -246,6 +282,10 @@
     const copyName: MenuItem = {
       label: 'Copy Name',
       action: () => void navigator.clipboard.writeText(target.name ?? target.schema),
+    };
+    const insertName: MenuItem = {
+      label: 'Insert Name into Editor',
+      action: () => insertIntoEditor(target.name === null ? quoteIdentifier(target.schema) : qualified(target.schema, target.name)),
     };
     const create = (label: string, kind: ObjectKind): MenuItem => ({
       label,
@@ -263,6 +303,7 @@
           create('Create Function…', 'function'),
           separator,
           copyName,
+          insertName,
           separator,
           { label: 'Drop Schema…', action: () => (danger = { action: 'dropSchema', kind: 'table', schema: target.schema, name: target.schema }) },
           separator,
@@ -275,6 +316,9 @@
         const ask = (action: ObjectAction) => () => (danger = { action, kind, schema: target.schema, name });
         return [
           { label: 'Select Rows (Limit 1000)', action: () => openTable(target.schema, name) },
+          { label: 'Insert SELECT Statement into Editor', action: () => void insertSelect(target.schema, name) },
+          insertName,
+          copyName,
           separator,
           ...(kind === 'table'
             ? [
@@ -292,8 +336,6 @@
                 separator,
                 { label: 'Drop View…', action: ask('drop') },
               ]),
-          separator,
-          copyName,
           separator,
           ...always,
         ];
@@ -487,6 +529,7 @@
           onopen={openTable}
           onuse={useSchema}
           oncontext={(target, x, y) => (contextMenu = { items: treeMenu(target), x, y })}
+          oninsert={(name) => insertIntoEditor(quoteIdentifier(name))}
           onloaded={(schema) => void workspace.loadCatalog(schema)}
         />
       </div>
@@ -683,6 +726,11 @@
         <tr><td>Open script</td><td>Ctrl+O</td></tr>
         <tr><td>Save script, Save as</td><td>Ctrl+S, Ctrl+Shift+S</td></tr>
         <tr><td>Find and replace</td><td>Ctrl+F</td></tr>
+        <tr><td>Comment or uncomment lines</td><td>Ctrl+/</td></tr>
+        <tr><td>Results: select cells</td><td>Drag, Shift+Click, Shift+Arrows</td></tr>
+        <tr><td>Results: select rows, columns, everything</td><td>Shift+Space, Ctrl+Space, Ctrl+A</td></tr>
+        <tr><td>Results: copy, copy with column names</td><td>Ctrl+C, Ctrl+Shift+C</td></tr>
+        <tr><td>Results: fit a column to its contents</td><td>Double-click the header's edge</td></tr>
         <tr><td>Schema tree: actions menu</td><td>Right-click, or Shift+F10</td></tr>
       </tbody>
     </table>

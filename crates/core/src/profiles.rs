@@ -123,7 +123,7 @@ impl ProfileStore {
         // Write to a temporary file and rename, so a crash mid-write cannot
         // leave a half-written profiles file.
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(profiles).map_err(storage)?).map_err(storage)?;
+        crate::files::write_private(&tmp, &serde_json::to_vec_pretty(profiles).map_err(storage)?).map_err(storage)?;
         std::fs::rename(&tmp, &self.path).map_err(storage)
     }
 

@@ -17,7 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sqltool_core::edit::{self, EditTarget, RowEdit};
-use sqltool_core::export::{self, ExportFormat};
+use sqltool_core::export::{self, CellRange, CopyFormat, ExportFormat, RangeStats};
 use sqltool_core::guard::{self, Concern};
 use sqltool_core::metadata::{Charset, ColumnEntry, ForeignKeyEntry, SchemaDefaults, SchemaObjects, TableDetails};
 use sqltool_core::table::{self, IndexSpec, TableSpec};
@@ -78,10 +78,11 @@ struct Workspace {
 
 impl Workspace {
     async fn tab(&self, tab_id: &str) -> Result<Arc<Tab>, Error> {
-        let mut tabs = self.tabs.lock().await;
-        if let Some(tab) = tabs.get(tab_id) {
+        if let Some(tab) = self.tabs.lock().await.get(tab_id) {
             return Ok(tab.clone());
         }
+        // Connecting can take seconds. The lock is not held meanwhile, so
+        // other tabs can still be found, for one to cancel what they run.
         let mut session = Session::connect(&self.profile).await?;
         if self.read_only {
             session.set_read_only().await?;
@@ -91,9 +92,16 @@ impl Workspace {
             session: tokio::sync::Mutex::new(session),
             cancel_requested: AtomicBool::new(false),
         });
-        tabs.insert(tab_id.to_string(), tab.clone());
-        Ok(tab)
+        Ok(self.tabs.lock().await.entry(tab_id.to_string()).or_insert(tab).clone())
     }
+}
+
+/// Runs work that can take a while (sorting, copying, writing a file) on a
+/// thread meant for that, so the window and other commands stay responsive.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, UiError> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| ui_error("other", e.to_string()))
 }
 
 #[cfg(feature = "devtools")]
@@ -169,14 +177,14 @@ fn profile_dto(profile: SavedProfile) -> ProfileDto {
     ProfileDto { profile, has_password }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn profiles_list(state: State<'_, AppState>) -> Result<Vec<ProfileDto>, UiError> {
     Ok(state.profiles.load()?.into_iter().map(profile_dto).collect())
 }
 
 /// Saves the profile. `password` is stored in the keychain when the profile
 /// asks for that; `None` leaves an already stored password alone.
-#[tauri::command]
+#[tauri::command(async)]
 fn profile_save(
     state: State<'_, AppState>,
     profile: SavedProfile,
@@ -194,7 +202,7 @@ fn profile_save(
     Ok(profile_dto(saved))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn profile_delete(state: State<'_, AppState>, id: String) -> Result<(), UiError> {
     state.profiles.delete(&id)?;
     sqltool_secrets::delete(&id).map_err(|e| ui_error("keychain", e))
@@ -219,6 +227,9 @@ fn resolve_password(profile: &SavedProfile, given: Option<String>) -> Result<Sec
 #[serde(rename_all = "camelCase")]
 struct WorkspaceDto {
     id: u64,
+    /// The saved connection this came from; `None` for the demo server.
+    /// The UI keys what it remembers per connection on this.
+    profile_id: Option<String>,
     name: String,
     color: Option<String>,
     host: String,
@@ -235,6 +246,7 @@ struct WorkspaceDto {
 async fn open_workspace(
     state: &AppState,
     profile: ConnectProfile,
+    profile_id: Option<String>,
     name: String,
     color: Option<String>,
     read_only: bool,
@@ -254,6 +266,7 @@ async fn open_workspace(
     };
     let dto = WorkspaceDto {
         id: state.id(),
+        profile_id,
         name: name.clone(),
         color,
         host: format!("{}:{}", profile.host, profile.port),
@@ -313,6 +326,7 @@ async fn connect(
     open_workspace(
         &state,
         saved.to_connect_profile(password),
+        Some(saved.id.clone()),
         name,
         saved.color.clone(),
         saved.read_only,
@@ -442,7 +456,7 @@ fn select_statements(script: &str, mode: &RunMode) -> Vec<split::Statement> {
 
 /// What a production connection should confirm before running this:
 /// structure changes, and UPDATE or DELETE without a WHERE clause.
-#[tauri::command]
+#[tauri::command(async)]
 fn review_script(script: String, mode: RunMode) -> Vec<Concern> {
     let statements = select_statements(&script, &mode);
     guard::review(statements.iter().map(|s| s.text.as_str()))
@@ -605,7 +619,7 @@ async fn cancel(state: State<'_, AppState>, workspace_id: u64, tab_id: String) -
 
 /// A window of rows as raw bytes (layout in `sqltool_core::store`).
 /// Raw, not JSON: this call is on the scrolling hot path.
-#[tauri::command]
+#[tauri::command(async)]
 fn get_rows(state: State<'_, AppState>, result_id: u64, offset: u64, count: u32) -> Result<Response, UiError> {
     Ok(Response::new(state.result(result_id)?.window(offset, count.min(4096))))
 }
@@ -622,7 +636,7 @@ struct CellDto {
 }
 
 /// The complete value of one cell, for the value viewer and for copying.
-#[tauri::command]
+#[tauri::command(async)]
 fn get_cell(state: State<'_, AppState>, result_id: u64, row: u64, column: usize) -> Result<CellDto, UiError> {
     let value = state
         .result(result_id)?
@@ -853,7 +867,7 @@ async fn script_save(
 
 /// Sorts and filters what the grid shows. Returns the number of visible rows.
 #[tauri::command]
-fn result_view(
+async fn result_view(
     state: State<'_, AppState>,
     result_id: u64,
     filter: Option<String>,
@@ -861,7 +875,30 @@ fn result_view(
     descending: bool,
 ) -> Result<u64, UiError> {
     let store = state.result(result_id)?;
-    Ok(store.set_view(filter.as_deref(), sort_column.map(|column| (column, descending))))
+    blocking(move || store.set_view(filter.as_deref(), sort_column.map(|column| (column, descending)))).await
+}
+
+/// The cells of a selection as text for the clipboard. The text is built
+/// here, from the stored rows, so a selection of any size copies exactly
+/// what the server sent rather than what happens to be on screen.
+#[tauri::command]
+async fn copy_range(
+    state: State<'_, AppState>,
+    result_id: u64,
+    range: CellRange,
+    format: CopyFormat,
+    headers: bool,
+    table: String,
+) -> Result<String, UiError> {
+    let store = state.result(result_id)?;
+    Ok(blocking(move || export::copy_range(&store, range, format, headers, &table)).await??)
+}
+
+/// Count, sum, average, smallest and largest of a selection.
+#[tauri::command]
+async fn range_stats(state: State<'_, AppState>, result_id: u64, range: CellRange) -> Result<RangeStats, UiError> {
+    let store = state.result(result_id)?;
+    blocking(move || export::range_stats(&store, range)).await
 }
 
 #[derive(Serialize)]
@@ -869,6 +906,11 @@ fn result_view(
 struct Exported {
     path: String,
     rows: u64,
+    /// The result stopped at the row limit, so the file does not hold
+    /// everything the query would return.
+    truncated: bool,
+    /// A filter was on, so the file holds only the rows that matched.
+    filtered: bool,
 }
 
 /// Asks where to save, then writes the result's visible rows in `format`.
@@ -895,13 +937,20 @@ async fn export_result(
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
-    let file = std::fs::File::create(&path).map_err(storage)?;
-    let mut writer = std::io::BufWriter::new(file);
-    let rows = export::write(&store, format, &table, &mut writer).map_err(storage)?;
-    std::io::Write::flush(&mut writer).map_err(storage)?;
+    let target = path.clone();
+    let (rows, status) = blocking(move || -> std::io::Result<_> {
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(&target)?);
+        let rows = export::write(&store, format, &table, &mut writer)?;
+        std::io::Write::flush(&mut writer)?;
+        Ok((rows, store.status()))
+    })
+    .await?
+    .map_err(storage)?;
     Ok(Some(Exported {
         path: path.to_string_lossy().into_owned(),
         rows,
+        truncated: status.truncated,
+        filtered: status.rows < status.total_rows,
     }))
 }
 
@@ -923,7 +972,7 @@ async fn edit_target(state: State<'_, AppState>, workspace_id: u64, result_id: u
 }
 
 /// The statements the edits would run, with values written in, for review.
-#[tauri::command]
+#[tauri::command(async)]
 fn preview_edits(state: State<'_, AppState>, result_id: u64, edits: Vec<RowEdit>) -> Result<Vec<String>, UiError> {
     let store = state.result(result_id)?;
     let target = edit::edit_target(&store.status().columns).map_err(|e| ui_error("not-editable", e))?;
@@ -1066,7 +1115,7 @@ async fn completion_columns(
 
 // ---------- history ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 fn history_list(
     state: State<'_, AppState>,
     search: Option<String>,
@@ -1075,7 +1124,7 @@ fn history_list(
     Ok(state.history.list(search.as_deref(), limit.unwrap_or(200).min(2000))?)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn history_clear(state: State<'_, AppState>) -> Result<(), UiError> {
     Ok(state.history.clear()?)
 }
@@ -1126,7 +1175,7 @@ async fn connect_demo(state: State<'_, AppState>) -> Result<WorkspaceDto, UiErro
         let mut profile = ConnectProfile::new("127.0.0.1", demo.server.port(), "demo", PASSWORD.to_string().into());
         profile.ca = Some(CaSource::Pem(demo.ca_pem.clone().into_bytes()));
         profile.allow_cleartext_auth = true;
-        open_workspace(&state, profile, "Demo server".into(), None, false, false).await
+        open_workspace(&state, profile, None, "Demo server".into(), None, false, false).await
     }
     #[cfg(not(feature = "devtools"))]
     {
@@ -1237,6 +1286,8 @@ fn main() {
             script_save,
             review_script,
             result_view,
+            copy_range,
+            range_stats,
             export_result,
             edit_target,
             preview_edits,

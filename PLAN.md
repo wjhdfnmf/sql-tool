@@ -1,6 +1,60 @@
 # Project plan: open-source SQL client for MySQL and MariaDB
 
-Status: Phases 0 to 2 done; Phase 3 partly done (see "Phase 3 status"), 2026-11-16. Project name is still to be chosen.
+Status: Phases 0 to 2 done; Phase 3 partly done (see "Phase 3 status"); 0.1.0 released 2026-11-16, followed by a pass over everyday use and a code review (see "Everyday-use pass"). Project name is still to be chosen.
+
+## Everyday-use pass and code review (after 0.1.0)
+
+The remaining Phase 3 and 4 items (SSH tunnels, client certificates, user management, dump and restore, the wider version matrix) are parked: the project owner does not use them. This pass went instead into what is done all day: writing queries, reading results, copying and exporting them, and creating tables.
+
+### Added
+
+- **Selecting cells.** A rectangle of cells by dragging, Shift+click or Shift+arrows; whole rows from the row numbers; whole columns with Ctrl+click on a header; everything with Ctrl+A or the corner. Dragging past an edge scrolls.
+- **Copying.** Ctrl+C copies the selection as tab-separated text, which spreadsheets paste as cells; Ctrl+Shift+C adds the column names. The right-click menu also copies as CSV, as SQL INSERT statements, and as a quoted list for an `IN (...)` clause. One cell copies as exactly its text. The text is built in the core from the stored rows, so a selection of a million rows copies what the server sent, not what is on screen.
+- **Totals.** The count, sum, average, smallest and largest of the selected cells show under the grid.
+- **Columns fit their contents** when the first rows arrive, and again on a double-click of a header's edge or from the header's right-click menu, which also sorts and selects.
+- **Filter by a cell's value** from the right-click menu; **delete several rows** at once.
+- **Exports say when they are partial**: when the result stopped at the row limit, or a filter was on.
+- **Query tabs are remembered** per saved connection and come back when it is opened again.
+- **From the schema tree into the editor**: a table's name, a SELECT naming every column, or (double-click) a column's name.
+- **Table designer**: foreign keys (create, change, remove); move columns up and down; Enter goes to the next column and adds one after the last. Enter no longer applies the change: only the Apply button runs SQL.
+
+### Review findings fixed
+
+Efficiency:
+
+- Sorting read each row again on every comparison. It now reads each row's key once.
+- A batch of very large rows could grow without limit before reaching the result store. It is now handed over at 8 MB.
+- Every cancel and every row-limit stop logged in to the server again. One control connection is now kept and reused, which matters most for LDAP accounts.
+- Connecting asked for the TLS version and cipher in two round trips; now one.
+- Sorting a large result, building the edit preview, listing the history and looking up keychain entries ran on the thread that keeps the window responsive. They no longer do.
+- Opening a new tab's connection held a lock that cancelling in another tab needed.
+- The grid built a lookup key for every visible cell on every frame, even with no edits pending.
+- The history file was opened and closed for every statement. It is now kept open.
+- A script of many thousands of statements grew the message list without limit. It now keeps the latest thousand.
+- The editor copied the whole script out on every keystroke. It now does so shortly after typing stops.
+- Completion read every column of a schema with no upper bound; now at most 50,000.
+
+Security:
+
+- On Linux and macOS the history and saved-connection files were created readable by other accounts on the computer. They are now readable by their owner only, including files written by 0.1.0.
+- The connection dialog now says plainly that "Encrypted, not verified" lets an impersonating server read the password, and points to pinning.
+
+### Review findings recorded, not changed
+
+These are listed in [SECURITY.md](SECURITY.md) under "Known limits": the password of any account is exposed to an impersonating server on an unverified connection; history, remembered tabs and spilled results are not encrypted on disk; exported INSERT statements assume the default SQL mode; the driver keeps the password in memory and is an unreleased build; installers are unsigned. The workflow files pin GitHub's own actions by major version rather than by commit.
+
+Nothing was found that lets database content run as code in the UI: values are drawn on a canvas or inserted as text, never as HTML, and the content security policy allows no inline or remote script.
+
+### How it was verified
+
+- 102 unit tests and 23 fake-server tests in the core.
+- The five real-server tests, on MariaDB 11.8.6 and MySQL 8.4.13, including foreign keys through the designer (read, change a rule, add a key on a new column, remove a column with its key) and the reused control connection.
+- The desktop self-test on both servers, with new steps for copying, totals, foreign-key SQL and selecting in the grid.
+
+### Not verified
+
+- Copying to the clipboard from the packaged app by hand (the self-test checks the text the core produces, not the clipboard).
+- The owner-only file permissions on a real Linux or macOS machine; the test for them runs in CI on those systems.
 
 ## Phase 3 status
 

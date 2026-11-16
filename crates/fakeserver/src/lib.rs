@@ -510,6 +510,24 @@ fn answer(shared: &Arc<Shared>, sql: &str, user: &str) -> Reply {
         };
     }
 
+    if lower.starts_with("show session status where variable_name in") {
+        let version = shared
+            .observed
+            .lock()
+            .unwrap()
+            .tls_version
+            .clone()
+            .map(|v| v.replace("TLSv1_", "TLSv1."))
+            .unwrap_or_default();
+        return Reply::Rows {
+            columns: vec!["Variable_name".into(), "Value".into()],
+            rows: vec![
+                vec![Some("Ssl_cipher".into()), Some(String::new())],
+                vec![Some("Ssl_version".into()), Some(version)],
+            ],
+        };
+    }
+
     if let Some(rest) = lower.strip_prefix("show session status like ") {
         let name = rest.trim().trim_matches('\'');
         let value = match name {

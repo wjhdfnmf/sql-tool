@@ -17,11 +17,13 @@
     onuse: (schema: string) => void;
     /** A right-click (or the menu key). `target` is null on empty space. */
     oncontext: (target: TreeTarget | null, x: number, y: number) => void;
+    /** A column was double-clicked: write its name into the editor. */
+    oninsert: (name: string) => void;
     /** A schema was expanded; its names are worth loading for completion. */
     onloaded: (schema: string) => void;
   }
 
-  let { workspaceId, current, version, selected, onselect, onopen, onuse, oncontext, onloaded }: Props = $props();
+  let { workspaceId, current, version, selected, onselect, onopen, onuse, oncontext, oninsert, onloaded }: Props = $props();
 
   type Loaded<T> = { state: 'loading' } | { state: 'error'; message: string } | { state: 'ready'; value: T };
 
@@ -214,7 +216,11 @@
                             {:else}
                               <ul class="columns">
                                 {#each cols.value as column (column.name)}
-                                  <li title={`${column.columnType}${column.nullable ? '' : ' NOT NULL'}${column.extra ? ' ' + column.extra : ''}`}>
+                                  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                                  <li
+                                    title={`${column.columnType}${column.nullable ? '' : ' NOT NULL'}${column.extra ? ' ' + column.extra : ''}. Double-click to insert the name into the editor.`}
+                                    ondblclick={() => oninsert(column.name)}
+                                  >
                                     <span class="label" class:key={column.key === 'PRI'}>{column.name}</span>
                                     <span class="type muted">{column.columnType}</span>
                                   </li>
