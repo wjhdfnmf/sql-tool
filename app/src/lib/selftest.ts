@@ -426,6 +426,69 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { elapsedMs: elapsed };
   });
 
+  await step('settings are stored, and the query timeout stops a long statement', async () => {
+    expect(workspace, 'not connected');
+    const before = await backend.settingsGet();
+    expect(before.theme === 'system' && before.connectTimeoutSecs === 15 && before.queryTimeoutSecs === 0, `fresh settings were ${JSON.stringify(before)}`);
+    const saved = await backend.settingsSet({ ...before, theme: 'midnight', queryTimeoutSecs: 1, connectTimeoutSecs: 100000 });
+    expect(saved.theme === 'midnight' && saved.connectTimeoutSecs === 300, `out-of-range values were not corrected: ${JSON.stringify(saved)}`);
+    const started = performance.now();
+    const messages = await run(config.bigQuery, { kind: 'all' }, null);
+    const elapsed = Math.round(performance.now() - started);
+    const failure = ofType(messages, 'failed')[0];
+    await backend.closeResults(ofType(messages, 'resultSet').map((s) => s.resultId));
+    await backend.settingsSet(before);
+    expect(failure && failure.message.includes('query timeout in Settings'), `the statement was not stopped by the timeout: ${failure?.message}`);
+    expect(elapsed < 15000, `stopping took ${elapsed} ms`);
+    const after = await run('SELECT 9 AS nine', { kind: 'all' }, null);
+    expect(ofType(after, 'resultSet').length === 1, 'the session is unusable after a timeout');
+    await backend.closeResults(ofType(after, 'resultSet').map((s) => s.resultId));
+    expect((await backend.settingsGet()).queryTimeoutSecs === 0, 'the settings were not put back');
+    return { elapsedMs: elapsed, message: failure.message };
+  });
+
+  await step('a connection the server dropped is reopened on the next run', async () => {
+    expect(workspace, 'not connected');
+    const asked = await run('SELECT CONNECTION_ID() AS id', { kind: 'all' }, null);
+    const set = ofType(asked, 'resultSet')[0];
+    expect(set, `no connection id: ${ofType(asked, 'failed')[0]?.message}`);
+    const id = decodeCells(await backend.getRows(set.resultId, 0, 1), 1).values[0];
+    await backend.closeResults([set.resultId]);
+
+    // Another connection kills it, which is what a server's idle timeout amounts to.
+    const killer = `selftest-killer-${workspace.id}`;
+    const killed: RunMsg[] = [];
+    await backend.run(workspace.id, killer, `KILL ${id}`, { kind: 'all' }, null, (m) => killed.push(m));
+    expect(!ofType(killed, 'failed')[0], `could not kill the connection: ${ofType(killed, 'failed')[0]?.message}`);
+    await backend.closeTab(workspace.id, killer);
+    await sleep(400);
+
+    // The statement that finds the connection gone fails and says what happens next.
+    const lost = await run('SELECT 1', { kind: 'all' }, null);
+    const failure = ofType(lost, 'failed')[0];
+    expect(failure && failure.message.includes('will be reopened'), `losing the connection was reported as: ${failure?.message}`);
+
+    // The next run reopens it before sending anything, and says so.
+    const again = await run('SELECT 2 AS two', { kind: 'all' }, null);
+    expect(ofType(again, 'reconnected').length === 1, `no reconnect was reported: ${JSON.stringify(again.map((m) => m.type))}`);
+    const result = ofType(again, 'resultSet')[0];
+    expect(result, `the statement after reconnecting failed: ${ofType(again, 'failed')[0]?.message}`);
+    const two = decodeCells(await backend.getRows(result.resultId, 0, 1), 1).values[0];
+    await backend.closeResults([result.resultId]);
+    expect(two === '2', `after reconnecting the result was ${two}`);
+
+    // Cancelling still reaches the new connection.
+    const started = performance.now();
+    const running = run('SELECT SLEEP(20)', { kind: 'all' }, null);
+    await sleep(400);
+    await backend.cancel(workspace.id, tabId);
+    const stopped = await running;
+    await backend.closeResults(ofType(stopped, 'resultSet').map((s) => s.resultId));
+    const elapsed = Math.round(performance.now() - started);
+    expect(elapsed < 8000, `cancel after reconnecting took ${elapsed} ms`);
+    return { lostMessage: failure.message.slice(0, 80), cancelMs: elapsed };
+  });
+
   await step('default schema follows USE', async () => {
     const messages = await run(`USE \`${config.schema}\``, { kind: 'all' }, null);
     const changed = ofType(messages, 'database')[0];

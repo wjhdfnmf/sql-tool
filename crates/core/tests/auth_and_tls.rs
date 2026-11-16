@@ -473,3 +473,42 @@ async fn pinned_mode_without_a_pin_is_refused_before_connecting() {
     ));
     assert_eq!(server.observed().connections, 0);
 }
+
+#[tokio::test]
+async fn connecting_gives_up_when_the_server_never_answers() {
+    // Takes the connection and then says nothing, like a host behind a
+    // firewall that swallows packets instead of refusing them.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+
+    let mut profile = ConnectProfile::new("127.0.0.1", port, "ann", SecretString::from(PASSWORD));
+    profile.tls = TlsMode::Disabled;
+    profile.connect_timeout = Duration::from_secs(1);
+    let started = Instant::now();
+    let error = expect_err(&profile).await;
+    assert_eq!(error.kind(), "network", "{error}");
+    assert!(error.to_string().contains("no answer from the server"), "{error}");
+    assert!(error.is_connection_lost());
+    assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    silent.abort();
+}
+
+#[tokio::test]
+async fn a_live_session_is_left_alone_by_the_liveness_check() {
+    let ca = identity();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(ca.clone()))).await.unwrap();
+    let mut session = Session::connect(&ldap_profile(&server, &ca)).await.unwrap();
+    let id = session.info().connection_id;
+    // Not idle long enough to be worth a ping.
+    assert!(!session.ensure_alive(Duration::from_secs(3600)).await.unwrap());
+    // Idle "long enough": pinged, found alive, not reconnected.
+    assert!(!session.ensure_alive(Duration::ZERO).await.unwrap());
+    assert_eq!(session.info().connection_id, id);
+    assert!(session.idle_for() < Duration::from_secs(5));
+}

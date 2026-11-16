@@ -31,6 +31,7 @@ import type {
   ScriptFile,
   SelfTestConfig,
   ServerInfo,
+  Settings,
   TableDetails,
   WorkspaceInfo,
 } from './types';
@@ -103,6 +104,9 @@ export interface Backend {
   completionColumns(workspaceId: number, schema: string): Promise<[string, string][]>;
   historyList(search: string | null, limit: number): Promise<HistoryEntry[]>;
   historyClear(): Promise<void>;
+  settingsGet(): Promise<Settings>;
+  /** Saves the settings; resolves to them as stored, with out-of-range values corrected. */
+  settingsSet(settings: Settings): Promise<Settings>;
   selftestConfig(): Promise<SelfTestConfig | null>;
   selftestReport(report: string): Promise<void>;
 }
@@ -157,6 +161,8 @@ const tauriBackend: Backend = {
   completionColumns: (workspaceId, schema) => invoke('completion_columns', { workspaceId, schema }),
   historyList: (search, limit) => invoke('history_list', { search, limit }),
   historyClear: () => invoke('history_clear'),
+  settingsGet: () => invoke('settings_get'),
+  settingsSet: (settings) => invoke('settings_set', { settings }),
   selftestConfig: () => invoke('selftest_config'),
   selftestReport: (report) => invoke('selftest_report', { report }),
 };

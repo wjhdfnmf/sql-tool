@@ -426,6 +426,8 @@
         { label: 'Find and Replace…', shortcut: 'Ctrl+F', action: () => editors[tab.id]?.openSearch() },
         separator,
         { label: 'Reformat Query', shortcut: 'Ctrl+B', disabled: !!tab.design, action: reformat },
+        separator,
+        { label: 'Settings…', action: () => (app.showSettings = true) },
       ],
     },
     {

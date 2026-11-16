@@ -527,6 +527,69 @@ async fn check_extras(profile: &ConnectProfile) {
     assert!(refused.contains("READ ONLY") || refused.contains("read-only") || refused.contains("1792"), "{refused}");
 }
 
+/// A connection the server has closed is noticed and reopened before its
+/// next use, and the handle for cancelling follows it.
+async fn check_reconnect(profile: &ConnectProfile) {
+    let mut session = Session::connect(profile).await.unwrap();
+    let first = session.info().connection_id;
+    let canceller = session.canceller();
+    assert!(!session.ensure_alive(Duration::ZERO).await.unwrap(), "a live connection is left alone");
+
+    // Another connection kills it, which is what a server's idle timeout amounts to.
+    let mut other = Session::connect(profile).await.unwrap();
+    other.query(&format!("KILL {first}")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(session.ensure_alive(Duration::ZERO).await.unwrap(), "the dead connection was not noticed");
+    let second = session.info().connection_id;
+    assert_ne!(first, second, "a new connection has a new id");
+    assert_eq!(
+        session.current_database().await.unwrap().as_deref(),
+        Some("sqltool_test"),
+        "the default database is selected again"
+    );
+
+    // The handle made before the reconnect interrupts the new connection.
+    let started = Instant::now();
+    let kill = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        canceller.cancel().await
+    });
+    let _ = session.run("SELECT SLEEP(20)", None, |_| {}).await;
+    assert!(started.elapsed() < Duration::from_secs(10), "cancel after reconnect took {:?}", started.elapsed());
+    kill.await.unwrap().unwrap();
+    session.absorb_stray_kill().await;
+
+    // A statement that fails because the connection is gone marks the
+    // session, and the next use reopens it even though it is not idle.
+    other.query(&format!("KILL {second}")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let lost = session.query("SELECT 1").await.unwrap_err();
+    assert!(lost.is_connection_lost(), "not seen as a lost connection: {lost}");
+    assert!(session.ensure_alive(Duration::from_secs(3600)).await.unwrap(), "a broken session must reconnect");
+    assert_eq!(session.query("SELECT 2").await.unwrap().rows[0][0].as_deref(), Some("2"));
+
+    // Read-only mode comes back with the new connection.
+    session.set_read_only().await.unwrap();
+    let third = session.info().connection_id;
+    other.query(&format!("KILL {third}")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(session.ensure_alive(Duration::ZERO).await.unwrap());
+    let refused = session.query("CREATE TABLE sqltool_test.should_not_exist (id INT)").await.unwrap_err();
+    assert!(!refused.is_connection_lost(), "{refused}");
+}
+
+#[tokio::test]
+#[ignore = "needs the MariaDB test server from tests/servers/mariadb-pam.sh"]
+async fn mariadb_reconnects_after_the_server_drops_the_connection() {
+    check_reconnect(&mariadb()).await;
+}
+
+#[tokio::test]
+#[ignore = "needs the MySQL 8.4 test server from tests/servers/mysql84.sh"]
+async fn mysql84_reconnects_after_the_server_drops_the_connection() {
+    check_reconnect(&mysql84()).await;
+}
+
 #[tokio::test]
 #[ignore = "needs the MariaDB test server from tests/servers/mariadb-pam.sh"]
 async fn mariadb_editing_designer_and_extras() {

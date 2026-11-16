@@ -2,7 +2,7 @@
   import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
   import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoCommand, selectAll as selectAllCommand, undo as undoCommand } from '@codemirror/commands';
   import { MariaSQL, MySQL, sql } from '@codemirror/lang-sql';
-  import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language';
+  import { bracketMatching, HighlightStyle, indentOnInput, indentUnit, syntaxHighlighting } from '@codemirror/language';
   import { highlightSelectionMatches, openSearchPanel, searchKeymap } from '@codemirror/search';
   import { Compartment, EditorState, Prec } from '@codemirror/state';
   import {
@@ -15,6 +15,7 @@
   } from '@codemirror/view';
   import { tags } from '@lezer/highlight';
   import { onMount } from 'svelte';
+  import { settings } from '../lib/settings.svelte';
 
   interface Props {
     value: string;
@@ -34,7 +35,7 @@
   const languageSupport = () =>
     sql({
       dialect: mariadb ? MariaSQL : MySQL,
-      upperCaseKeywords: true,
+      upperCaseKeywords: settings.current.uppercaseKeywords,
       schema: $state.snapshot(catalog),
       defaultSchema: defaultSchema ?? undefined,
     });
@@ -42,6 +43,22 @@
   $effect(() => {
     const support = languageSupport();
     view?.dispatch({ effects: language.reconfigure(support) });
+  });
+
+  // Indent and line wrapping come from the settings and change when they do.
+  const options = new Compartment();
+  const editorOptions = () => {
+    const size = settings.current.editorTabSize;
+    return [
+      EditorState.tabSize.of(size),
+      indentUnit.of(' '.repeat(size)),
+      ...(settings.current.editorWordWrap ? [EditorView.lineWrapping] : []),
+    ];
+  };
+
+  $effect(() => {
+    const extensions = editorOptions();
+    view?.dispatch({ effects: options.reconfigure(extensions) });
   });
 
   let host: HTMLDivElement;
@@ -103,6 +120,7 @@
           autocompletion(),
           highlightSelectionMatches(),
           language.of(languageSupport()),
+          options.of(editorOptions()),
           syntaxHighlighting(highlight),
           theme,
           EditorView.contentAttributes.of({ 'aria-label': 'SQL editor' }),

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Home from './components/Home.svelte';
+  import SettingsDialog from './components/SettingsDialog.svelte';
   import Workspace from './components/Workspace.svelte';
   import { backend } from './lib/backend';
   import { runSelfTest } from './lib/selftest';
@@ -43,6 +44,7 @@
         >
       </div>
     {/each}
+    <button class="tab settings" title="Themes, timeouts and other settings" onclick={() => (app.showSettings = true)}>Settings</button>
   </nav>
 
   {#if loadError}
@@ -58,6 +60,10 @@
     </div>
   {/each}
 </div>
+
+{#if app.showSettings}
+  <SettingsDialog onclose={() => (app.showSettings = false)} />
+{/if}
 
 <style>
   .shell {
@@ -76,6 +82,12 @@
     border-bottom: 1px solid var(--border);
     /* No scroll bar: tabs that do not fit go onto another row. */
     flex-wrap: wrap;
+  }
+
+  /* Pushed to the far end of the strip. */
+  .tab.settings {
+    margin-left: auto;
+    color: var(--muted);
   }
 
   .tab,

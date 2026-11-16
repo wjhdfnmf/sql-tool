@@ -10,6 +10,7 @@
 // here: the backend builds the text from the stored rows, so a selection of
 // a million rows copies as exactly what the server sent.
 
+import { APPEARANCE_EVENT } from './settings.svelte';
 import type { CellRange, ColumnInfo } from './types';
 
 const ROW_H = 24;
@@ -143,10 +144,14 @@ export class GridView {
     on(scroller, 'keydown', (e: KeyboardEvent) => this.onKeyDown(e));
     on(window, 'mousemove', (e: MouseEvent) => this.onDragMove(e));
     on(window, 'mouseup', () => this.onMouseUp());
-    on(window.matchMedia('(prefers-color-scheme: dark)'), 'change', () => {
+    const recolor = () => {
       this.colors = this.readColors();
       this.invalidate();
-    });
+    };
+    on(window.matchMedia('(prefers-color-scheme: dark)'), 'change', recolor);
+    // A theme picked in Settings.
+    window.addEventListener(APPEARANCE_EVENT, recolor);
+    this.cleanup.push(() => window.removeEventListener(APPEARANCE_EVENT, recolor));
 
     this.resizeObserver = new ResizeObserver(() => this.invalidate());
     this.resizeObserver.observe(scroller);
