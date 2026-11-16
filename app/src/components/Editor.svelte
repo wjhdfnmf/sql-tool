@@ -1,9 +1,9 @@
 <script lang="ts">
   import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
-  import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+  import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoCommand, selectAll as selectAllCommand, undo as undoCommand } from '@codemirror/commands';
   import { MariaSQL, MySQL, sql } from '@codemirror/lang-sql';
   import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language';
-  import { highlightSelectionMatches, searchKeymap } from '@codemirror/search';
+  import { highlightSelectionMatches, openSearchPanel, searchKeymap } from '@codemirror/search';
   import { EditorState, Prec } from '@codemirror/state';
   import {
     drawSelection,
@@ -113,6 +113,32 @@
     if (!view) return;
     view.dispatch(view.state.replaceSelection(text));
     view.focus();
+  }
+
+  /** Replaces the whole document, as one undoable step. */
+  export function replaceAll(text: string): void {
+    if (!view) return;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+    view.focus();
+  }
+
+  export function undo(): void {
+    if (view) undoCommand(view);
+    view?.focus();
+  }
+
+  export function redo(): void {
+    if (view) redoCommand(view);
+    view?.focus();
+  }
+
+  export function selectAll(): void {
+    if (view) selectAllCommand(view);
+    view?.focus();
+  }
+
+  export function openSearch(): void {
+    if (view) openSearchPanel(view);
   }
 
   export function focus(): void {

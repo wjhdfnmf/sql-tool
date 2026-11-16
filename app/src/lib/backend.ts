@@ -7,14 +7,19 @@ import { mockBackend } from './mock';
 import type {
   AppInfo,
   CellValue,
+  Charset,
   ColumnEntry,
   HistoryEntry,
+  ObjectKind,
   Profile,
   RunMode,
   RunMsg,
+  SchemaDefaults,
   SchemaObjects,
+  ScriptFile,
   SelfTestConfig,
   ServerInfo,
+  TableDetails,
   WorkspaceInfo,
 } from './types';
 
@@ -47,6 +52,19 @@ export interface Backend {
   schemaList(workspaceId: number): Promise<string[]>;
   schemaObjects(workspaceId: number, schema: string): Promise<SchemaObjects>;
   tableColumns(workspaceId: number, schema: string, table: string): Promise<ColumnEntry[]>;
+  tableDetails(workspaceId: number, schema: string, table: string): Promise<TableDetails | null>;
+  schemaDefaults(workspaceId: number, schema: string): Promise<SchemaDefaults | null>;
+  charsets(workspaceId: number): Promise<Charset[]>;
+  collations(workspaceId: number, charset: string): Promise<string[]>;
+  /** SQL to create or alter a schema, for review. Rejects if a name is not acceptable. */
+  schemaDdl(alter: boolean, name: string, charset: string | null, collation: string | null): Promise<string>;
+  /** A script that changes an existing object, built from its current definition. */
+  alterScript(workspaceId: number, kind: ObjectKind, schema: string, name: string): Promise<string>;
+  createTemplate(kind: ObjectKind, schema: string | null): Promise<string>;
+  /** Shows the native open dialog. Null if the user cancels. */
+  scriptOpen(): Promise<ScriptFile | null>;
+  /** Saves to `path`, or asks where if `path` is null. Null if the user cancels. */
+  scriptSave(path: string | null, suggestedName: string, text: string): Promise<ScriptFile | null>;
   historyList(search: string | null, limit: number): Promise<HistoryEntry[]>;
   historyClear(): Promise<void>;
   selftestConfig(): Promise<SelfTestConfig | null>;
@@ -78,6 +96,15 @@ const tauriBackend: Backend = {
   schemaList: (workspaceId) => invoke('schema_list', { workspaceId }),
   schemaObjects: (workspaceId, schema) => invoke('schema_objects', { workspaceId, schema }),
   tableColumns: (workspaceId, schema, table) => invoke('table_columns', { workspaceId, schema, table }),
+  tableDetails: (workspaceId, schema, table) => invoke('table_details', { workspaceId, schema, table }),
+  schemaDefaults: (workspaceId, schema) => invoke('schema_defaults', { workspaceId, schema }),
+  charsets: (workspaceId) => invoke('charsets', { workspaceId }),
+  collations: (workspaceId, charset) => invoke('collations', { workspaceId, charset }),
+  schemaDdl: (alter, name, charset, collation) => invoke('schema_ddl', { alter, name, charset, collation }),
+  alterScript: (workspaceId, kind, schema, name) => invoke('alter_script', { workspaceId, kind, schema, name }),
+  createTemplate: (kind, schema) => invoke('create_template', { kind, schema }),
+  scriptOpen: () => invoke('script_open'),
+  scriptSave: (path, suggestedName, text) => invoke('script_save', { path, suggestedName, text }),
   historyList: (search, limit) => invoke('history_list', { search, limit }),
   historyClear: () => invoke('history_clear'),
   selftestConfig: () => invoke('selftest_config'),

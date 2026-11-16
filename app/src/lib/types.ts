@@ -74,7 +74,7 @@ export interface ColumnInfo {
   kind: ColumnKind;
 }
 
-export type RunMode = { kind: 'all' } | { kind: 'at'; offset: number };
+export type RunMode = { kind: 'all' } | { kind: 'at'; offset: number } | { kind: 'explainAt'; offset: number };
 
 export type RunMsg =
   | { type: 'started'; index: number; total: number; sql: string }
@@ -113,6 +113,43 @@ export interface ColumnEntry {
   key: string;
   default: string | null;
   extra: string;
+}
+
+export type ObjectKind = 'table' | 'view' | 'procedure' | 'function' | 'trigger' | 'event';
+
+export interface TableDetails {
+  isView: boolean;
+  engine: string | null;
+  /** The storage engine's estimate, not an exact count. */
+  rowsEstimate: number | null;
+  collation: string | null;
+  comment: string;
+  created: string | null;
+  dataBytes: number | null;
+  indexBytes: number | null;
+}
+
+export interface SchemaDefaults {
+  charset: string;
+  collation: string;
+}
+
+export interface Charset {
+  name: string;
+  defaultCollation: string;
+}
+
+export interface ScriptFile {
+  path: string;
+  name: string;
+  text: string;
+}
+
+/** Something picked in the schema tree. `name` is null for a schema itself. */
+export interface TreeTarget {
+  kind: 'schema' | ObjectKind;
+  schema: string;
+  name: string | null;
 }
 
 export interface HistoryEntry {
@@ -156,6 +193,27 @@ export function asUiError(e: unknown): UiError {
     return { kind: typeof o.kind === 'string' ? o.kind : 'other', message: String(o.message) };
   }
   return { kind: 'other', message: String(e) };
+}
+
+/** Adds a next step to connection errors the user can fix in the connection settings. */
+export function explainConnectError(error: UiError): string {
+  switch (error.kind) {
+    case 'tls':
+      return `${error.message}. The server's certificate could not be verified. Servers with a default or self-signed certificate need "Encrypted, not verified" (what most MySQL tools use), or their CA file.`;
+    case 'cleartext-not-enabled':
+      return `${error.message}. Turn on "Allow cleartext authentication" for this connection (LDAP and PAM accounts need it).`;
+    case 'no-tls':
+      return `${error.message}. Choose "Not encrypted" only if that is acceptable on this network.`;
+    default:
+      return error.message;
+  }
+}
+
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 export function serverLabel(v: ServerVersion): string {

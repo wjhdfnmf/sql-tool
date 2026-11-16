@@ -152,6 +152,52 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return columns.map((c) => `${c.name} ${c.columnType}${c.key ? ' ' + c.key : ''}`);
   });
 
+  await step('object details, schema defaults, character sets', async () => {
+    expect(workspace, 'not connected');
+    const details = await backend.tableDetails(workspace.id, config.schema, config.table);
+    expect(details && !details.isView && typeof details.engine === 'string', `details were ${JSON.stringify(details)}`);
+    const defaults = await backend.schemaDefaults(workspace.id, config.schema);
+    expect(defaults && defaults.charset.length > 0 && defaults.collation.length > 0, 'schema defaults missing');
+    const charsets = await backend.charsets(workspace.id);
+    const utf8mb4 = charsets.find((c) => c.name === 'utf8mb4');
+    expect(utf8mb4 && utf8mb4.defaultCollation.length > 0, 'utf8mb4 not offered');
+    const collations = await backend.collations(workspace.id, 'utf8mb4');
+    expect(collations.includes(utf8mb4.defaultCollation), 'default collation not in the list');
+    return { engine: details.engine, rowsEstimate: details.rowsEstimate, defaults, charsets: charsets.length, collations: collations.length };
+  });
+
+  await step('schema SQL, alter scripts and templates', async () => {
+    expect(workspace, 'not connected');
+    const create = await backend.schemaDdl(false, 'new shop', 'utf8mb4', null);
+    expect(create === 'CREATE SCHEMA `new shop` DEFAULT CHARACTER SET utf8mb4;', `create was ${create}`);
+    const alter = await backend.schemaDdl(true, config.schema, null, 'utf8mb4_bin');
+    expect(alter.startsWith('ALTER SCHEMA'), `alter was ${alter}`);
+    try {
+      await backend.schemaDdl(false, 'x', 'utf8mb4; DROP SCHEMA y', null);
+      throw new Error('a character set carrying SQL was accepted');
+    } catch (e) {
+      expect(asUiError(e).message.includes('not a valid'), `unexpected error: ${asUiError(e).message}`);
+    }
+    const script = await backend.alterScript(workspace.id, 'table', config.schema, config.table);
+    expect(script.includes('ALTER TABLE') && script.includes('--   CREATE TABLE'), 'table alter script is malformed');
+    const template = await backend.createTemplate('procedure', config.schema);
+    expect(template.includes('DELIMITER $$') && template.includes('CREATE PROCEDURE'), 'procedure template is malformed');
+    return { create, alter };
+  });
+
+  await step('explain the statement at the cursor', async () => {
+    const script = 'SELECT 1;\nSELECT * FROM `' + config.table + '` WHERE id = 1;';
+    const messages = await run(script, { kind: 'explainAt', offset: script.indexOf('WHERE') }, null);
+    const failed = ofType(messages, 'failed')[0];
+    expect(!failed, `explain failed: ${failed?.message}`);
+    const started = ofType(messages, 'started');
+    expect(started.length === 1 && started[0].sql.startsWith('EXPLAIN SELECT *'), `ran: ${started.map((m) => m.sql)}`);
+    const set = ofType(messages, 'resultSet')[0];
+    expect(set && set.columns.some((c) => c.name.toLowerCase() === 'select_type'), 'no execution plan came back');
+    await backend.closeResults([set.resultId]);
+    return set.columns.map((c) => c.name);
+  });
+
   await step('run a script of two statements', async () => {
     const messages = await run("SELECT 1 AS one, 'café' AS word;\nSELECT 2 AS two, NULL AS nothing, 3.5 AS amount;", { kind: 'all' }, null);
     const sets = ofType(messages, 'resultSet');

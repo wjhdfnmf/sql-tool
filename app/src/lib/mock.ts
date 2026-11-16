@@ -177,6 +177,9 @@ export const mockBackend: Backend = {
   connectionTest: async (profile) => {
     await wait(500);
     if (profile.host.includes('bad')) throw fail('network', 'network error: No such host is known.');
+    if (profile.host.includes('selfsigned') && profile.tls.startsWith('verify')) {
+      throw fail('tls', 'TLS failed: invalid peer certificate: UnknownIssuer');
+    }
     return serverInfo(profile);
   },
   connect: async (profileId, password) => {
@@ -210,7 +213,7 @@ export const mockBackend: Backend = {
   closeTab: async () => {},
   run: async (_workspaceId, tabId, script, mode, maxRows, onEvent) => {
     let statements = splitNaive(script);
-    if (mode.kind === 'at') {
+    if (mode.kind !== 'all') {
       let position = 0;
       const index = script.split(';').findIndex((part) => (position += part.length + 1) > mode.offset);
       statements = statements.slice(Math.max(0, Math.min(index, statements.length - 1))).slice(0, 1);
@@ -224,7 +227,7 @@ export const mockBackend: Backend = {
       const elapsed = () => Math.round(performance.now() - t0);
       onEvent({ type: 'started', index, total: statements.length, sql });
       ran++;
-      const lower = sql.toLowerCase();
+      const lower = mode.kind === 'explainAt' ? `explain ${sql.toLowerCase()} limit 3` : sql.toLowerCase();
       if (lower.includes('sleep')) {
         for (let i = 0; i < 100 && !cancelled.has(tabId); i++) await wait(100);
         if (cancelled.has(tabId)) {
@@ -303,6 +306,66 @@ export const mockBackend: Backend = {
       extra: name === 'id' ? 'auto_increment' : '',
     }));
   },
+  tableDetails: async (_workspaceId, schema, table) => {
+    await wait(80);
+    if (table === 'open_orders') {
+      return { isView: true, engine: null, rowsEstimate: null, collation: null, comment: 'VIEW', created: null, dataBytes: null, indexBytes: null };
+    }
+    if (!schemas[schema]?.[table]) return null;
+    return {
+      isView: false,
+      engine: 'InnoDB',
+      rowsEstimate: table === 'orders' ? 1_204_331 : 8_412,
+      collation: 'utf8mb4_0900_ai_ci',
+      comment: table === 'orders' ? 'One row per customer order' : '',
+      created: '2024-03-18 09:12:44',
+      dataBytes: table === 'orders' ? 212_336_640 : 1_589_248,
+      indexBytes: table === 'orders' ? 48_234_496 : 262_144,
+    };
+  },
+  schemaDefaults: async () => ({ charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' }),
+  charsets: async () => [
+    { name: 'latin1', defaultCollation: 'latin1_swedish_ci' },
+    { name: 'utf8mb3', defaultCollation: 'utf8mb3_general_ci' },
+    { name: 'utf8mb4', defaultCollation: 'utf8mb4_0900_ai_ci' },
+  ],
+  collations: async (_workspaceId, charset) =>
+    charset === 'utf8mb4'
+      ? ['utf8mb4_0900_ai_ci', 'utf8mb4_bin', 'utf8mb4_general_ci', 'utf8mb4_unicode_ci']
+      : [`${charset}_bin`, `${charset}_general_ci`],
+  schemaDdl: async (alter, name, charset, collation) => {
+    if (name.trim() === '') throw fail('other', 'Enter a name.');
+    return (
+      `${alter ? 'ALTER' : 'CREATE'} SCHEMA \`${name.trim()}\`` +
+      (charset ? ` DEFAULT CHARACTER SET ${charset}` : '') +
+      (collation ? ` DEFAULT COLLATE ${collation}` : '') +
+      ';'
+    );
+  },
+  alterScript: async (_workspaceId, kind, schema, name) => {
+    await wait(120);
+    if (kind === 'table') {
+      return `-- Current definition of \`${schema}\`.\`${name}\`, for reference:\n--   CREATE TABLE \`${name}\` (\n--     \`id\` int NOT NULL AUTO_INCREMENT,\n--     PRIMARY KEY (\`id\`)\n--   )\n\nALTER TABLE \`${schema}\`.\`${name}\`\n  -- for example: ADD COLUMN \`new_column\` VARCHAR(100) NULL\n;\n`;
+    }
+    if (kind === 'view') return `USE \`${schema}\`;\n\nCREATE OR REPLACE VIEW \`${name}\` AS select 1;\n`;
+    return `USE \`${schema}\`;\n\nDROP ${kind.toUpperCase()} IF EXISTS \`${name}\`;\n\nDELIMITER $$\nCREATE ${kind.toUpperCase()} \`${name}\`()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;\n`;
+  },
+  createTemplate: async (kind, schema) => {
+    const prefix = schema ? `\`${schema}\`.` : '';
+    if (kind === 'table') return `CREATE TABLE ${prefix}\`new_table\` (\n  \`id\` INT NOT NULL AUTO_INCREMENT,\n  \`name\` VARCHAR(100) NOT NULL,\n  PRIMARY KEY (\`id\`)\n);\n`;
+    if (kind === 'view') return `CREATE VIEW ${prefix}\`new_view\` AS\nSELECT *\nFROM ${prefix}\`table_name\`;\n`;
+    return `DELIMITER $$\nCREATE ${kind.toUpperCase()} \`new_${kind}\`()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;\n`;
+  },
+  scriptOpen: async () => ({
+    path: 'C:\\scripts\\monthly-report.sql',
+    name: 'monthly-report.sql',
+    text: '-- Monthly report\nselect status, count(*) as orders, sum(total) as revenue from sales.orders where placed_at >= \'2026-10-01\' group by status order by revenue desc;\n',
+  }),
+  scriptSave: async (path, suggestedName) => ({
+    path: path ?? `C:\\scripts\\${suggestedName}`,
+    name: path ? path.split('\\').pop()! : suggestedName,
+    text: '',
+  }),
   historyList: async (search) => {
     const needle = search?.toLowerCase();
     return history.filter((h) => !needle || h.sql.toLowerCase().includes(needle));

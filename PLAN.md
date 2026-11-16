@@ -21,6 +21,13 @@ The desktop app now connects, runs queries and browses schemas. It replaces the 
 | Schema browser | Schemas, tables, views, columns, routines, triggers, events; loaded on demand; filter box; double-click a table to see its rows |
 | History | Every statement with time, duration and outcome; searchable; statements containing a password are not stored in full |
 | Multiple connections | Several servers open at once, one tab each |
+| Menus and toolbars | Menu bar (File, Edit, View, Query, Database, Server, Help), a main toolbar, an editor toolbar, and buttons to show or hide the navigator and the output |
+| Navigator | Schemas, Administration and History tabs, with an information pane below (Object info, Session) |
+| Right-click menus | On schemas, tables, views, routines, triggers and events: set default schema, select rows, create, alter, copy name, refresh |
+| Schema changes | Create and alter schema in a dialog that shows the SQL before it runs. Create table, view, procedure and function start from a template script. Alter opens a script built from the object's current definition |
+| Script files | Open and save `.sql` files through the system file dialogs; the UI can only write to a file the user picked |
+| Explain and reformat | Execution plan of the statement under the cursor; reformat the selection or the whole script |
+| Connection errors | Test connection explains certificate and cleartext errors and offers the fix in one click |
 
 ### How it was verified
 
@@ -38,7 +45,10 @@ The end-to-end run covers the keychain round trip, wrong-password handling, the 
 ### Not done or not verified
 
 - **Nobody has clicked through the packaged app by hand.** The screens were checked in a browser with a mock backend, and the real app was checked by the automated run. Column resizing, keyboard navigation in the grid and the history panel were not exercised in the real app.
-- **Your Enterprise servers, MySQL 5.7, Linux and macOS**: still untested, as after Phase 0.
+- **Open and save script files**: built, but not exercised. The system file dialogs cannot be driven by the automated run.
+- **Alter table, view and routine** open a script to edit; there is no visual designer yet. On MySQL, altering a routine, trigger or event has to drop it and create it again, and the script says so at the top. On MariaDB it is replaced in one statement.
+- **Tools and Scripting menus** are left out until there is something to put in them. The Administration items are shortcuts that run a statement in a query tab, not dashboards.
+- **Your Enterprise servers, MySQL 5.7, Linux and macOS**: not tested by me. The CI workflow builds and runs the fake-server tests on Linux and macOS.
 - **Continuous integration** and the container matrix: not set up. There is no remote repository yet and no container runtime on this machine.
 - **Verify CA and certificate pinning**: still blocked on the driver change described under Phase 0.
 - **Memory**: results are held in RAM. The row limit bounds this in normal use; "No limit" on a huge table can still exhaust memory. Spill to disk is not built.

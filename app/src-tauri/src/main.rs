@@ -8,7 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,16 +16,18 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sqltool_core::metadata::{ColumnEntry, SchemaObjects};
+use sqltool_core::metadata::{Charset, ColumnEntry, SchemaDefaults, SchemaObjects, TableDetails};
 use sqltool_core::{
-    split, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ProfileStore, ResultStore,
-    RunEvent, SavedProfile, ServerInfo, Session, TlsMode,
+    ddl, split, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
+    ResultStore, RunEvent, SavedProfile, ServerInfo, Session, TlsMode,
 };
 use tauri::ipc::{Channel, Response};
 use tauri::{Manager, State};
 
 /// Largest cell value sent to the UI in one piece by `get_cell`.
 const MAX_CELL_BYTES: usize = 2 * 1024 * 1024;
+/// Largest script file the editor will open.
+const MAX_SCRIPT_BYTES: u64 = 20 * 1024 * 1024;
 
 // ---------- errors ----------
 
@@ -96,6 +98,9 @@ struct AppState {
     history: History,
     workspaces: Mutex<HashMap<u64, Arc<Workspace>>>,
     results: Mutex<HashMap<u64, Arc<ResultStore>>>,
+    /// Files the user picked in a native dialog this session. The UI can
+    /// only save to one of these, never to a path of its own choosing.
+    approved_files: Mutex<HashSet<PathBuf>>,
     next_id: AtomicU64,
     #[cfg(feature = "devtools")]
     demo: tokio::sync::OnceCell<Demo>,
@@ -108,6 +113,7 @@ impl AppState {
             history: History::new(data_dir.join("history.jsonl")),
             workspaces: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
+            approved_files: Mutex::new(HashSet::new()),
             next_id: AtomicU64::new(1),
             #[cfg(feature = "devtools")]
             demo: tokio::sync::OnceCell::new(),
@@ -303,6 +309,8 @@ enum RunMode {
     All,
     /// Only the statement at this cursor position (UTF-16 offset).
     At { offset: usize },
+    /// The execution plan of the statement at this cursor position.
+    ExplainAt { offset: usize },
 }
 
 #[derive(Clone, Serialize)]
@@ -389,6 +397,19 @@ async fn run(
         RunMode::At { offset } => {
             let byte_offset = split::utf16_to_byte_offset(&script, offset);
             split::statement_at(&all, byte_offset).cloned().into_iter().collect()
+        }
+        RunMode::ExplainAt { offset } => {
+            let byte_offset = split::utf16_to_byte_offset(&script, offset);
+            split::statement_at(&all, byte_offset)
+                .cloned()
+                .map(|mut statement| {
+                    if split::first_keyword(&statement.text) != "EXPLAIN" {
+                        statement.text = format!("EXPLAIN {}", statement.text);
+                    }
+                    statement
+                })
+                .into_iter()
+                .collect()
         }
     };
 
@@ -600,6 +621,170 @@ async fn table_columns(
     Ok(session.table_columns(&schema, &table).await?)
 }
 
+#[tauri::command]
+async fn table_details(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    schema: String,
+    table: String,
+) -> Result<Option<TableDetails>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    Ok(session.table_details(&schema, &table).await?)
+}
+
+#[tauri::command]
+async fn schema_defaults(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    schema: String,
+) -> Result<Option<SchemaDefaults>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    Ok(session.schema_defaults(&schema).await?)
+}
+
+#[tauri::command]
+async fn charsets(state: State<'_, AppState>, workspace_id: u64) -> Result<Vec<Charset>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    Ok(session.charsets().await?)
+}
+
+#[tauri::command]
+async fn collations(state: State<'_, AppState>, workspace_id: u64, charset: String) -> Result<Vec<String>, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    Ok(session.collations(&charset).await?)
+}
+
+// ---------- building SQL for schema changes ----------
+
+/// The SQL to create (`alter` false) or alter a schema, for review before running.
+#[tauri::command]
+fn schema_ddl(alter: bool, name: String, charset: Option<String>, collation: Option<String>) -> Result<String, UiError> {
+    let (charset, collation) = (charset.as_deref(), collation.as_deref());
+    Ok(if alter {
+        ddl::alter_schema(&name, charset, collation)?
+    } else {
+        ddl::create_schema(&name, charset, collation)?
+    })
+}
+
+/// A script that changes an existing object, built from its current definition.
+#[tauri::command]
+async fn alter_script(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    kind: ObjectKind,
+    schema: String,
+    name: String,
+) -> Result<String, UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let mut session = workspace.utility.lock().await;
+    let create = session.show_create(kind, &schema, &name).await?;
+    // MariaDB can replace routines, triggers and events in one statement.
+    let or_replace = session.info().version.flavor == sqltool_core::Flavor::MariaDb;
+    Ok(ddl::alter_script(kind, &schema, &name, &create, or_replace))
+}
+
+/// A starting script for a new object.
+#[tauri::command]
+fn create_template(kind: ObjectKind, schema: Option<String>) -> String {
+    ddl::create_template(kind, schema.as_deref())
+}
+
+// ---------- script files ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScriptFile {
+    path: String,
+    /// File name without the folder, for the tab title.
+    name: String,
+    text: String,
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Shows the native open or save dialog and returns the chosen path. The
+/// dialog runs in the shell, so the UI never supplies a path of its own.
+async fn pick_file(app: &tauri::AppHandle, save_as: Option<&str>) -> Option<PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let dialog = app
+        .dialog()
+        .file()
+        .add_filter("SQL scripts", &["sql"])
+        .add_filter("All files", &["*"]);
+    let done = move |path| {
+        let _ = tx.send(path);
+    };
+    match save_as {
+        Some(name) => dialog.set_file_name(name).save_file(done),
+        None => dialog.pick_file(done),
+    }
+    rx.await.ok().flatten().and_then(|path| path.into_path().ok())
+}
+
+/// Lets the user pick a script and returns its contents. `None` if cancelled.
+#[tauri::command]
+async fn script_open(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<ScriptFile>, UiError> {
+    let Some(path) = pick_file(&app, None).await else {
+        return Ok(None);
+    };
+    let storage = |e: std::io::Error| ui_error("storage", format!("Could not open {}: {e}", path.display()));
+    if std::fs::metadata(&path).map_err(storage)?.len() > MAX_SCRIPT_BYTES {
+        return Err(ui_error("storage", "That file is larger than 20 MB, which is more than the editor opens."));
+    }
+    let text = String::from_utf8(std::fs::read(&path).map_err(storage)?).map_err(|_| {
+        ui_error("storage", "That file is not UTF-8 text. Convert it to UTF-8 to open it here.")
+    })?;
+    state.approved_files.lock().unwrap().insert(path.clone());
+    Ok(Some(ScriptFile {
+        name: file_name(&path),
+        path: path.to_string_lossy().into_owned(),
+        text,
+    }))
+}
+
+/// Saves a script. With `path`, writes back to a file opened or saved earlier
+/// in this session; without, asks where to save. `None` if cancelled.
+#[tauri::command]
+async fn script_save(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+    suggested_name: String,
+    text: String,
+) -> Result<Option<ScriptFile>, UiError> {
+    let target = match path {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if !state.approved_files.lock().unwrap().contains(&path) {
+                return Err(ui_error("storage", "That file was not opened in this session."));
+            }
+            path
+        }
+        None => match pick_file(&app, Some(&suggested_name)).await {
+            Some(path) => path,
+            None => return Ok(None),
+        },
+    };
+    std::fs::write(&target, &text)
+        .map_err(|e| ui_error("storage", format!("Could not save {}: {e}", target.display())))?;
+    state.approved_files.lock().unwrap().insert(target.clone());
+    Ok(Some(ScriptFile {
+        name: file_name(&target),
+        path: target.to_string_lossy().into_owned(),
+        text: String::new(),
+    }))
+}
+
 // ---------- history ----------
 
 #[tauri::command]
@@ -731,6 +916,7 @@ fn selftest_report(app: tauri::AppHandle, report: String) -> Result<(), UiError>
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // SQLTOOL_DATA_DIR overrides where profiles and history are kept,
             // which also keeps test runs away from real settings.
@@ -759,6 +945,15 @@ fn main() {
             schema_list,
             schema_objects,
             table_columns,
+            table_details,
+            schema_defaults,
+            charsets,
+            collations,
+            schema_ddl,
+            alter_script,
+            create_template,
+            script_open,
+            script_save,
             history_list,
             history_clear,
             selftest_config,
