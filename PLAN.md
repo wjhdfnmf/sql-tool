@@ -1,6 +1,53 @@
 # Project plan: open-source SQL client for MySQL and MariaDB
 
-Status: Phase 1 first build working on Windows, 2026-11-15, tested against real MariaDB 11.8 and MySQL 8.4 (see "Phase 1 status"). MySQL Enterprise, MySQL 5.7, Linux and macOS checks are still open. Project name is still to be chosen.
+Status: Phases 0 to 2 done; Phase 3 partly done (see "Phase 3 status"), 2026-11-16. Project name is still to be chosen.
+
+## Phase 3 status
+
+Hardening and release work. Part of it is done; the rest needs decisions or accounts that only the project owner has.
+
+### Done
+
+| Area | State |
+|---|---|
+| Certificate pinning | A new encryption mode. The app fetches the server's certificate (sending no credentials), shows its subject, issuer, expiry and fingerprint, and connects only to that exact certificate from then on. No CA file is needed, and cleartext authentication is allowed without the risk override |
+| Verify CA | Works. It was broken in the published driver |
+| Patched driver | `vendor/mysql_async` is the upstream driver with three marked changes, listed in its `PATCHES.md` |
+| Memory limit | A result keeps about 512 MB in memory (`SQLTOOL_RESULT_MEMORY_MB` changes it); the rest goes to an anonymous temporary file and is read back through a memory map. Sorting, filtering, export and editing work the same either way |
+| Installers | CI builds an NSIS installer on Windows, `.deb`, `.rpm` and AppImage on Linux, and a `.dmg` on macOS, on every push and pull request |
+| Release pipeline | Pushing a `v*` tag builds the installers on clean CI machines and attaches them with checksums to a draft release. Nothing is public until the draft is published by hand |
+| Release contents | The demo server and self-test are now a development-only feature and are not in release builds |
+| Dependency audit | Weekly, and on demand: `cargo audit` and `npm audit` |
+| Project documents | `SECURITY.md` and `CONTRIBUTING.md` |
+
+### How it was verified
+
+| Check | Result |
+|---|---|
+| Core unit tests | 87 pass, including spill to disk with a tiny memory budget |
+| Login and TLS tests against the fake server | 23 pass, none switched off. New: the probe sends no credentials; a pinned certificate allows cleartext login with no CA; a different certificate receives no password |
+| Core against real MariaDB 11.8.6 and MySQL 8.4.13, on the patched driver | 5 of 5 pass |
+| Desktop app end to end, on each real server | 28 of 28 steps pass, including fetching the certificate, connecting with it pinned, and being refused with a wrong pin |
+
+### Not verified
+
+- **The installers themselves.** They are built by CI; none has been installed and run by a person.
+- **The release workflow.** It runs only when a tag is pushed, and no tag has been pushed since it was written.
+- **The pinning screen** has not been clicked through by hand in the built app.
+
+### Not done
+
+| Item | What it needs |
+|---|---|
+| Code signing | A Windows certificate and an Apple Developer account. Until then installers show operating system warnings |
+| Auto-update | A signing key for update manifests, stored as a repository secret |
+| SSH tunnels | Not started |
+| Client certificates, socket and named-pipe connections | Not started |
+| Automatic reconnect; commit and rollback controls | Not started |
+| Accessibility pass, user documentation | Not started |
+| Performance benchmarks in CI | Not started; the Phase 0 benchmark was a one-off |
+| Lint and formatting gates in CI | Not started |
+| External security review | Needs a reviewer |
 
 ## Phase 2 status
 
@@ -88,8 +135,8 @@ The end-to-end run covers the keychain round trip, wrong-password handling, the 
 - **Tools and Scripting menus** are left out until there is something to put in them. The Administration items are shortcuts that run a statement in a query tab, not dashboards.
 - **Your Enterprise servers, MySQL 5.7, Linux and macOS**: not tested by me. The CI workflow builds and runs the fake-server tests on Linux and macOS.
 - **Continuous integration** and the container matrix: not set up. There is no remote repository yet and no container runtime on this machine.
-- **Verify CA and certificate pinning**: still blocked on the driver change described under Phase 0.
-- **Memory**: results are held in RAM. The row limit bounds this in normal use; "No limit" on a huge table can still exhaust memory. Spill to disk is not built.
+- **Verify CA and certificate pinning**: done in Phase 3.
+- **Memory**: done in Phase 3; large results spill to disk.
 - **Lost connections**: a dropped connection surfaces as an error on the next statement. There is no automatic reconnect.
 - **Transactions**: sessions run in the server's default autocommit mode. There is no commit/rollback control or open-transaction indicator yet.
 - Installer packaging, signing and auto-update are Phase 3.

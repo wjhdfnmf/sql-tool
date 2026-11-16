@@ -24,6 +24,12 @@ pub enum Error {
     #[error("TLS failed: {0}")]
     Tls(String),
 
+    #[error(
+        "the server presented a different certificate from the one trusted for this connection; \
+         nothing was sent. If the certificate was replaced on purpose, fetch and trust the new one"
+    )]
+    CertificateChanged,
+
     #[error("access denied: {message} (error {code})")]
     AccessDenied { code: u16, message: String },
 
@@ -53,6 +59,7 @@ impl Error {
             Error::UnsupportedAuthPlugin(_) => "unsupported-auth",
             Error::ServerHasNoTls => "no-tls",
             Error::Tls(_) => "tls",
+            Error::CertificateChanged => "certificate-changed",
             Error::AccessDenied { .. } => "access-denied",
             Error::Server { .. } => "server",
             Error::Io(_) => "network",
@@ -77,7 +84,18 @@ impl From<mysql_async::Error> for Error {
             mysql_async::Error::Io(IoError::Io(e))
                 if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) =>
             {
-                Error::Tls(e.to_string())
+                // The pinned-certificate check reports a mismatch this way.
+                let pin_mismatch = e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()).is_some_and(|tls| {
+                    matches!(
+                        tls,
+                        rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)
+                    )
+                });
+                if pin_mismatch {
+                    Error::CertificateChanged
+                } else {
+                    Error::Tls(e.to_string())
+                }
             }
             mysql_async::Error::Io(IoError::Io(e)) => Error::Io(e.to_string()),
             mysql_async::Error::Server(e) => match e.code {

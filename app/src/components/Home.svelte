@@ -16,6 +16,7 @@
   const tlsLabels: Record<TlsSetting, string> = {
     'verify-identity': 'Encrypted, verified',
     'verify-ca': 'Encrypted, CA verified',
+    pinned: 'Encrypted, pinned certificate',
     unverified: 'Encrypted, not verified',
     disabled: 'Not encrypted',
   };

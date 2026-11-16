@@ -1,0 +1,34 @@
+name: Dependency audit
+
+# Checks the Rust and npm dependencies against the public advisory databases
+# once a week, and on demand. Kept out of the per-commit CI so that a newly
+# published advisory does not block unrelated changes.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Audit Rust dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Audit npm dependencies that ship in the app
+        working-directory: app
+        run: |
+          npm ci
+          npm audit --omit=dev

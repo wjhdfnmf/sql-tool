@@ -8,12 +8,13 @@ publish.workspace = true
 build = "build.rs"
 
 [features]
-default = ["devtools"]
+default = []
 # Serve the built UI from inside the executable. `tauri build` turns this on;
 # pass it by hand when building with plain cargo.
 custom-protocol = ["tauri/custom-protocol"]
 # Built-in fake server ("Demo server") and the unattended self-test.
-# On during development; release packaging turns it off.
+# For development only: off by default, so release builds do not carry it.
+# Turn it on with `--features devtools` (`npm run tauri:dev` does).
 devtools = ["dep:sqltool-fakeserver"]
 
 [build-dependencies]

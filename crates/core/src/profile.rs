@@ -16,12 +16,15 @@ pub enum TlsMode {
     VerifyCa,
     /// As `VerifyCa`, and the certificate must also match the host name.
     VerifyIdentity,
+    /// Encrypted, and the server must present exactly the certificate the
+    /// user chose to trust (`ConnectProfile::pinned_sha256`).
+    Pinned,
 }
 
 impl TlsMode {
     /// True when an impersonating server would be rejected.
     pub fn verifies_server(self) -> bool {
-        matches!(self, TlsMode::VerifyCa | TlsMode::VerifyIdentity)
+        matches!(self, TlsMode::VerifyCa | TlsMode::VerifyIdentity | TlsMode::Pinned)
     }
 }
 
@@ -42,6 +45,8 @@ pub struct ConnectProfile {
     pub tls: TlsMode,
     /// CA to trust. When set, the system trust store is not used.
     pub ca: Option<CaSource>,
+    /// SHA-256 of the one certificate trusted in `TlsMode::Pinned`.
+    pub pinned_sha256: Option<[u8; 32]>,
     /// Allow the `mysql_clear_password` plugin (LDAP and PAM accounts).
     pub allow_cleartext_auth: bool,
     /// Allow cleartext auth even though the transport does not verify the
@@ -60,6 +65,7 @@ impl ConnectProfile {
             database: None,
             tls: TlsMode::VerifyIdentity,
             ca: None,
+            pinned_sha256: None,
             allow_cleartext_auth: false,
             accept_cleartext_on_unverified_transport: false,
         }

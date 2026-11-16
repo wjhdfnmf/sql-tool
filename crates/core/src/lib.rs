@@ -10,6 +10,7 @@ pub mod guard;
 pub mod history;
 pub mod metadata;
 pub mod policy;
+pub mod probe;
 pub mod profile;
 pub mod profiles;
 pub mod session;

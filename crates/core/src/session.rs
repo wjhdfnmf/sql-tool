@@ -82,9 +82,9 @@ fn build_opts(profile: &ConnectProfile) -> Opts {
             }
             Some(match mode {
                 TlsMode::Required => ssl.with_danger_accept_invalid_certs(true),
-                // Known driver defect: with rustls this still checks the host
-                // name, so Verify CA currently behaves like Verify Identity.
                 TlsMode::VerifyCa => ssl.with_danger_skip_domain_validation(true),
+                // The policy check has already refused a pinned mode without a pin.
+                TlsMode::Pinned => ssl.with_pinned_cert_sha256(profile.pinned_sha256),
                 _ => ssl,
             })
         }

@@ -57,9 +57,11 @@
   const security = $derived(
     info.security === 'verified'
       ? { text: `Encrypted (${tls}), server verified`, level: 'good' }
-      : info.security === 'unverified'
-        ? { text: `Encrypted (${tls}), server not verified`, level: 'caution' }
-        : { text: 'Not encrypted', level: 'bad' },
+      : info.security === 'pinned'
+        ? { text: `Encrypted (${tls}), pinned certificate`, level: 'good' }
+        : info.security === 'unverified'
+          ? { text: `Encrypted (${tls}), server not verified`, level: 'caution' }
+          : { text: 'Not encrypted', level: 'bad' },
   );
 
   const rowLimits: { label: string; value: number | null }[] = [

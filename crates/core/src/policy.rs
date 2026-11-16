@@ -15,11 +15,16 @@ pub enum PolicyError {
          or explicitly accept the risk for this connection"
     )]
     CleartextWithUnverifiedTls,
+    #[error("no certificate has been trusted for this connection yet; fetch the server's certificate and trust it first")]
+    NothingPinned,
 }
 
 /// Cleartext authentication hands the real password to whoever is on the
 /// other end, so it is only allowed when that end has been verified.
 pub fn check(profile: &ConnectProfile) -> Result<(), PolicyError> {
+    if profile.tls == TlsMode::Pinned && profile.pinned_sha256.is_none() {
+        return Err(PolicyError::NothingPinned);
+    }
     if !profile.allow_cleartext_auth
         || profile.tls.verifies_server()
         || profile.accept_cleartext_on_unverified_transport

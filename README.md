@@ -10,7 +10,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 
 - **Connections**: saved profiles, test connection, colour tags. Passwords go in the operating system keychain or are asked for each time; they are never written to a settings file.
 - **Authentication**: `mysql_native_password`, `caching_sha2_password`, MariaDB `ed25519`, and the cleartext plugin (`mysql_clear_password`) that LDAP and PAM accounts need.
-- **Encryption**: verified TLS, or "encrypted, not verified" as an explicit choice. Cleartext authentication on an unverified connection requires a visible acknowledgement.
+- **Encryption**: verified TLS, a pinned certificate (trust one server certificate by its fingerprint, with no CA file), or "encrypted, not verified" as an explicit choice. Cleartext authentication on an unverified connection requires a visible acknowledgement.
 - **Editor**: tabs, MySQL and MariaDB syntax highlighting, run the statement at the cursor (Ctrl+Enter) or the whole script (Ctrl+Shift+Enter), `DELIMITER` support, stop a running statement.
 - **Results**: rows appear while they stream, in a grid that stays smooth with millions of rows. Resizable columns, full-value viewer, one tab per result set.
 - **Row limit**: 1,000 to 100,000 rows per result, or none. At the limit the query is interrupted on the server.
@@ -32,19 +32,18 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 ## Known limits
 
 - Tested only on Windows, and only against MariaDB 11.8 and MySQL 8.4. MySQL 5.7, MySQL Enterprise, Linux and macOS are untested.
-- "Verify CA" mode currently behaves like full verification, because of a defect in the database driver. Servers using MySQL's auto-generated certificates can only be reached with "encrypted, not verified".
 - `sha256_password` accounts are not supported.
-- Results are held in memory. With the row limit set to "none", a very large table can exhaust it.
+- A result keeps about 512 MB in memory and spills the rest to a temporary file, which is private and removed when the result closes, but not encrypted.
 - No automatic reconnect and no commit/rollback controls yet.
-- Release binaries are not code-signed, so Windows shows a warning when you run one.
+- Installers are not code-signed, so Windows and macOS show a warning.
 
-[PLAN.md](PLAN.md) has the design, the roadmap and the test results in detail.
+[PLAN.md](PLAN.md) has the design, the roadmap and the test results in detail. See [SECURITY.md](SECURITY.md) to report a security problem and [CONTRIBUTING.md](CONTRIBUTING.md) to build and test.
 
 ## Download
 
-Pre-built Windows binaries are on the [releases page](../../releases). They need the Microsoft Edge WebView2 runtime, which Windows 10 and 11 normally already have.
+Installers are on the [releases page](../../releases). On Windows the app needs the Microsoft Edge WebView2 runtime, which Windows 10 and 11 normally already have.
 
-Development builds include a "Demo server" on the connection list: a fake server inside the app, for trying the UI without a database.
+Installers for Windows, Linux and macOS are also built for every commit; they are attached to the run on the [Actions page](../../actions/workflows/ci.yml) for 14 days.
 
 ## Build from source
 
@@ -53,16 +52,18 @@ You need [Rust](https://rustup.rs) and [Node.js](https://nodejs.org). On Linux, 
 Development, with live reload:
 
 ```bash
-cd app && npm install && npm run tauri dev
+cd app && npm install && npm run tauri:dev
 ```
 
-A release build:
+That build includes a "Demo server" on the connection list: a fake server inside the app, for trying the UI without a database.
+
+Installers, as CI builds them:
 
 ```bash
-cd app && npm install && npm run build && cd .. && cargo build --release -p sqltool-app --features custom-protocol
+cd app && npm install && npm run tauri build
 ```
 
-The binary is `target/release/sqltool-app` (`.exe` on Windows).
+They land in `target/release/bundle`.
 
 ## Tests
 
@@ -93,6 +94,7 @@ bash tests/servers/selftest.sh mariadb
 | `app/src-tauri` | The desktop shell: a thin command layer over the core |
 | `app/src` | The user interface (Svelte and TypeScript) |
 | `tests/servers` | Scripts that set up local MariaDB and MySQL test servers |
+| `vendor/mysql_async` | A patched copy of the database driver; see its `PATCHES.md` |
 
 ## Licence
 

@@ -101,6 +101,34 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     throw new Error('a wrong password was accepted');
   });
 
+  await step('fetch the certificate and connect with it pinned', async () => {
+    const certificate = await backend.certificateProbe(config.profile.host, config.profile.port);
+    expect(/^[0-9a-f]{64}$/.test(certificate.sha256) && certificate.subject.length > 0, `certificate was ${JSON.stringify(certificate)}`);
+    const pinned = await backend.profileSave(
+      { ...config.profile, name: 'Self-test pinned', tls: 'pinned', caFile: null, pinnedSha256: certificate.sha256 },
+      config.password,
+    );
+    const wrong = await backend.profileSave(
+      { ...config.profile, name: 'Self-test wrong pin', tls: 'pinned', caFile: null, pinnedSha256: 'ab'.repeat(32) },
+      config.password,
+    );
+    try {
+      const connected = await backend.connect(pinned.id, null);
+      expect(connected.security === 'pinned' && connected.info.tlsVersion !== null, `connected as ${JSON.stringify(connected)}`);
+      await backend.disconnect(connected.id);
+      try {
+        await backend.connect(wrong.id, null);
+        throw new Error('a connection with the wrong pin was accepted');
+      } catch (e) {
+        expect(asUiError(e).kind === 'certificate-changed', `expected certificate-changed, got ${asUiError(e).kind}: ${asUiError(e).message}`);
+      }
+      return { subject: certificate.subject, issuer: certificate.issuer, selfSigned: certificate.selfSigned };
+    } finally {
+      await backend.profileDelete(pinned.id);
+      await backend.profileDelete(wrong.id);
+    }
+  });
+
   await step('schema list', async () => {
     expect(workspace, 'not connected');
     const schemas = await backend.schemaList(workspace.id);

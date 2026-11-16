@@ -2,8 +2,10 @@
 resolver = "2"
 members = ["crates/core", "crates/secrets", "crates/cli", "crates/fakeserver", "app/src-tauri"]
 
+exclude = ["vendor/mysql_async"]
+
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
@@ -12,6 +14,11 @@ publish = false
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 thiserror = "2"
 anyhow = "1"
+
+# A patched copy of the driver: Verify CA fixed, certificate pinning added.
+# See vendor/mysql_async/PATCHES.md.
+[patch.crates-io]
+mysql_async = { path = "vendor/mysql_async" }
 
 [profile.release]
 lto = "thin"

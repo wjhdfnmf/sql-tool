@@ -168,14 +168,9 @@ async fn host_name_mismatch_fails_verify_identity() {
     assert_eq!(server.observed().cleartext_password, None);
 }
 
-// Known driver defect, found in the Phase 0 spike. mysql_async 0.37.1 decides
-// whether a rustls failure is a host name mismatch by searching the error
-// text for "NotValidForName", which current rustls no longer prints. Verify CA
-// therefore behaves like Verify Identity: it fails closed, which is safe, but
-// the mode does not work. MySQL 5.7's auto-generated certificates carry no
-// usable host name, so this mode is needed. See PLAN.md, Phase 0 findings.
+// This was a defect in the published driver (it failed closed). The patched
+// copy in vendor/mysql_async fixes it.
 #[tokio::test]
-#[ignore = "mysql_async 0.37.1: skip_domain_validation is ineffective with rustls"]
 async fn verify_ca_accepts_a_host_name_mismatch() {
     let id = generate_identity(&["db.example.test"]);
     let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
@@ -400,4 +395,81 @@ async fn run_surfaces_server_errors_with_their_code() {
         other => panic!("expected a syntax error, got {other:?}"),
     }
     assert!(session.query("SELECT 1").await.is_ok(), "session survives a failed statement");
+}
+
+#[tokio::test]
+async fn probe_returns_the_certificate_without_sending_credentials() {
+    let id = identity();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
+        .await
+        .unwrap();
+
+    let info = sqltool_core::probe::probe_certificate("127.0.0.1", server.port()).await.unwrap();
+    assert_eq!(info.sha256, sqltool_core::probe::to_hex(&sqltool_core::probe::fingerprint(&id.cert_der)));
+    assert!(info.subject.contains("sqltool fake server"), "{info:?}");
+    assert!(info.issuer.contains("test CA") && !info.self_signed, "{info:?}");
+
+    let seen = server.observed();
+    assert_eq!(seen.username, None, "the probe must not get as far as a login");
+    assert_eq!(seen.cleartext_password, None);
+    assert_eq!(seen.logins_ok, 0);
+}
+
+#[tokio::test]
+async fn probe_reports_a_server_without_tls() {
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, None)).await.unwrap();
+    assert!(matches!(
+        sqltool_core::probe::probe_certificate("127.0.0.1", server.port()).await,
+        Err(Error::ServerHasNoTls)
+    ));
+}
+
+fn pinned_profile(server: &FakeServer, pin: Option<[u8; 32]>) -> ConnectProfile {
+    let mut p = ConnectProfile::new("127.0.0.1", server.port(), "ann", SecretString::from(PASSWORD));
+    p.tls = TlsMode::Pinned;
+    p.pinned_sha256 = pin;
+    p.allow_cleartext_auth = true;
+    p
+}
+
+#[tokio::test]
+async fn pinned_certificate_allows_cleartext_login_without_any_ca() {
+    // A certificate no CA here vouches for, and whose name does not match:
+    // exactly the kind of server certificate pinning is for.
+    let id = generate_identity(&["db.example.test"]);
+    let server = FakeServer::start(Config::mysql_5_7_enterprise_ldap(PASSWORD, Some(id.clone())))
+        .await
+        .unwrap();
+    let pin = sqltool_core::probe::fingerprint(&id.cert_der);
+
+    let session = Session::connect(&pinned_profile(&server, Some(pin))).await.unwrap();
+    assert_eq!(session.info().tls_version.as_deref(), Some("TLSv1.2"));
+    let seen = server.observed();
+    assert_eq!(seen.cleartext_password.as_deref(), Some(PASSWORD));
+    assert_eq!(seen.cleartext_over_tls, Some(true));
+}
+
+#[tokio::test]
+async fn a_different_certificate_than_the_pinned_one_gets_no_password() {
+    let trusted = generate_identity(&["127.0.0.1"]);
+    let impostor = generate_identity(&["127.0.0.1"]);
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(impostor)))
+        .await
+        .unwrap();
+    let pin = sqltool_core::probe::fingerprint(&trusted.cert_der);
+
+    assert!(matches!(expect_err(&pinned_profile(&server, Some(pin))).await, Error::CertificateChanged));
+    assert_eq!(server.observed().cleartext_password, None);
+    assert_eq!(server.observed().logins_ok, 0);
+}
+
+#[tokio::test]
+async fn pinned_mode_without_a_pin_is_refused_before_connecting() {
+    let id = identity();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id))).await.unwrap();
+    assert!(matches!(
+        expect_err(&pinned_profile(&server, None)).await,
+        Error::Policy(PolicyError::NothingPinned)
+    ));
+    assert_eq!(server.observed().connections, 0);
 }

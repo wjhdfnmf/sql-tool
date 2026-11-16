@@ -5,6 +5,12 @@
 //! server sent them: one length-prefixed byte string per cell, back to back in
 //! a single buffer, so a window of rows is one contiguous slice.
 //!
+//! Rows are held in chunks. Up to a memory budget the chunks live in RAM;
+//! past it, each further chunk is written to a private temporary file and
+//! read back through a memory map, so a very large result costs disk space
+//! instead of memory. The file is anonymous and disappears when the result
+//! is closed. Its contents are not encrypted.
+//!
 //! Sorting and filtering do not move any data. They build a *view*: a list
 //! of row numbers in display order. Everything the UI reads goes through it.
 //!
@@ -16,6 +22,7 @@
 //! - `0xFE`, u64 length, bytes
 
 use std::cmp::Ordering;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::RwLock;
 
 use serde::Serialize;
@@ -158,6 +165,35 @@ fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
     needle.is_empty() || haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
+/// How much of one result is kept in RAM before spilling to disk, unless
+/// `SQLTOOL_RESULT_MEMORY_MB` says otherwise.
+const DEFAULT_MEMORY_BUDGET: u64 = 512 * 1024 * 1024;
+const DEFAULT_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+/// Memory maps must start on a multiple of this (the strictest platform, Windows).
+const MAP_ALIGNMENT: u64 = 64 * 1024;
+
+enum Chunk {
+    Memory(Vec<u8>),
+    Disk(memmap2::Mmap),
+}
+
+impl Chunk {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Chunk::Memory(bytes) => bytes,
+            Chunk::Disk(map) => map,
+        }
+    }
+}
+
+/// Where one row's bytes are.
+#[derive(Clone, Copy)]
+struct RowLocation {
+    chunk: u32,
+    start: u32,
+    end: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreStatus {
     pub columns: Vec<ColumnInfo>,
@@ -166,6 +202,8 @@ pub struct StoreStatus {
     /// Rows in the result regardless of any filter.
     pub total_rows: u64,
     pub bytes: u64,
+    /// How many of those bytes are on disk instead of in memory.
+    pub spilled_bytes: u64,
     /// True once the query has finished, successfully or not.
     pub done: bool,
     /// True when the row limit stopped the result before the server was done.
@@ -173,14 +211,20 @@ pub struct StoreStatus {
     pub error: Option<String>,
 }
 
-#[derive(Default)]
 struct Inner {
     columns: Vec<ColumnInfo>,
     truncated: bool,
-    data: Vec<u8>,
-    /// Start offset of each row, plus one final entry for the end of the last
-    /// row, so row `i` is `data[offsets[i]..offsets[i + 1]]`.
-    offsets: Vec<u64>,
+    chunks: Vec<Chunk>,
+    rows: Vec<RowLocation>,
+    memory_bytes: u64,
+    disk_bytes: u64,
+    memory_budget: u64,
+    chunk_size: usize,
+    /// Created on first use. Anonymous: it has no name and is removed by the
+    /// operating system when it is closed.
+    spill_file: Option<std::fs::File>,
+    /// Set if writing to disk failed; from then on everything stays in memory.
+    spill_failed: bool,
     /// Row numbers in display order while a sort or filter is active.
     view: Option<Vec<u32>>,
     done: bool,
@@ -189,7 +233,7 @@ struct Inner {
 
 impl Inner {
     fn total(&self) -> u64 {
-        self.offsets.len() as u64 - 1
+        self.rows.len() as u64
     }
 
     fn visible(&self) -> u64 {
@@ -197,8 +241,52 @@ impl Inner {
     }
 
     fn raw_row(&self, row: usize) -> &[u8] {
-        &self.data[self.offsets[row] as usize..self.offsets[row + 1] as usize]
+        let at = self.rows[row];
+        &self.chunks[at.chunk as usize].bytes()[at.start as usize..at.end as usize]
     }
+
+    fn push_row(&mut self, row: &[u8]) {
+        let fits = matches!(self.chunks.last(), Some(Chunk::Memory(open)) if open.len() + row.len() <= self.chunk_size);
+        if !fits {
+            self.seal_last_chunk();
+            // A row larger than a chunk gets a chunk of its own.
+            self.chunks.push(Chunk::Memory(Vec::with_capacity(row.len().max(self.chunk_size.min(1 << 20)))));
+        }
+        let chunk = self.chunks.len() - 1;
+        let Some(Chunk::Memory(open)) = self.chunks.last_mut() else {
+            unreachable!("the last chunk was just made writable");
+        };
+        let start = open.len();
+        open.extend_from_slice(row);
+        self.memory_bytes += row.len() as u64;
+        self.rows.push(RowLocation {
+            chunk: chunk as u32,
+            start: start as u32,
+            end: (start + row.len()) as u32,
+        });
+    }
+
+    /// Called when the last chunk will not be written to again. If memory is
+    /// over budget, the chunk moves to disk.
+    fn seal_last_chunk(&mut self) {
+        if self.memory_bytes <= self.memory_budget || self.spill_failed {
+            return;
+        }
+        let Some(Chunk::Memory(bytes)) = self.chunks.last() else {
+            return;
+        };
+        let len = bytes.len() as u64;
+        match write_to_disk(&mut self.spill_file, bytes) {
+            Ok(map) => {
+                self.memory_bytes -= len;
+                self.disk_bytes += len;
+                *self.chunks.last_mut().expect("checked above") = Chunk::Disk(map);
+            }
+            // Out of disk space, or no temporary directory: keep working in memory.
+            Err(_) => self.spill_failed = true,
+        }
+    }
+
 
     /// The stored row behind a visible row number.
     fn resolve(&self, visible_row: u64) -> Option<usize> {
@@ -207,6 +295,23 @@ impl Inner {
             None => (visible_row < self.total()).then_some(visible_row as usize),
         }
     }
+}
+
+/// Appends `bytes` to the spill file (creating it on first use) and maps
+/// them back in.
+fn write_to_disk(spill_file: &mut Option<std::fs::File>, bytes: &[u8]) -> std::io::Result<memmap2::Mmap> {
+    if spill_file.is_none() {
+        *spill_file = Some(tempfile::tempfile()?);
+    }
+    let file = spill_file.as_mut().expect("just created");
+    let end = file.seek(SeekFrom::End(0))?;
+    let offset = end.div_ceil(MAP_ALIGNMENT) * MAP_ALIGNMENT;
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    // SAFETY: the file is anonymous and private to this process, and this
+    // region is never written again, so the mapped bytes cannot change.
+    unsafe { memmap2::MmapOptions::new().offset(offset).len(bytes.len()).map(&*file) }
 }
 
 /// One result set. Written by the query reader, read by the UI, concurrently.
@@ -222,10 +327,31 @@ impl Default for ResultStore {
 
 impl ResultStore {
     pub fn new() -> Self {
+        let budget = std::env::var("SQLTOOL_RESULT_MEMORY_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(DEFAULT_MEMORY_BUDGET, |mb| mb * 1024 * 1024);
+        Self::with_limits(budget, DEFAULT_CHUNK_SIZE)
+    }
+
+    /// A store that keeps about `memory_budget` bytes in RAM and spills the
+    /// rest to disk, `chunk_size` bytes at a time.
+    pub fn with_limits(memory_budget: u64, chunk_size: usize) -> Self {
         Self {
             inner: RwLock::new(Inner {
-                offsets: vec![0],
-                ..Inner::default()
+                columns: Vec::new(),
+                truncated: false,
+                chunks: Vec::new(),
+                rows: Vec::new(),
+                memory_bytes: 0,
+                disk_bytes: 0,
+                memory_budget,
+                chunk_size: chunk_size.max(1),
+                spill_file: None,
+                spill_failed: false,
+                view: None,
+                done: false,
+                error: None,
             }),
         }
     }
@@ -244,9 +370,11 @@ impl ResultStore {
             return;
         }
         let mut inner = self.inner.write().unwrap();
-        let base = inner.data.len() as u64;
-        inner.data.extend_from_slice(&batch.data);
-        inner.offsets.extend(batch.ends.iter().map(|end| base + *end as u64));
+        let mut start = 0usize;
+        for end in &batch.ends {
+            inner.push_row(&batch.data[start..*end as usize]);
+            start = *end as usize;
+        }
         drop(inner);
         batch.clear();
     }
@@ -263,7 +391,8 @@ impl ResultStore {
             columns: inner.columns.clone(),
             rows: inner.visible(),
             total_rows: inner.total(),
-            bytes: inner.data.len() as u64,
+            bytes: inner.memory_bytes + inner.disk_bytes,
+            spilled_bytes: inner.disk_bytes,
             done: inner.done,
             truncated: inner.truncated,
             error: inner.error.clone(),
@@ -279,15 +408,9 @@ impl ResultStore {
         let last = first.saturating_add(count as u64).min(visible);
         let mut out = Vec::new();
         out.extend_from_slice(&((last - first) as u32).to_le_bytes());
-        match &inner.view {
-            None => out.extend_from_slice(
-                &inner.data[inner.offsets[first as usize] as usize..inner.offsets[last as usize] as usize],
-            ),
-            Some(view) => {
-                for row in &view[first as usize..last as usize] {
-                    out.extend_from_slice(inner.raw_row(*row as usize));
-                }
-            }
+        for visible_row in first..last {
+            let row = inner.resolve(visible_row).expect("within the visible rows");
+            out.extend_from_slice(inner.raw_row(row));
         }
         out
     }
@@ -468,6 +591,73 @@ mod tests {
         assert!(status.done);
         assert_eq!(status.error.as_deref(), Some("connection lost"));
         assert_eq!(status.rows, 1);
+    }
+
+    /// A store small enough that a few hundred rows spill to disk.
+    fn spilling_store(rows: usize) -> ResultStore {
+        let store = ResultStore::with_limits(2_000, 1_000);
+        store.set_columns(vec![ColumnInfo::plain("id", ColumnKind::Number), ColumnInfo::plain("text", ColumnKind::Text)]);
+        let mut batch = RowBatch::default();
+        for i in 0..rows {
+            let id = i.to_string();
+            let text = format!("row {i} {}", "x".repeat(i % 40));
+            batch.push_row([Some(id.as_bytes()), Some(text.as_bytes())]);
+            if i % 7 == 0 {
+                store.append(&mut batch);
+            }
+        }
+        store.append(&mut batch);
+        store
+    }
+
+    #[test]
+    fn rows_past_the_memory_budget_go_to_disk_and_read_back_unchanged() {
+        let store = spilling_store(500);
+        let status = store.status();
+        assert_eq!(status.rows, 500);
+        assert!(status.spilled_bytes > 0, "nothing was spilled");
+        assert!(status.bytes - status.spilled_bytes <= 3_000, "memory use is bounded near the budget");
+        for i in [0u64, 1, 57, 249, 499] {
+            assert_eq!(store.cell(i, 0), Some(Some(i.to_string().into_bytes())));
+            let expected = format!("row {i} {}", "x".repeat(i as usize % 40));
+            assert_eq!(store.cell(i, 1), Some(Some(expected.into_bytes())));
+        }
+    }
+
+    #[test]
+    fn windows_sorting_and_filtering_work_across_memory_and_disk() {
+        let store = spilling_store(500);
+        let window = store.window(498, 10);
+        assert_eq!(&window[..4], &2u32.to_le_bytes());
+        assert_eq!(&window[4..8], b"\x03498");
+
+        assert_eq!(store.set_view(None, Some((0, true))), 500);
+        assert_eq!(store.cell(0, 0), Some(Some(b"499".to_vec())), "highest id first");
+        assert_eq!(store.cell(499, 0), Some(Some(b"0".to_vec())));
+
+        assert_eq!(store.set_view(Some("row 49"), None), 11, "row 49 and rows 490 to 499");
+        assert_eq!(store.cell(1, 0), Some(Some(b"490".to_vec())));
+    }
+
+    #[test]
+    fn a_row_larger_than_a_chunk_is_stored_whole() {
+        let store = ResultStore::with_limits(100, 64);
+        let big = "y".repeat(10_000);
+        let mut batch = RowBatch::default();
+        batch.push_row([Some(&b"before"[..])]);
+        batch.push_row([Some(big.as_bytes())]);
+        batch.push_row([Some(&b"after"[..])]);
+        store.append(&mut batch);
+        assert_eq!(store.cell(0, 0), Some(Some(b"before".to_vec())));
+        assert_eq!(store.cell(1, 0).unwrap().unwrap().len(), 10_000);
+        assert_eq!(store.cell(2, 0), Some(Some(b"after".to_vec())));
+        assert!(store.status().spilled_bytes >= 10_000);
+    }
+
+    #[test]
+    fn a_store_within_budget_never_touches_disk() {
+        let store = store_with(&[&[Some("a")], &[Some("b")]]);
+        assert_eq!(store.status().spilled_bytes, 0);
     }
 
     fn people() -> ResultStore {
