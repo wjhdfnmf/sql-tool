@@ -27,6 +27,12 @@
   let password = $state('');
   let database = $state(initial.database ?? '');
   let caFile = $state(initial.caFile ?? '');
+  let scriptFolder = $state(initial.scriptFolder ?? '');
+
+  async function browseScriptFolder() {
+    const chosen = await backend.folderPick(scriptFolder.trim() || null).catch(() => null);
+    if (chosen) scriptFolder = chosen;
+  }
   let saving = $state(false);
   let testing = $state(false);
   /** `fix` names a one-click remedy to offer alongside the message. */
@@ -110,6 +116,7 @@
       user: draft.user.trim(),
       database: database.trim() || null,
       caFile: usesCa && caFile.trim() ? caFile.trim() : null,
+      scriptFolder: scriptFolder.trim() || null,
       pinnedSha256: draft.tls === 'pinned' ? draft.pinnedSha256 : null,
       cleartextRiskAccepted: needsRiskAck && draft.cleartextRiskAccepted,
     };
@@ -216,6 +223,13 @@
             <option value={color}>{color ? color[0].toUpperCase() + color.slice(1) : 'None'}</option>
           {/each}
         </select>
+      </label>
+      <label class="wide">
+        <span>Script folder <span class="muted">(optional)</span></span>
+        <span class="with-button">
+          <input type="text" bind:value={scriptFolder} placeholder="Where Open and Save As start for this connection" autocomplete="off" spellcheck="false" />
+          <button type="button" onclick={browseScriptFolder}>Browse&hellip;</button>
+        </span>
       </label>
     </div>
 
@@ -367,6 +381,15 @@
 
   .wide {
     grid-column: 1 / -1;
+  }
+
+  .with-button {
+    display: flex;
+    gap: 6px;
+  }
+
+  .with-button input {
+    flex: 1;
   }
 
   label {

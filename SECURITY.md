@@ -19,7 +19,7 @@ A report is most useful when it shows one of these being broken:
 - **A password is never sent to a server that failed verification.** With verified or pinned TLS, a server presenting the wrong certificate gets nothing.
 - **Cleartext authentication is refused unless it is turned on for that connection**, and on an unverified connection only after an explicit acknowledgement.
 - **Passwords are stored only in the operating system keychain.** They are not written to settings, history or log files.
-- **The user interface cannot read a stored password back**, cannot read or write files of its own choosing, and loads no remote content.
+- **The user interface cannot read a stored password back**, cannot read or write files of its own choosing, and loads no remote content. A script can be saved only to a file the user picked in an Open or Save dialog. The backend keeps that list itself and remembers it between runs, so a restored tab can be saved back to its file; nothing the interface stores can add to it. A connection's script folder only sets where those dialogs start.
 - **A server cannot make the client upload local files** (`LOAD DATA LOCAL INFILE` requests are refused).
 - **Read-only connections do not change data.**
 - **Statements shown for review are the statements that run.**

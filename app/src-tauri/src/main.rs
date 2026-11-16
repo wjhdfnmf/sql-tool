@@ -8,7 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -22,7 +22,7 @@ use sqltool_core::guard::{self, Concern};
 use sqltool_core::metadata::{Charset, ColumnEntry, ForeignKeyEntry, SchemaDefaults, SchemaObjects, TableDetails};
 use sqltool_core::table::{self, IndexSpec, TableSpec};
 use sqltool_core::{
-    ddl, split, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
+    ddl, split, ApprovedFiles, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
     ResultStore, RunEvent, SavedProfile, ServerInfo, Session, Settings, SettingsStore, TlsMode,
 };
 use tauri::ipc::{Channel, Response};
@@ -74,6 +74,8 @@ struct Workspace {
     name: String,
     /// Refuse anything that is not a read.
     read_only: bool,
+    /// Where Open and Save As start for this connection, if it names a folder.
+    script_folder: Option<PathBuf>,
     /// The default schema of the connection as the user sees it: one for all
     /// its tabs, although each tab has a session of its own. A tab adopts it
     /// when its session is opened and again before each run.
@@ -152,9 +154,11 @@ struct AppState {
     settings: RwLock<Settings>,
     workspaces: Mutex<HashMap<u64, Arc<Workspace>>>,
     results: Mutex<HashMap<u64, Arc<ResultStore>>>,
-    /// Files the user picked in a native dialog this session. The UI can
-    /// only save to one of these, never to a path of its own choosing.
-    approved_files: Mutex<HashSet<PathBuf>>,
+    /// Script files the user picked in a native dialog, in this run or an
+    /// earlier one. The UI can only save to one of these, never to a path of
+    /// its own choosing. Remembered between runs so that a query tab
+    /// restored after a restart can be saved back to its file.
+    approved_files: ApprovedFiles,
     next_id: AtomicU64,
     #[cfg(feature = "devtools")]
     demo: tokio::sync::OnceCell<Demo>,
@@ -170,7 +174,7 @@ impl AppState {
             settings_store,
             workspaces: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
-            approved_files: Mutex::new(HashSet::new()),
+            approved_files: ApprovedFiles::load(data_dir.join("scripts.json")),
             next_id: AtomicU64::new(1),
             #[cfg(feature = "devtools")]
             demo: tokio::sync::OnceCell::new(),
@@ -295,6 +299,7 @@ async fn open_workspace(
     color: Option<String>,
     read_only: bool,
     production: bool,
+    script_folder: Option<PathBuf>,
 ) -> Result<WorkspaceDto, UiError> {
     let mut session = Session::connect(&profile).await?;
     if read_only {
@@ -327,6 +332,7 @@ async fn open_workspace(
             profile,
             name,
             read_only,
+            script_folder,
             default_schema: Mutex::new(dto.database.clone()),
             utility: tokio::sync::Mutex::new(session),
             tabs: tokio::sync::Mutex::new(HashMap::new()),
@@ -384,6 +390,7 @@ async fn connect(
         saved.color.clone(),
         saved.read_only,
         saved.production,
+        saved.script_folder.clone(),
     )
     .await
 }
@@ -933,14 +940,19 @@ fn file_name(path: &std::path::Path) -> String {
 
 /// Shows the native open or save dialog and returns the chosen path. The
 /// dialog runs in the shell, so the UI never supplies a path of its own.
-async fn pick_file(app: &tauri::AppHandle, save_as: Option<&str>) -> Option<PathBuf> {
+///
+/// `start` is the folder the dialog opens in: the connection's script folder.
+async fn pick_file(app: &tauri::AppHandle, save_as: Option<&str>, start: Option<PathBuf>) -> Option<PathBuf> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let dialog = app
+    let mut dialog = app
         .dialog()
         .file()
         .add_filter("SQL scripts", &["sql"])
         .add_filter("All files", &["*"]);
+    if let Some(folder) = start {
+        dialog = dialog.set_directory(folder);
+    }
     let done = move |path| {
         let _ = tx.send(path);
     };
@@ -951,10 +963,38 @@ async fn pick_file(app: &tauri::AppHandle, save_as: Option<&str>) -> Option<Path
     rx.await.ok().flatten().and_then(|path| path.into_path().ok())
 }
 
-/// Lets the user pick a script and returns its contents. `None` if cancelled.
+/// The folder a connection's file dialogs start in: its script folder, if it
+/// has one and the folder is there.
+fn script_folder(state: &AppState, workspace_id: Option<u64>) -> Option<PathBuf> {
+    let workspace = state.workspace(workspace_id?).ok()?;
+    workspace.script_folder.clone().filter(|folder| folder.is_dir())
+}
+
+/// Lets the user choose a folder, for a connection's script folder. `None` if cancelled.
 #[tauri::command]
-async fn script_open(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<ScriptFile>, UiError> {
-    let Some(path) = pick_file(&app, None).await else {
+async fn folder_pick(app: tauri::AppHandle, start: Option<String>) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app.dialog().file();
+    if let Some(start) = start.map(PathBuf::from).filter(|folder| folder.is_dir()) {
+        dialog = dialog.set_directory(start);
+    }
+    dialog.pick_folder(move |folder| {
+        let _ = tx.send(folder);
+    });
+    let folder = rx.await.ok().flatten()?.into_path().ok()?;
+    Some(folder.to_string_lossy().into_owned())
+}
+
+/// Lets the user pick a script and returns its contents. `None` if cancelled.
+/// The dialog starts in the connection's script folder.
+#[tauri::command]
+async fn script_open(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: Option<u64>,
+) -> Result<Option<ScriptFile>, UiError> {
+    let Some(path) = pick_file(&app, None, script_folder(&state, workspace_id)).await else {
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not open {}: {e}", path.display()));
@@ -964,7 +1004,9 @@ async fn script_open(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
     let text = String::from_utf8(std::fs::read(&path).map_err(storage)?).map_err(|_| {
         ui_error("storage", "That file is not UTF-8 text. Convert it to UTF-8 to open it here.")
     })?;
-    state.approved_files.lock().unwrap().insert(path.clone());
+    // The file is open either way; not being able to remember it only means
+    // Save will ask where after a restart.
+    let _ = state.approved_files.add(path.clone());
     Ok(Some(ScriptFile {
         name: file_name(&path),
         path: path.to_string_lossy().into_owned(),
@@ -978,6 +1020,7 @@ async fn script_open(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
 async fn script_save(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    workspace_id: Option<u64>,
     path: Option<String>,
     suggested_name: String,
     text: String,
@@ -985,19 +1028,22 @@ async fn script_save(
     let target = match path {
         Some(path) => {
             let path = PathBuf::from(path);
-            if !state.approved_files.lock().unwrap().contains(&path) {
-                return Err(ui_error("storage", "That file was not opened in this session."));
+            if !state.approved_files.contains(&path) {
+                return Err(ui_error(
+                    "not-approved",
+                    "That file has not been chosen in an Open or Save dialog. Use Save As to choose where to save.",
+                ));
             }
             path
         }
-        None => match pick_file(&app, Some(&suggested_name)).await {
+        None => match pick_file(&app, Some(&suggested_name), script_folder(&state, workspace_id)).await {
             Some(path) => path,
             None => return Ok(None),
         },
     };
     std::fs::write(&target, &text)
         .map_err(|e| ui_error("storage", format!("Could not save {}: {e}", target.display())))?;
-    state.approved_files.lock().unwrap().insert(target.clone());
+    let _ = state.approved_files.add(target.clone());
     Ok(Some(ScriptFile {
         name: file_name(&target),
         path: target.to_string_lossy().into_owned(),
@@ -1390,7 +1436,7 @@ async fn connect_demo(state: State<'_, AppState>) -> Result<WorkspaceDto, UiErro
         profile.connect_timeout = state.settings().connect_timeout();
         profile.ca = Some(CaSource::Pem(demo.ca_pem.clone().into_bytes()));
         profile.allow_cleartext_auth = true;
-        open_workspace(&state, profile, None, "Demo server".into(), None, false, false).await
+        open_workspace(&state, profile, None, "Demo server".into(), None, false, false, None).await
     }
     #[cfg(not(feature = "devtools"))]
     {
@@ -1502,6 +1548,7 @@ fn main() {
             schema_ddl,
             alter_script,
             create_template,
+            folder_pick,
             script_open,
             script_save,
             review_script,

@@ -58,6 +58,10 @@ const HOLDS_PASSWORD =
 interface SavedTab {
   title: string;
   text: string;
+  /** The file the tab was opened from or saved to, so Save writes back to it after a restart. */
+  filePath?: string;
+  /** The text differs from what is in the file. */
+  dirty?: boolean;
 }
 
 function loadSavedTabs(profileId: string | null): SavedTab[] {
@@ -169,7 +173,12 @@ export class WorkspaceState {
     this.database = info.database;
     const saved = settings.current.rememberTabs ? loadSavedTabs(info.profileId) : [];
     for (const tab of saved) {
-      this.addTab(tab.text, tab.title);
+      const restored = this.addTab(tab.text, tab.title);
+      if (typeof tab.filePath === 'string' && tab.filePath !== '') {
+        restored.filePath = tab.filePath;
+        // Edits made before the app closed and never saved are still unsaved.
+        if (tab.dirty) restored.savedText = `${tab.text}\u0000unsaved`;
+      }
       // Keep new tabs from reusing the number of a restored "Query 3".
       const numbered = /^Query (\d+)$/.exec(tab.title);
       if (numbered) tabCounter = Math.max(tabCounter, Number(numbered[1]));
@@ -214,7 +223,7 @@ export class WorkspaceState {
       if (text.trim() === '' || text.length > MAX_SAVED_TAB_CHARS || HOLDS_PASSWORD.test(text)) continue;
       total += text.length;
       if (total > MAX_SAVED_CHARS || saved.length >= MAX_SAVED_TABS) break;
-      saved.push({ title: tab.title, text });
+      saved.push(tab.filePath ? { title: tab.title, text, filePath: tab.filePath, dirty: tab.dirty } : { title: tab.title, text });
     }
     try {
       if (saved.length === 0) localStorage.removeItem(TABS_KEY + profileId);

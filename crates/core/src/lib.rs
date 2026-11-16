@@ -2,6 +2,7 @@
 //!
 //! Nothing in this crate knows about the user interface.
 
+pub mod approved;
 pub mod ddl;
 pub mod edit;
 pub mod error;
@@ -21,6 +22,7 @@ pub mod store;
 pub mod table;
 pub mod version;
 
+pub use approved::ApprovedFiles;
 pub use ddl::ObjectKind;
 pub use error::Error;
 pub use policy::PolicyError;

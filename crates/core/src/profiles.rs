@@ -51,6 +51,10 @@ pub struct SavedProfile {
     pub read_only: bool,
     /// Ask before structure changes and before UPDATE or DELETE without WHERE.
     pub production: bool,
+    /// Where this connection's scripts are kept. Open and Save As start in
+    /// this folder. It only chooses where the file dialog begins; the user
+    /// still picks the file.
+    pub script_folder: Option<PathBuf>,
 }
 
 impl Default for SavedProfile {
@@ -71,6 +75,7 @@ impl Default for SavedProfile {
             color: None,
             read_only: false,
             production: false,
+            script_folder: None,
         }
     }
 }
@@ -227,6 +232,24 @@ mod tests {
         let raw = std::fs::read_to_string(&store.path).unwrap().to_lowercase();
         assert!(raw.contains("savepassword"));
         assert!(!raw.contains("\"password\""));
+    }
+
+    #[test]
+    fn the_script_folder_is_kept_and_older_files_without_one_still_load() {
+        let store = temp_store("scripts");
+        let saved = store
+            .upsert(SavedProfile {
+                script_folder: Some(PathBuf::from("/work/reports")),
+                ..sample()
+            })
+            .unwrap();
+        assert_eq!(store.get(&saved.id).unwrap().unwrap().script_folder, Some(PathBuf::from("/work/reports")));
+
+        // A file written before the setting existed.
+        std::fs::write(&store.path, br#"[{"id":"old","name":"Old","host":"db","port":3306,"user":"ann"}]"#).unwrap();
+        let old = store.load().unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].script_folder, None);
     }
 
     #[test]

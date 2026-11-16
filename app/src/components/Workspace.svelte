@@ -89,6 +89,8 @@
     for (const t of workspace.tabs) {
       void t.text;
       void t.title;
+      void t.filePath;
+      void t.savedText;
     }
     const timer = setTimeout(() => workspace.saveTabs(), 800);
     return () => clearTimeout(timer);
@@ -188,7 +190,7 @@
 
   async function openScript() {
     try {
-      const file = await backend.scriptOpen();
+      const file = await backend.scriptOpen(info.id);
       if (!file) return;
       const created = workspace.addTab(file.text, file.name);
       created.filePath = file.path;
@@ -203,7 +205,15 @@
     const text = editors[target.id]?.getText() ?? target.text;
     try {
       const suggested = target.filePath ? target.title : `${target.title}.sql`;
-      const saved = await backend.scriptSave(saveAs ? null : target.filePath, suggested, text);
+      let saved;
+      try {
+        saved = await backend.scriptSave(info.id, saveAs ? null : target.filePath, suggested, text);
+      } catch (e) {
+        // The file is not one the backend knows the user chose (its list was
+        // cleared, or the tab came from an older version). Ask where instead.
+        if (saveAs || asUiError(e).kind !== 'not-approved') throw e;
+        saved = await backend.scriptSave(info.id, null, suggested, text);
+      }
       if (!saved) return false;
       target.filePath = saved.path;
       target.title = saved.name;
