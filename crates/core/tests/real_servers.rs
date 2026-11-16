@@ -580,6 +580,44 @@ async fn mysql84_exports_a_million_rows() {
     .await;
 }
 
+/// A result loaded in full (no row limit), part of it on disk, is exported
+/// in full from what is held: every row, without running anything again.
+async fn check_loaded_export(profile: &ConnectProfile, sql: &str, expected: u64) {
+    use sqltool_core::export::{self, ExportFormat};
+    use std::io::{BufRead, Write};
+
+    // Small enough that most of the result goes to the temporary file.
+    sqltool_core::store::set_memory_budget(32 * 1024 * 1024);
+    let mut session = Session::connect(profile).await.unwrap();
+    let out = run(&mut session, sql, None).await;
+    let (store, rows, truncated) = &out.sets[0];
+    assert_eq!((*rows, *truncated), (expected, false));
+    let status = store.status();
+    assert_eq!((status.rows, status.total_rows, status.done), (expected, expected, true));
+    println!("loaded {expected} rows: {} bytes, {} of them on disk", status.bytes, status.spilled_bytes);
+
+    for format in [ExportFormat::Csv, ExportFormat::Sql] {
+        let path = std::env::temp_dir().join(format!("sqltool-loaded-{}-{expected}.{}", std::process::id(), format.extension()));
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let written = export::write(store, format, "copy", &mut writer).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        assert_eq!(written, expected, "{format:?}: rows reported");
+        let lines = std::io::BufReader::new(std::fs::File::open(&path).unwrap()).lines().count() as u64;
+        let header = u64::from(format == ExportFormat::Csv);
+        assert_eq!(lines, expected + header, "{format:?}: lines in the file");
+        let _ = std::fs::remove_file(&path);
+    }
+    // The last row is what the server sent last.
+    assert_eq!(cell(store, expected - 1, 0).as_deref(), Some(expected.to_string().as_str()));
+}
+
+#[tokio::test]
+#[ignore = "needs the MariaDB test server from tests/servers/mariadb-pam.sh"]
+async fn mariadb_exports_a_fully_loaded_six_million_row_result() {
+    check_loaded_export(&mariadb(), "SELECT seq, CONCAT('row ', seq), REPEAT('x', 40) FROM seq_1_to_6000000", 6_000_000).await;
+}
+
 /// A connection the server has closed is noticed and reopened before its
 /// next use, and the handle for cancelling follows it.
 async fn check_reconnect(profile: &ConnectProfile) {

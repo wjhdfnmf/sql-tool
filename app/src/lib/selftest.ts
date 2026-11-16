@@ -272,6 +272,34 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { rowsHeld: done.rows };
   });
 
+  await step('a result loaded in full is exported in full, from what is held', async () => {
+    expect(workspace, 'not connected');
+    // No row limit: every row is fetched and kept, as when scrolling through millions of rows.
+    const started = performance.now();
+    const messages = await run(config.exportQuery, { kind: 'all' }, null);
+    const done = ofType(messages, 'resultDone')[0];
+    expect(done && !done.truncated, `the full load ended as ${JSON.stringify(done ?? ofType(messages, 'failed')[0])}`);
+    const loadedMs = Math.round(performance.now() - started);
+    // The last row is really there.
+    const last = decodeCells(await backend.getRows(done.resultId, done.rows - 1, 1), 1);
+    expect(last.rows === 1, `the last row could not be read back: ${JSON.stringify(last)}`);
+
+    const exported: Record<string, number> = {};
+    for (const format of ['csv', 'sql'] as const) {
+      const saved = await backend.exportResult(done.resultId, format, 'copy');
+      expect(saved, 'the export was cancelled');
+      expect(saved.rows === done.rows, `${format}: exported ${saved.rows} of the ${done.rows} rows held`);
+      expect(!saved.truncated && !saved.filtered, `${format}: the export was marked partial: ${JSON.stringify(saved)}`);
+      exported[format] = saved.rows;
+    }
+    // Sorted and filtered, the export follows what is shown.
+    const visible = await backend.resultView(done.resultId, '77', 0, true);
+    const filtered = await backend.exportResult(done.resultId, 'tsv', '');
+    expect(filtered && filtered.rows === visible && filtered.filtered, `filtered export wrote ${filtered?.rows} of ${visible} visible rows`);
+    await backend.closeResults([done.resultId]);
+    return { rows: done.rows, loadedMs, exported, filteredRows: visible };
+  });
+
   await step('edit rows through a result, in one transaction', async () => {
     expect(workspace, 'not connected');
     const setup = await run(

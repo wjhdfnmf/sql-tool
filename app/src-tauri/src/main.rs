@@ -1058,6 +1058,15 @@ struct Exported {
 /// Asks where to save an export. `None` if the user cancels.
 async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat) -> Option<PathBuf> {
     use tauri_plugin_dialog::DialogExt;
+    // The unattended self-test cannot answer a file dialog. In a build that
+    // includes it, and only while it is running, exports go to the folder it
+    // names, so the real export commands can be exercised end to end.
+    #[cfg(feature = "devtools")]
+    if std::env::var_os("SQLTOOL_SELFTEST_HOST").is_some() {
+        if let Some(folder) = std::env::var_os("SQLTOOL_SELFTEST_EXPORT_DIR") {
+            return Some(PathBuf::from(folder).join(format!("result.{}", format.extension())));
+        }
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -1490,6 +1499,8 @@ struct SelfTest {
     schema: String,
     table: String,
     big_query: String,
+    /// A query returning a few million rows, to load in full and export.
+    export_query: String,
 }
 
 #[tauri::command]
@@ -1523,6 +1534,7 @@ fn selftest_config() -> Option<SelfTest> {
         schema: var("SCHEMA").unwrap_or_else(|| "mysql".into()),
         table: var("TABLE").unwrap_or_else(|| "db".into()),
         big_query: var("BIG_QUERY").unwrap_or_else(|| "SELECT 1".into()),
+        export_query: var("EXPORT_QUERY").unwrap_or_else(|| "SELECT 1".into()),
     })
 }
 

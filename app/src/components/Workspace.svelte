@@ -592,18 +592,6 @@
 <div class="workspace">
   <!-- Shown at the end of the row of connection tabs while this connection is in front. -->
   <div class="row-tools" use:placeIn={app.toolsHost} hidden={app.active !== info.id}>
-    <button
-      class="quiet"
-      aria-pressed={workspace.showNavigator}
-      title="Show or hide the navigator (schemas and object info)"
-      onclick={() => (workspace.showNavigator = !workspace.showNavigator)}>Navigator</button
-    >
-    <button
-      class="quiet"
-      aria-pressed={workspace.showOutput}
-      title="Show or hide the output (messages and results)"
-      onclick={() => (workspace.showOutput = !workspace.showOutput)}>Output</button
-    >
     <button class="quiet menu-button" aria-label="Menu" aria-haspopup="menu" title="History, connection info, create, server information, settings, help" onclick={showMainMenu}>&#9776;</button>
   </div>
 
@@ -685,7 +673,8 @@
         </div>
       </div>
 
-      <div class="toolbar" role="toolbar" aria-label="Editor" hidden={!!tab.design}>
+      <div class="toolbar" role="toolbar" aria-label="Editor">
+        {#if !tab.design}
         <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open</button>
         <button onclick={() => saveScript(tab)} title="Save this script (Ctrl+S)">Save</button>
         <button onclick={() => saveScript(tab, true)} title="Save this script under another name (Ctrl+Shift+S)">Save As</button>
@@ -711,6 +700,21 @@
         </label>
         <span class="divider"></span>
         <button onclick={reformat} title="Reformat the selection, or the whole script (Ctrl+B)">Reformat</button>
+        {/if}
+        <!-- At the right end of the row, for a query tab and a designer tab alike. -->
+        <span class="spacer"></span>
+        <button
+          class="pane-toggle"
+          aria-pressed={workspace.showNavigator}
+          title="Show or hide the navigator (schemas and object info)"
+          onclick={() => (workspace.showNavigator = !workspace.showNavigator)}>Navigator</button
+        >
+        <button
+          class="pane-toggle"
+          aria-pressed={workspace.showOutput}
+          title="Show or hide the output (messages and results)"
+          onclick={() => (workspace.showOutput = !workspace.showOutput)}>Output</button
+        >
       </div>
 
       {#each workspace.tabs as t (t.id)}
@@ -890,12 +894,17 @@
 
   .row-tools button {
     padding: 2px 9px;
-    font-size: 12px;
-    color: var(--muted);
   }
 
-  .row-tools button[aria-pressed='true'] {
-    background: var(--bg);
+  /* Navigator and Output, at the right end of the editor's toolbar. */
+  .toolbar .pane-toggle {
+    color: var(--muted);
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .toolbar .pane-toggle[aria-pressed='true'] {
+    background: var(--panel-2);
     border-color: var(--border);
     color: var(--text);
   }

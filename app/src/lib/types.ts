@@ -356,6 +356,8 @@ export interface SelfTestConfig {
   schema: string;
   table: string;
   bigQuery: string;
+  /** A query returning a few million rows, to load in full and export. */
+  exportQuery: string;
 }
 
 /** What a failed backend call rejects with. */

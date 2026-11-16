@@ -187,13 +187,23 @@
     exportChoice = false;
     exporting = true;
     try {
+      // What the grid shows at this moment: the file must hold exactly these rows.
+      const shown = rows;
       const done = await backend.exportResult(result.id, format, tableName());
       if (done) {
-        note =
-          (done.truncated ? `Exported only the first ${formatCount(done.rows)} rows` : `Exported ${formatCount(done.rows)} rows`) +
-          ` to ${done.path}` +
-          (done.truncated ? '. The query returns more: this result stopped at the row limit' : '') +
-          (done.filtered ? '. Only the rows matching the filter were written' : '');
+        if (done.rows !== shown) {
+          // Never expected. If it happens the file is not what is on screen, and that must not pass quietly.
+          note = `WARNING: ${formatCount(done.rows)} rows were written to ${done.path}, but ${formatCount(shown)} are shown. The file is incomplete. Please report this.`;
+        } else {
+          note =
+            (done.truncated
+              ? `Exported only the first ${formatCount(done.rows)} rows`
+              : done.filtered
+                ? `Exported the ${formatCount(done.rows)} rows that match the filter`
+                : `Exported all ${formatCount(done.rows)} rows`) +
+            ` to ${done.path}` +
+            (done.truncated ? '. The query returns more: this result stopped at the row limit' : '');
+        }
       }
     } catch (e) {
       note = asUiError(e).message;
