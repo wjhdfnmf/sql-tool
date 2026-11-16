@@ -85,6 +85,11 @@ impl RowBatch {
         self.ends.len()
     }
 
+    /// Bytes held by the batch, so a reader can flush before it grows large.
+    pub fn bytes(&self) -> usize {
+        self.data.len()
+    }
+
     /// Appends one row. `None` is NULL.
     pub fn push_row<'a>(&mut self, cells: impl IntoIterator<Item = Option<&'a [u8]>>) {
         for cell in cells {
@@ -441,6 +446,21 @@ impl ResultStore {
         Ok(visible)
     }
 
+    /// Calls `visit` with the cells of visible rows `first..=last`.
+    pub(crate) fn for_each_row_in<E>(
+        &self,
+        first: u64,
+        last: u64,
+        mut visit: impl FnMut(Cells<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let inner = self.inner.read().unwrap();
+        for index in first..=last.min(inner.visible().saturating_sub(1)) {
+            let Some(row) = inner.resolve(index) else { break };
+            visit(Cells(inner.raw_row(row)))?;
+        }
+        Ok(())
+    }
+
     /// Sorts and filters what the UI sees, without changing the stored rows.
     ///
     /// `filter` keeps rows where any cell contains the text (ASCII letters
@@ -469,30 +489,46 @@ impl ResultStore {
         };
 
         if let Some((column, descending)) = sort {
+            // Each row's sort key is read out once, up front. Comparing by
+            // walking the row again on every comparison is far slower.
+            enum Key<'a> {
+                Null,
+                Number(f64),
+                Text(&'a [u8]),
+            }
             let numeric = inner.columns.get(column).is_some_and(|c| c.kind == ColumnKind::Number);
-            let cell = |row: u32| Cells(inner.raw_row(row as usize)).nth(column).flatten();
-            let compare = |a: &u32, b: &u32| -> Ordering {
-                let ordering = match (cell(*a), cell(*b)) {
-                    (None, None) => Ordering::Equal,
-                    (None, Some(_)) => Ordering::Less,
-                    (Some(_), None) => Ordering::Greater,
-                    (Some(x), Some(y)) if numeric => {
-                        let parse = |v: &[u8]| std::str::from_utf8(v).ok().and_then(|s| s.trim().parse::<f64>().ok());
-                        match (parse(x), parse(y)) {
-                            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
-                            _ => x.cmp(y),
-                        }
-                    }
-                    (Some(x), Some(y)) => x
+            let mut keyed: Vec<(Key<'_>, u32)> = rows
+                .iter()
+                .map(|&row| {
+                    let key = match Cells(inner.raw_row(row as usize)).nth(column).flatten() {
+                        None => Key::Null,
+                        Some(bytes) => std::str::from_utf8(bytes)
+                            .ok()
+                            .filter(|_| numeric)
+                            .and_then(|s| s.trim().parse::<f64>().ok())
+                            .map_or(Key::Text(bytes), Key::Number),
+                    };
+                    (key, row)
+                })
+                .collect();
+            // Stable, so rows that compare equal keep the order they arrived in.
+            keyed.sort_by(|(a, _), (b, _)| {
+                let ordering = match (a, b) {
+                    (Key::Null, Key::Null) => Ordering::Equal,
+                    (Key::Null, _) => Ordering::Less,
+                    (_, Key::Null) => Ordering::Greater,
+                    (Key::Number(x), Key::Number(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+                    (Key::Number(_), Key::Text(_)) => Ordering::Less,
+                    (Key::Text(_), Key::Number(_)) => Ordering::Greater,
+                    (Key::Text(x), Key::Text(y)) => x
                         .iter()
                         .map(u8::to_ascii_lowercase)
                         .cmp(y.iter().map(u8::to_ascii_lowercase))
                         .then_with(|| x.cmp(y)),
                 };
                 if descending { ordering.reverse() } else { ordering }
-            };
-            // Stable, so rows that compare equal keep the order they arrived in.
-            rows.sort_by(compare);
+            });
+            rows = keyed.into_iter().map(|(_, row)| row).collect();
         }
 
         let visible = rows.len() as u64;

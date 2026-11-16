@@ -37,6 +37,47 @@ export interface MessageLine {
 
 let tabCounter = 0;
 let lineCounter = 0;
+/** Message lines kept per tab. A script of many thousands of statements would otherwise fill the page. */
+const MAX_MESSAGES = 1000;
+
+// Open query tabs are remembered per saved connection, so closing the app
+// does not lose a query in progress. They are kept in the webview's local
+// storage, on this computer only and not encrypted, like the history. A tab
+// holding a statement with a password in it is never written there.
+const TABS_KEY = 'sqltool.tabs.';
+const MAX_SAVED_TABS = 30;
+const MAX_SAVED_TAB_CHARS = 200_000;
+const MAX_SAVED_CHARS = 1_000_000;
+const HOLDS_PASSWORD =
+  /identified\s+(by|with|via)|set\s+password|password\s*\(|master_password|source_password|authentication_string/i;
+
+interface SavedTab {
+  title: string;
+  text: string;
+}
+
+function loadSavedTabs(profileId: string | null): SavedTab[] {
+  if (!profileId) return [];
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(TABS_KEY + profileId) ?? '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((t): t is SavedTab => typeof t?.title === 'string' && typeof t?.text === 'string')
+      .slice(0, MAX_SAVED_TABS);
+  } catch {
+    // Unreadable or unavailable storage: start with an empty tab.
+    return [];
+  }
+}
+
+/** Forgets the query tabs kept for a connection that has been deleted. */
+export function forgetSavedTabs(profileId: string): void {
+  try {
+    localStorage.removeItem(TABS_KEY + profileId);
+  } catch {
+    // Nothing was stored.
+  }
+}
 
 export class EditorTab {
   readonly id = crypto.randomUUID();
@@ -49,6 +90,8 @@ export class EditorTab {
   running = $state(false);
   results = $state<ResultTab[]>([]);
   messages = $state<MessageLine[]>([]);
+  /** Earlier message lines dropped to keep the list short. */
+  hiddenMessages = $state(0);
   /** A result id, or 'messages'. */
   activeResult = $state<number | 'messages'>('messages');
   lastRunMs = $state<number | null>(null);
@@ -93,8 +136,37 @@ export class WorkspaceState {
   constructor(info: WorkspaceInfo) {
     this.info = info;
     this.database = info.database;
-    this.addTab();
+    const saved = loadSavedTabs(info.profileId);
+    for (const tab of saved) {
+      this.addTab(tab.text, tab.title);
+      // Keep new tabs from reusing the number of a restored "Query 3".
+      const numbered = /^Query (\d+)$/.exec(tab.title);
+      if (numbered) tabCounter = Math.max(tabCounter, Number(numbered[1]));
+    }
+    if (saved.length === 0) this.addTab();
+    else this.activeTabId = this.tabs[0].id;
     if (info.database) void this.loadCatalog(info.database);
+  }
+
+  /** Writes the open tabs' text to local storage, for the next time this connection is opened. */
+  saveTabs(): void {
+    const profileId = this.info.profileId;
+    if (!profileId) return;
+    const saved: SavedTab[] = [];
+    let total = 0;
+    for (const tab of this.tabs) {
+      const text = tab.text;
+      if (text.trim() === '' || text.length > MAX_SAVED_TAB_CHARS || HOLDS_PASSWORD.test(text)) continue;
+      total += text.length;
+      if (total > MAX_SAVED_CHARS || saved.length >= MAX_SAVED_TABS) break;
+      saved.push({ title: tab.title, text });
+    }
+    try {
+      if (saved.length === 0) localStorage.removeItem(TABS_KEY + profileId);
+      else localStorage.setItem(TABS_KEY + profileId, JSON.stringify(saved));
+    } catch {
+      // Storage is full or unavailable. Remembering tabs is a convenience.
+    }
   }
 
   /** Loads a schema's table and column names for completion, once. */
@@ -160,6 +232,7 @@ export class WorkspaceState {
     if (!keep) {
       this.releaseResults(tab);
       tab.messages = [];
+      tab.hiddenMessages = 0;
       tab.activeResult = 'messages';
     }
     tab.lastRunMs = null;
@@ -204,6 +277,12 @@ export class WorkspaceState {
     const result = (id: number) => tab.results.find((r) => r.id === id);
     switch (m.type) {
       case 'started': {
+        if (tab.messages.length >= MAX_MESSAGES) {
+          // Drop the oldest in one go, not one per statement.
+          const cut = tab.messages.length - MAX_MESSAGES + 200;
+          tab.messages.splice(0, cut);
+          tab.hiddenMessages += cut;
+        }
         tab.messages.push({ id: ++lineCounter, sql: m.sql, state: 'running', text: 'Running…', elapsedMs: null });
         // Read the line back so later updates go through the reactive copy.
         lines.set(m.index, tab.messages[tab.messages.length - 1]);
@@ -236,6 +315,7 @@ export class WorkspaceState {
           l.elapsedMs = m.elapsedMs;
           l.text = `${formatCount(m.rows)} ${m.rows === 1 ? 'row' : 'rows'}` + (m.truncated ? ' (row limit reached, more exist)' : '');
         }
+        lines.delete(m.index);
         break;
       }
       case 'done': {
@@ -248,6 +328,7 @@ export class WorkspaceState {
             (m.warnings > 0 ? `, ${m.warnings} ${m.warnings === 1 ? 'warning' : 'warnings'}` : '') +
             (m.info ? `. ${m.info}` : '');
         }
+        lines.delete(m.index);
         break;
       }
       case 'failed': {
@@ -296,6 +377,7 @@ class AppState {
   }
 
   async close(workspace: WorkspaceState): Promise<void> {
+    workspace.saveTabs();
     for (const tab of workspace.tabs) {
       const ids = tab.results.map((r) => r.id);
       if (ids.length > 0) void backend.closeResults(ids);

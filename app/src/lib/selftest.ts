@@ -228,6 +228,34 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { total, firstWhenSortedByNameDescending: top };
   });
 
+  await step('copy and total a selection of cells', async () => {
+    expect(workspace, 'not connected');
+    expect(workspace.profileId === profile?.id, `the workspace names connection ${workspace.profileId}`);
+    const messages = await run(`SELECT id, name FROM \`${config.table}\` ORDER BY id`, { kind: 'all' }, null);
+    const set = ofType(messages, 'resultSet')[0];
+    expect(set, `no result: ${ofType(messages, 'failed')[0]?.message}`);
+    const total = ofType(messages, 'resultDone')[0].rows;
+    const all = { rowStart: 0, rowEnd: total - 1, colStart: 0, colEnd: 1 };
+    const first = decodeCells(await backend.getRows(set.resultId, 0, 1), 2).values;
+
+    const tsv = await backend.copyRange(set.resultId, all, 'tsv', true, '');
+    const lines = tsv.split('\n');
+    expect(lines.length === total + 1 && lines[0] === 'id\tname', `copied text began ${JSON.stringify(tsv.slice(0, 80))}`);
+    expect(lines[1] === `${first[0]}\t${first[1]}`, `first copied row was ${JSON.stringify(lines[1])}`);
+    const one = await backend.copyRange(set.resultId, { rowStart: 0, rowEnd: 0, colStart: 1, colEnd: 1 }, 'tsv', false, '');
+    expect(one === first[1], `one cell copied as ${JSON.stringify(one)}`);
+    const list = await backend.copyRange(set.resultId, { ...all, colEnd: 0 }, 'list', false, '');
+    expect(list.split(', ').length === total && !list.includes("'"), `IN list was ${list}`);
+    const insert = await backend.copyRange(set.resultId, { rowStart: 0, rowEnd: 0, colStart: 0, colEnd: 1 }, 'sql', false, 'people_copy');
+    expect(insert.startsWith('INSERT INTO `people_copy` (`id`, `name`) VALUES (') && insert.endsWith(');'), `insert was ${insert}`);
+
+    const stats = await backend.rangeStats(set.resultId, all);
+    expect(stats.rows === total && stats.cells === total * 2 && stats.numbers === total, `stats were ${JSON.stringify(stats)}`);
+    expect(stats.sum !== null && stats.min !== null && stats.max !== null && stats.min <= stats.max, `stats were ${JSON.stringify(stats)}`);
+    await backend.closeResults([set.resultId]);
+    return { list, sum: stats.sum, average: stats.average };
+  });
+
   await step('edit rows through a result, in one transaction', async () => {
     expect(workspace, 'not connected');
     const setup = await run(
@@ -275,6 +303,14 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     changed.columns.push({ ...changed.columns[0], name: 'extra', dataType: 'INT', autoIncrement: false, nullable: true, originalName: null });
     const alter = await backend.tableDdl(spec, changed);
     expect(alter.includes('ADD COLUMN `extra` INT NULL AFTER'), `alter was ${alter}`);
+    expect(Array.isArray(spec.foreignKeys), 'the table carries no list of foreign keys');
+    const withKey = structuredClone(spec);
+    withKey.foreignKeys.push({
+      name: 'fk_self', columns: ['id'], referencedSchema: '', referencedTable: config.table, referencedColumns: ['id'],
+      onUpdate: '', onDelete: 'CASCADE', originalName: null,
+    });
+    const keyed = await backend.tableDdl(spec, withKey);
+    expect(keyed.includes('ADD CONSTRAINT `fk_self` FOREIGN KEY (`id`) REFERENCES') && keyed.includes('ON DELETE CASCADE'), `foreign key SQL was ${keyed}`);
     const keys = await backend.tableKeys(workspace.id, config.schema, config.table);
     expect(keys && keys.primaryKey.join() === 'id' && Array.isArray(keys.foreignKeys), `keys were ${JSON.stringify(keys)}`);
     const drop = await backend.objectDdl('drop', 'table', config.schema, 'x', null);
@@ -429,6 +465,13 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
       if (pixels[i] !== pixels[0] || pixels[i + 1] !== pixels[1] || pixels[i + 2] !== pixels[2]) differing++;
     }
     expect(differing > 50, 'the result grid is blank');
+    // Selecting everything with the keyboard reports the selection and its totals under the grid.
+    const input = document.querySelector<HTMLElement>('.grid .scroller');
+    expect(input, 'the grid has no input layer');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true }));
+    await sleep(600);
+    const footer = document.querySelector('.result footer')?.textContent ?? '';
+    expect(/1\s+row\s+×\s+2\s+columns/.test(footer) && /Sum\s+1\b/.test(footer), `selecting everything showed: ${footer.replace(/\s+/g, ' ').trim().slice(0, 200)}`);
     expect(violations.length === 0, `the content security policy blocked something: ${violations.join('; ')}`);
     await backend.closeResults(tab.results.map((r) => r.id));
     await backend.closeTab(workspace.id, tab.id);

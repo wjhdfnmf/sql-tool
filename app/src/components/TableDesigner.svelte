@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { backend } from '../lib/backend';
-  import { asUiError, type ColumnSpec, type IndexSpec, type TableSpec } from '../lib/types';
+  import { asUiError, type ColumnSpec, type ForeignKeySpec, type IndexSpec, type TableSpec } from '../lib/types';
 
   interface Props {
     workspaceId: number;
@@ -23,6 +23,12 @@
   interface IndexRow extends IndexSpec {
     columnsText: string;
   }
+  interface KeyRow extends ForeignKeySpec {
+    columnsText: string;
+    /** `table`, or `schema.table` for a table in another schema. */
+    referenceText: string;
+    referencedText: string;
+  }
 
   let dialog: HTMLDialogElement;
   let original = $state<TableSpec | null>(null);
@@ -33,6 +39,10 @@
   let comment = $state('');
   let columns = $state<ColumnRow[]>([]);
   let indexes = $state<IndexRow[]>([]);
+  let foreignKeys = $state<KeyRow[]>([]);
+  /** Tables of the schema, offered when choosing what a foreign key refers to. */
+  let tableNames = $state<string[]>([]);
+  let columnsBody = $state<HTMLTableSectionElement | undefined>();
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let sql = $state('');
@@ -52,9 +62,26 @@
     };
   }
 
+  const rules = ['RESTRICT', 'CASCADE', 'SET NULL', 'NO ACTION', 'SET DEFAULT'];
+
+  const list = (text: string) => text.split(',').map((s) => s.trim().replaceAll('`', '')).filter(Boolean);
+
+  /** Splits `schema.table` or plain `table`. */
+  function reference(text: string): { schema: string; table: string } {
+    const clean = text.trim().replaceAll('`', '');
+    const dot = clean.indexOf('.');
+    return dot < 0 ? { schema: '', table: clean } : { schema: clean.slice(0, dot).trim(), table: clean.slice(dot + 1).trim() };
+  }
+
   onMount(async () => {
     dialog.showModal();
     targetSchema = schema;
+    backend
+      .schemaObjects(workspaceId, schema)
+      .then((objects) => (tableNames = objects.tables.filter((t) => !t.isView).map((t) => t.name)))
+      .catch(() => {
+        // Only used for suggestions.
+      });
     try {
       if (table === null) {
         columns = [{ ...blankColumn(), name: 'id', dataType: 'INT', nullable: false, autoIncrement: true, pk: true }];
@@ -68,6 +95,12 @@
         comment = spec.comment;
         columns = spec.columns.map((c) => ({ ...c, pk: spec.primaryKey.includes(c.name) }));
         indexes = spec.indexes.map((i) => ({ ...i, columnsText: i.columns.join(', ') }));
+        foreignKeys = spec.foreignKeys.map((k) => ({
+          ...k,
+          columnsText: k.columns.join(', '),
+          referenceText: k.referencedSchema && k.referencedSchema !== spec.schema ? `${k.referencedSchema}.${k.referencedTable}` : k.referencedTable,
+          referencedText: k.referencedColumns.join(', '),
+        }));
       }
     } catch (e) {
       loadError = asUiError(e).message;
@@ -95,8 +128,19 @@
       primaryKey,
       indexes: indexes.map(({ columnsText, ...i }) => ({
         ...i,
-        columns: i.locked ? i.columns : columnsText.split(',').map((s) => s.trim()).filter(Boolean),
+        columns: i.locked ? i.columns : list(columnsText),
       })),
+      foreignKeys: foreignKeys.map(({ columnsText, referenceText, referencedText, ...k }) => {
+        const to = reference(referenceText);
+        return {
+          ...k,
+          name: k.name.trim(),
+          columns: list(columnsText),
+          referencedSchema: to.schema,
+          referencedTable: to.table,
+          referencedColumns: list(referencedText),
+        };
+      }),
       engine: engine.trim() || null,
       collation: collation.trim() || null,
       comment,
@@ -127,32 +171,96 @@
     };
   });
 
-  /** Renaming a column also renames it wherever an index lists it. */
+  /** Renaming a column also renames it wherever an index or foreign key lists it. */
   function renameColumn(column: ColumnRow, next: string) {
     const previous = column.name.trim();
     column.name = next;
     if (!previous) return;
+    for (const row of [...indexes.filter((i) => !i.locked), ...foreignKeys]) {
+      const parts = list(row.columnsText);
+      if (parts.includes(previous)) row.columnsText = parts.map((p) => (p === previous ? next.trim() : p)).join(', ');
+    }
+  }
+
+  /** Removing a column also takes it out of indexes, and removes foreign keys that used it. */
+  function removeColumn(position: number) {
+    const gone = columns[position].name.trim();
+    columns.splice(position, 1);
+    if (!gone) return;
     for (const index of indexes) {
-      if (index.locked) continue;
-      const parts = index.columnsText.split(',').map((s) => s.trim());
-      if (parts.includes(previous)) index.columnsText = parts.map((p) => (p === previous ? next.trim() : p)).join(', ');
+      if (!index.locked) index.columnsText = list(index.columnsText).filter((p) => p !== gone).join(', ');
+    }
+    indexes = indexes.filter((i) => i.locked || i.columnsText !== '' || i.originalName === null);
+    foreignKeys = foreignKeys.filter((k) => !list(k.columnsText).includes(gone));
+  }
+
+  /**
+   * Existing columns keep their place: the designer does not move them.
+   * A new table's columns, and columns being added, can go anywhere.
+   */
+  function movable(column: ColumnRow): boolean {
+    return original === null || column.originalName === null;
+  }
+
+  function moveColumn(position: number, by: -1 | 1) {
+    const to = position + by;
+    if (to < 0 || to >= columns.length) return;
+    [columns[position], columns[to]] = [columns[to], columns[position]];
+  }
+
+  async function focusColumn(position: number) {
+    await tick();
+    columnsBody?.querySelectorAll('tr')[position]?.querySelector('input')?.focus();
+  }
+
+  function addColumn() {
+    columns.push(blankColumn());
+    void focusColumn(columns.length - 1);
+  }
+
+  /** Enter moves to the next column, adding one after the last. */
+  function columnKey(e: KeyboardEvent, position: number) {
+    if (e.key !== 'Enter' || !(e.target instanceof HTMLInputElement) || e.target.type !== 'text') return;
+    e.preventDefault();
+    if (position === columns.length - 1) addColumn();
+    else void focusColumn(position + 1);
+  }
+
+  function addForeignKey() {
+    foreignKeys.push({
+      name: '', columns: [], referencedSchema: '', referencedTable: '', referencedColumns: [],
+      onUpdate: '', onDelete: '', originalName: null, columnsText: '', referenceText: '', referencedText: '',
+    });
+  }
+
+  /** Once the table referred to is chosen, its primary key is the likely target. */
+  async function suggestReferenced(key: KeyRow) {
+    if (key.referencedText.trim() !== '') return;
+    const to = reference(key.referenceText);
+    if (!to.table) return;
+    try {
+      const spec = await backend.tableSpec(workspaceId, to.schema || targetSchema.trim(), to.table);
+      if (spec && key.referencedText.trim() === '') key.referencedText = spec.primaryKey.join(', ');
+    } catch {
+      // A suggestion only; the user can type the columns.
     }
   }
 
   async function apply() {
     applying = true;
-    applyError = await onapply(sql);
+    const error = await onapply(sql);
+    // More than one statement: the earlier ones may have run before one failed.
+    applyError =
+      error !== null && sql.includes(';\n\nALTER TABLE')
+        ? `${error} The first statement may already have run. Close this and open the table again to see how it stands.`
+        : error;
     applying = false;
   }
 </script>
 
 <dialog bind:this={dialog} oncancel={onclose} aria-labelledby="designer-title">
-  <form
-    onsubmit={(e) => {
-      e.preventDefault();
-      if (sql) void apply();
-    }}
-  >
+  <!-- Enter never applies: SQL that changes a table runs only when Apply is clicked. -->
+  <form onsubmit={(e) => e.preventDefault()}>
     <h2 id="designer-title">{table === null ? 'Create table' : `Alter table ${table}`}</h2>
 
     {#if loading}
@@ -178,9 +286,13 @@
               <th>Default</th><th>Comment</th><th></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody bind:this={columnsBody}>
             {#each columns as column, index (column)}
-              <tr class:locked={column.locked} title={column.locked ? 'Generated column: shown, but not changed by the designer' : ''}>
+              <tr
+                class:locked={column.locked}
+                title={column.locked ? 'Generated column: shown, but not changed by the designer' : ''}
+                onkeydown={(e) => columnKey(e, index)}
+              >
                 <td><input type="text" value={column.name} oninput={(e) => renameColumn(column, e.currentTarget.value)} disabled={column.locked} aria-label="Column name" autocomplete="off" spellcheck="false" /></td>
                 <td><input type="text" bind:value={column.dataType} list="designer-types" disabled={column.locked} aria-label="Type" autocomplete="off" spellcheck="false" /></td>
                 <td class="box"><input type="checkbox" bind:checked={column.pk} disabled={column.locked} aria-label="Primary key" onchange={() => { if (column.pk) column.nullable = false; }} /></td>
@@ -188,7 +300,11 @@
                 <td class="box"><input type="checkbox" bind:checked={column.autoIncrement} disabled={column.locked} aria-label="Auto increment" /></td>
                 <td><input type="text" value={column.default ?? ''} oninput={(e) => (column.default = e.currentTarget.value)} disabled={column.locked} placeholder="none" aria-label="Default, as SQL" title="As SQL: 0, 'text', CURRENT_TIMESTAMP" autocomplete="off" spellcheck="false" /></td>
                 <td><input type="text" bind:value={column.comment} disabled={column.locked} aria-label="Comment" autocomplete="off" /></td>
-                <td><button type="button" class="quiet" disabled={column.locked} aria-label={`Remove column ${column.name}`} title="Remove column" onclick={() => columns.splice(index, 1)}>&#215;</button></td>
+                <td class="row-actions">
+                  <button type="button" class="quiet" disabled={!movable(column) || index === 0} aria-label={`Move column ${column.name} up`} title={movable(column) ? 'Move up' : 'Existing columns keep their place'} onclick={() => moveColumn(index, -1)}>&#9652;</button>
+                  <button type="button" class="quiet" disabled={!movable(column) || index === columns.length - 1} aria-label={`Move column ${column.name} down`} title={movable(column) ? 'Move down' : 'Existing columns keep their place'} onclick={() => moveColumn(index, 1)}>&#9662;</button>
+                  <button type="button" class="quiet" disabled={column.locked} aria-label={`Remove column ${column.name}`} title="Remove column" onclick={() => removeColumn(index)}>&#215;</button>
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -197,7 +313,10 @@
       <datalist id="designer-types">
         {#each types as type}<option value={type}></option>{/each}
       </datalist>
-      <div><button type="button" onclick={() => columns.push(blankColumn())}>Add Column</button></div>
+      <div class="under">
+        <button type="button" onclick={addColumn}>Add Column</button>
+        <span class="muted note">Enter in a column moves to the next one, and adds one after the last.</span>
+      </div>
 
       <h3>Indexes</h3>
       {#if indexes.length > 0}
@@ -221,12 +340,50 @@
         </button>
       </div>
 
+      <h3>Foreign keys</h3>
+      {#if foreignKeys.length > 0}
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th><th>Columns</th><th>Refers to table</th><th>Columns there</th><th>On delete</th><th>On update</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each foreignKeys as key, k (key)}
+              <tr>
+                <td><input type="text" bind:value={key.name} placeholder="named by the server" aria-label="Foreign key name" autocomplete="off" spellcheck="false" /></td>
+                <td><input type="text" bind:value={key.columnsText} placeholder="column, column" aria-label="Foreign key columns" autocomplete="off" spellcheck="false" /></td>
+                <td><input type="text" bind:value={key.referenceText} list="designer-tables" placeholder="table or schema.table" aria-label="Table referred to" onchange={() => void suggestReferenced(key)} autocomplete="off" spellcheck="false" /></td>
+                <td><input type="text" bind:value={key.referencedText} placeholder="column, column" aria-label="Columns in the table referred to" autocomplete="off" spellcheck="false" /></td>
+                <td>
+                  <select bind:value={key.onDelete} aria-label="On delete">
+                    <option value="">Server default</option>
+                    {#each rules as rule}<option value={rule}>{rule}</option>{/each}
+                  </select>
+                </td>
+                <td>
+                  <select bind:value={key.onUpdate} aria-label="On update">
+                    <option value="">Server default</option>
+                    {#each rules as rule}<option value={rule}>{rule}</option>{/each}
+                  </select>
+                </td>
+                <td><button type="button" class="quiet" aria-label={`Remove foreign key ${key.name}`} title="Remove foreign key" onclick={() => foreignKeys.splice(k, 1)}>&#215;</button></td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+      <datalist id="designer-tables">
+        {#each tableNames as tableName}<option value={tableName}></option>{/each}
+      </datalist>
+      <div><button type="button" onclick={addForeignKey}>Add Foreign Key</button></div>
+
       <div>
         <span class="muted">SQL that will run</span>
         <pre>{sql || problem || ''}</pre>
       </div>
       {#if original}
-        <p class="muted note">Foreign keys, checks and partitioning are not shown here and are left as they are.</p>
+        <p class="muted note">Checks and partitioning are not shown here and are left as they are.</p>
       {/if}
     {/if}
 
@@ -234,7 +391,7 @@
 
     <div class="buttons">
       <button type="button" onclick={onclose}>Cancel</button>
-      <button type="submit" class="primary" disabled={!sql || applying}>{applying ? 'Applying…' : 'Apply'}</button>
+      <button type="button" class="primary" disabled={!sql || applying} onclick={() => void apply()}>{applying ? 'Applying…' : 'Apply'}</button>
     </div>
   </form>
 </dialog>
@@ -327,6 +484,26 @@
     padding: 0 7px;
     font-size: 15px;
     color: var(--muted);
+  }
+
+  td.row-actions {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  td.row-actions button {
+    padding: 0 4px;
+  }
+
+  td select {
+    width: 100%;
+    padding: 3px 4px;
+  }
+
+  .under {
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
 
   pre {

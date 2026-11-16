@@ -6,6 +6,7 @@ pub mod ddl;
 pub mod edit;
 pub mod error;
 pub mod export;
+mod files;
 pub mod guard;
 pub mod history;
 pub mod metadata;
@@ -28,5 +29,5 @@ pub use metadata::{Charset, ColumnEntry, SchemaDefaults, SchemaObjects, TableDet
 pub use profiles::{ProfileStore, SavedProfile, TlsSetting};
 pub use session::{Canceller, ResultSet, RunEvent, ServerInfo, Session, StreamStats};
 pub use store::{ColumnInfo, ColumnKind, ColumnSource, ResultStore, RowBatch, StoreStatus};
-pub use table::{ColumnSpec, IndexSpec, TableSpec};
+pub use table::{ColumnSpec, ForeignKeySpec, IndexSpec, TableSpec};
 pub use version::{Flavor, ServerVersion};

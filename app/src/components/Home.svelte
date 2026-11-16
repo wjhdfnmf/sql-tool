@@ -1,6 +1,6 @@
 <script lang="ts">
   import { backend } from '../lib/backend';
-  import { app } from '../lib/state.svelte';
+  import { app, forgetSavedTabs } from '../lib/state.svelte';
   import { asUiError, explainConnectError, newProfile, type Profile, type TlsSetting } from '../lib/types';
   import ConnectionDialog from './ConnectionDialog.svelte';
   import PasswordPrompt from './PasswordPrompt.svelte';
@@ -71,6 +71,7 @@
     }
     confirmDelete = null;
     await backend.profileDelete(profile.id);
+    forgetSavedTabs(profile.id);
     await app.refreshProfiles();
   }
 </script>

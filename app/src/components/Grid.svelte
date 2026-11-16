@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { backend } from '../lib/backend';
-  import { GridView, type GridOverlay } from '../lib/grid';
+  import { GridView, type CellPosition, type GridOverlay } from '../lib/grid';
   import type { ResultTab } from '../lib/state.svelte';
+  import type { CellRange } from '../lib/types';
 
   interface Props {
     result: ResultTab;
@@ -14,12 +15,17 @@
     overlay: GridOverlay;
     /** A cell was opened (double-click or Enter). */
     onactivate: (row: number, column: number) => void;
-    onselect: (row: number, column: number) => void;
+    /** The selected cells changed; `range` is null when nothing is selected. */
+    onselection: (range: CellRange | null, focus: CellPosition | null) => void;
+    /** Ctrl+C on the selection; `headers` when Shift was held too. */
+    oncopy: (headers: boolean) => void;
     onsort: (column: number) => void;
     oncontext: (row: number, column: number, x: number, y: number) => void;
+    onheadercontext: (column: number, x: number, y: number) => void;
   }
 
-  let { result, rows, viewVersion, sort, overlay, onactivate, onselect, onsort, oncontext }: Props = $props();
+  let { result, rows, viewVersion, sort, overlay, onactivate, onselection, oncopy, onsort, oncontext, onheadercontext }: Props =
+    $props();
 
   let canvas: HTMLCanvasElement;
   let scroller: HTMLDivElement;
@@ -27,22 +33,34 @@
   let grid = $state<GridView | undefined>();
   let seenVersion = 0;
 
-  async function copyCell(row: number, column: number) {
-    try {
-      const value = await backend.getCell(result.id, row, column);
-      await navigator.clipboard.writeText(value.text ?? 'NULL');
-    } catch {
-      // Clipboard access can be refused; nothing useful to do about it here.
-    }
+  export function selectAll() {
+    grid?.selectAll();
+  }
+  export function selectRows(first: number, last: number) {
+    grid?.selectRows(first, last);
+  }
+  export function selectColumns(first: number, last: number) {
+    grid?.selectColumns(first, last);
+  }
+  export function autoSizeColumn(column: number) {
+    grid?.autoSizeColumn(column);
+  }
+  export function autoSizeAll() {
+    grid?.autoSizeAll();
+  }
+  /** Gives the grid the keyboard again, after a menu or dialog had it. */
+  export function focus() {
+    grid?.focus();
   }
 
   onMount(() => {
     const view = new GridView(canvas, scroller, spacer, (offset, count) => backend.getRows(result.id, offset, count), {
       onActivate: (row, column) => onactivate(row, column),
-      onSelect: (row, column) => onselect(row, column),
-      onCopy: copyCell,
+      onSelection: (range, cell) => onselection(range, cell),
+      onCopy: (headers) => oncopy(headers),
       onSort: (column) => onsort(column),
       onContext: (row, column, x, y) => oncontext(row, column, x, y),
+      onHeaderContext: (column, x, y) => onheadercontext(column, x, y),
     });
     view.setColumns(result.columns);
     grid = view;

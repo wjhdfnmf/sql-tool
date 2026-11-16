@@ -1,17 +1,19 @@
 <script lang="ts">
   import { backend } from '../lib/backend';
-  import type { GridOverlay } from '../lib/grid';
+  import type { CellPosition, GridOverlay } from '../lib/grid';
   import { separator, type MenuItem } from '../lib/menu';
-  import { decodeCells } from '../lib/rows';
   import type { EditorTab, ResultTab, WorkspaceState } from '../lib/state.svelte';
   import {
     asUiError,
     formatCount,
     formatDuration,
     type CellChange,
+    type CellRange,
     type CellValue,
+    type CopyFormat,
     type EditTarget,
     type ExportFormat,
+    type RangeStats,
     type RowEdit,
   } from '../lib/types';
   import Grid from './Grid.svelte';
@@ -33,8 +35,8 @@
   let visibleRows = $state<number | null>(null);
   let viewVersion = $state(0);
   let note = $state<string | null>(null);
-  let position = $state('');
   let contextMenu = $state<{ items: MenuItem[]; x: number; y: number } | null>(null);
+  let grid = $state<ReturnType<typeof Grid> | undefined>();
 
   const rows = $derived(visibleRows ?? result.rows);
 
@@ -54,17 +56,102 @@
     filterTimer = setTimeout(applyView, 250);
   }
 
-  function sortBy(column: number) {
+  function setSort(next: { column: number; descending: boolean } | null) {
     if (!result.done) return;
     if (pending > 0) {
       note = 'Apply or discard the pending changes before sorting.';
       return;
     }
-    // Ascending, then descending, then back to the order the rows arrived in.
-    if (sort?.column !== column) sort = { column, descending: false };
-    else if (!sort.descending) sort = { column, descending: true };
-    else sort = null;
+    sort = next;
     void applyView();
+  }
+
+  function sortBy(column: number) {
+    // Ascending, then descending, then back to the order the rows arrived in.
+    if (sort?.column !== column) setSort({ column, descending: false });
+    else if (!sort.descending) setSort({ column, descending: true });
+    else setSort(null);
+  }
+
+  // ---------- selecting and copying ----------
+
+  let selection = $state<CellRange | null>(null);
+  let focusCell = $state<CellPosition | null>(null);
+  /** Totals of the selection; null for one cell or while they are being worked out. */
+  let stats = $state<RangeStats | null>(null);
+  let statsTimer: ReturnType<typeof setTimeout> | undefined;
+  let statsRequest = 0;
+
+  const selectedRows = $derived(selection ? Math.min(selection.rowEnd, rows - 1) - selection.rowStart + 1 : 0);
+  const selectedColumns = $derived(selection ? selection.colEnd - selection.colStart + 1 : 0);
+
+  function selectionChanged(range: CellRange | null, cell: CellPosition | null) {
+    selection = range;
+    focusCell = cell;
+    stats = null;
+    clearTimeout(statsTimer);
+    const request = ++statsRequest;
+    if (!range) return;
+    const cells = (range.rowEnd - range.rowStart + 1) * (range.colEnd - range.colStart + 1);
+    // One cell needs no totals. Beyond a point they would take longer than they are worth.
+    if (cells < 2 || cells > 20_000_000) return;
+    statsTimer = setTimeout(async () => {
+      try {
+        const found = await backend.rangeStats(result.id, range);
+        if (request === statsRequest) stats = found;
+      } catch {
+        // The result was closed meanwhile.
+      }
+    }, 150);
+  }
+
+  function formatNumber(n: number): string {
+    return n.toLocaleString('en-US', { maximumFractionDigits: 4 });
+  }
+
+  function tableName(): string {
+    return exportTable.trim() || target?.table || 'table_name';
+  }
+
+  async function writeClipboard(text: string): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      note = 'The clipboard could not be written to.';
+      return false;
+    }
+  }
+
+  /** Copies the selected cells. The text is built by the backend from the stored rows. */
+  async function copy(format: CopyFormat, headers = false) {
+    const range = selection;
+    if (!range) return;
+    try {
+      const text = await backend.copyRange(result.id, range, format, headers, tableName());
+      if (!(await writeClipboard(text))) return;
+      const cells = selectedRows * selectedColumns;
+      note =
+        cells === 1
+          ? 'Copied 1 cell'
+          : `Copied ${formatCount(selectedRows)} ${selectedRows === 1 ? 'row' : 'rows'} \u00d7 ${formatCount(selectedColumns)} ${selectedColumns === 1 ? 'column' : 'columns'}`;
+    } catch (e) {
+      note = asUiError(e).message;
+    }
+  }
+
+  async function filterByCell(row: number, column: number) {
+    try {
+      const value = await backend.getCell(result.id, row, column);
+      if (value.text === null || value.text.trim() === '') {
+        note = 'An empty or NULL value cannot be filtered by.';
+        return;
+      }
+      filter = value.text.slice(0, 200);
+      await applyView();
+    } catch (e) {
+      note = asUiError(e).message;
+    }
   }
 
   // ---------- export ----------
@@ -76,8 +163,14 @@
   async function exportRows() {
     exporting = true;
     try {
-      const done = await backend.exportResult(result.id, format, exportTable.trim() || target?.table || 'table_name');
-      if (done) note = `Exported ${formatCount(done.rows)} rows to ${done.path}`;
+      const done = await backend.exportResult(result.id, format, tableName());
+      if (done) {
+        // Say so when the file is not everything, rather than let it pass for the full data.
+        note =
+          `Exported ${formatCount(done.rows)} rows to ${done.path}` +
+          (done.truncated ? '. The result stopped at the row limit, so the file does not hold every row the query returns' : '') +
+          (done.filtered ? '. Only the rows matching the filter were written' : '');
+      }
     } catch (e) {
       note = asUiError(e).message;
     } finally {
@@ -138,8 +231,20 @@
     note = null;
   }
 
-  function toggleDelete(row: number) {
-    deletes = deletes.includes(row) ? deletes.filter((r) => r !== row) : [...deletes, row];
+  /** Marks the rows for deletion, or unmarks them if every one already is. */
+  function toggleDelete(first: number, last = first) {
+    if (last - first >= 10_000) {
+      note = 'That is more rows than can be deleted from the grid at once. Use a DELETE statement.';
+      return;
+    }
+    const marked = new Set(deletes);
+    let all = true;
+    for (let row = first; row <= last; row++) all &&= marked.has(row);
+    for (let row = first; row <= last; row++) {
+      if (all) marked.delete(row);
+      else marked.add(row);
+    }
+    deletes = [...marked];
   }
 
   // Cell viewer and editor.
@@ -234,38 +339,59 @@
 
   // ---------- right-click ----------
 
-  async function copyRow(row: number) {
-    try {
-      const cells = decodeCells(await backend.getRows(result.id, row, 1), result.columns.length).values;
-      await navigator.clipboard.writeText(cells.map((c) => c ?? 'NULL').join('\t'));
-    } catch {
-      // Clipboard access can be refused.
-    }
-  }
-
-  async function copyCell(row: number, column: number) {
-    try {
-      await navigator.clipboard.writeText((await backend.getCell(result.id, row, column)).text ?? 'NULL');
-    } catch {
-      // Clipboard access can be refused.
-    }
-  }
-
+  /** The menu for the selection; `row` and `column` are the cell that was right-clicked. */
   function cellMenu(row: number, column: number): MenuItem[] {
+    const range = selection ?? { rowStart: row, rowEnd: row, colStart: column, colEnd: column };
+    const manyRows = range.rowEnd > range.rowStart;
     const items: MenuItem[] = [
-      { label: 'Copy Cell', shortcut: 'Ctrl+C', action: () => void copyCell(row, column) },
-      { label: 'Copy Row', action: () => void copyRow(row) },
+      { label: 'Copy', shortcut: 'Ctrl+C', action: () => void copy('tsv') },
+      { label: 'Copy with Column Names', shortcut: 'Ctrl+Shift+C', action: () => void copy('tsv', true) },
+      { label: 'Copy as CSV', action: () => void copy('csv', true) },
+      { label: 'Copy as SQL INSERT', action: () => void copy('sql') },
+      { label: 'Copy as IN (…) List', action: () => void copy('list') },
+      separator,
+      { label: manyRows ? 'Select Rows' : 'Select Row', shortcut: 'Shift+Space', action: () => grid?.selectRows(range.rowStart, range.rowEnd) },
+      { label: range.colEnd > range.colStart ? 'Select Columns' : 'Select Column', shortcut: 'Ctrl+Space', action: () => grid?.selectColumns(range.colStart, range.colEnd) },
+      { label: 'Select All', shortcut: 'Ctrl+A', action: () => grid?.selectAll() },
+      separator,
+      { label: 'Filter by This Value', disabled: !result.done || pending > 0, action: () => void filterByCell(row, column) },
       { label: 'View Value…', action: () => void showCell(row, column) },
     ];
     if (target) {
+      const allMarked = deletes.includes(row);
       items.push(
         separator,
         { label: 'Edit Cell…', disabled: target.columns[column] === null || deletes.includes(row), action: () => void showCell(row, column) },
-        { label: deletes.includes(row) ? 'Keep Row' : 'Delete Row', action: () => toggleDelete(row) },
+        {
+          label: manyRows ? (allMarked ? 'Keep Rows' : `Delete ${formatCount(range.rowEnd - range.rowStart + 1)} Rows`) : allMarked ? 'Keep Row' : 'Delete Row',
+          action: () => toggleDelete(range.rowStart, range.rowEnd),
+        },
         { label: 'Add Row…', action: () => (newRow = {}) },
       );
     }
     return items;
+  }
+
+  function headerMenu(column: number): MenuItem[] {
+    const sorted = sort?.column === column ? sort : null;
+    return [
+      { label: 'Sort Ascending', checked: !!sorted && !sorted.descending, disabled: !result.done, action: () => setSort({ column, descending: false }) },
+      { label: 'Sort Descending', checked: !!sorted?.descending, disabled: !result.done, action: () => setSort({ column, descending: true }) },
+      { label: 'Clear Sort', disabled: !sort, action: () => setSort(null) },
+      separator,
+      { label: 'Select Column', shortcut: 'Ctrl+Click', action: () => grid?.selectColumns(column, column) },
+      { label: 'Copy Column Name', action: () => void writeClipboard(result.columns[column].name) },
+      { label: 'Copy All Column Names', action: () => void writeClipboard(result.columns.map((c) => c.name).join(', ')) },
+      separator,
+      { label: 'Fit Column to Contents', shortcut: 'Double-click edge', action: () => grid?.autoSizeColumn(column) },
+      { label: 'Fit All Columns', action: () => grid?.autoSizeAll() },
+    ];
+  }
+
+  function closeMenu() {
+    contextMenu = null;
+    // Back to the grid, so Ctrl+C and the arrow keys act on the selection again.
+    grid?.focus();
   }
 
   function modal(node: HTMLDialogElement) {
@@ -295,8 +421,17 @@
     {#if format === 'sql'}
       <input type="text" class="table" bind:value={exportTable} placeholder={target?.table ?? 'table name'} aria-label="Table name for the INSERT statements" />
     {/if}
-    <button disabled={!result.done || exporting} onclick={exportRows} title="Save the rows shown to a file">
+    <button
+      disabled={!result.done || exporting}
+      onclick={exportRows}
+      title={result.truncated
+        ? 'Save the rows shown to a file. The result stopped at the row limit, so that is not every row the query returns.'
+        : 'Save the rows shown to a file'}
+    >
       {exporting ? 'Exporting…' : 'Export…'}
+    </button>
+    <button disabled={!selection} onclick={() => void copy('tsv')} title="Copy the selected cells (Ctrl+C). Right-click the grid for CSV, SQL INSERT and other forms.">
+      Copy
     </button>
     <span class="divider"></span>
     {#if target}
@@ -314,15 +449,18 @@
 
   <div class="grid-area">
     <Grid
+      bind:this={grid}
       {result}
       {rows}
       {viewVersion}
       {sort}
       {overlay}
       onactivate={showCell}
-      onselect={(row, column) => (position = `Row ${formatCount(row + 1)}, ${result.columns[column].name}`)}
+      onselection={selectionChanged}
+      oncopy={(headers) => void copy('tsv', headers)}
       onsort={sortBy}
       oncontext={(row, column, x, y) => (contextMenu = { items: cellMenu(row, column), x, y })}
+      onheadercontext={(column, x, y) => (contextMenu = { items: headerMenu(column), x, y })}
     />
   </div>
 
@@ -340,13 +478,28 @@
     {#if result.elapsedMs !== null}<span class="muted">{formatDuration(result.elapsedMs)}</span>{/if}
     {#if note}<span class="note" role="status">{note}</span>{/if}
     <span class="spacer"></span>
-    {#if position}<span class="muted">{position}</span>{/if}
-    <span class="muted">Click a header to sort. Double-click a cell to {target ? 'edit' : 'view'} it.</span>
+    {#if selection && selectedRows * selectedColumns > 1}
+      <span>
+        {formatCount(selectedRows)} {selectedRows === 1 ? 'row' : 'rows'} &times; {formatCount(selectedColumns)}
+        {selectedColumns === 1 ? 'column' : 'columns'}
+      </span>
+      {#if stats && stats.numbers > 0 && stats.sum !== null && stats.average !== null && stats.min !== null && stats.max !== null}
+        <span title={`${formatCount(stats.numbers)} of the ${formatCount(stats.cells)} selected cells hold a number`}>
+          Sum {formatNumber(stats.sum)}
+        </span>
+        <span>Avg {formatNumber(stats.average)}</span>
+        <span>Min {formatNumber(stats.min)}</span>
+        <span>Max {formatNumber(stats.max)}</span>
+      {/if}
+    {:else if focusCell}
+      <span class="muted">Row {formatCount(focusCell.row + 1)}, {result.columns[focusCell.column]?.name}</span>
+    {/if}
+    <span class="muted hint-text">Drag to select &middot; Ctrl+C copies &middot; right-click for more</span>
   </footer>
 </div>
 
 {#if contextMenu}
-  <Menu items={contextMenu.items} label="Cell actions" x={contextMenu.x} y={contextMenu.y} onclose={() => (contextMenu = null)} />
+  <Menu items={contextMenu.items} label="Grid actions" x={contextMenu.x} y={contextMenu.y} onclose={closeMenu} />
 {/if}
 
 {#if openCell}
@@ -496,6 +649,13 @@
   }
 
   .note {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* The first thing to give way when the footer runs out of room. */
+  .hint-text {
+    flex-shrink: 1000;
     overflow: hidden;
     text-overflow: ellipsis;
   }

@@ -210,6 +210,7 @@ export const mockBackend: Backend = {
     if (password === 'wrong') throw fail('access-denied', "access denied: Access denied for user 'ann'@'10.0.0.5' (using password: YES) (error 1045)");
     return {
       id: nextId++,
+      profileId: profile.id,
       name: profile.name,
       color: profile.color,
       host: `${profile.host}:${profile.port}`,
@@ -223,6 +224,7 @@ export const mockBackend: Backend = {
   },
   connectDemo: async () => ({
     id: nextId++,
+    profileId: null,
     name: 'Demo server',
     color: null,
     host: '127.0.0.1:53211',
@@ -410,7 +412,63 @@ export const mockBackend: Backend = {
   },
   exportResult: async (resultId, format) => {
     await wait(300);
-    return { path: `C:\\exports\\result.${format}`, rows: results.get(resultId)?.rows ?? 0 };
+    return { path: `C:\\exports\\result.${format}`, rows: results.get(resultId)?.rows ?? 0, truncated: false, filtered: false };
+  },
+  copyRange: async (resultId, range, format, headers, table) => {
+    const result = results.get(resultId);
+    if (!result) throw fail('no-result', 'This result is no longer available.');
+    const lastRow = Math.min(range.rowEnd, result.rows - 1, range.rowStart + 4999);
+    const lastCol = Math.min(range.colEnd, result.columns.length - 1);
+    const cols: number[] = [];
+    for (let c = range.colStart; c <= lastCol; c++) cols.push(c);
+    const value = (row: number, c: number) => cellText(row, c % demoColumns.length);
+    const literal = (row: number, c: number) => {
+      const text = value(row, c);
+      if (text === null) return 'NULL';
+      return result.columns[c].kind === 'number' ? text : `'${text.replaceAll("'", "''")}'`;
+    };
+    const separator = format === 'csv' ? ',' : '\t';
+    const lines: string[] = [];
+    if (headers && (format === 'tsv' || format === 'csv')) lines.push(cols.map((c) => result.columns[c].name).join(separator));
+    const list: string[] = [];
+    for (let row = range.rowStart; row <= lastRow; row++) {
+      if (format === 'sql') {
+        const names = cols.map((c) => '`' + result.columns[c].name + '`').join(', ');
+        lines.push(`INSERT INTO \`${table || 'table_name'}\` (${names}) VALUES (${cols.map((c) => literal(row, c)).join(', ')});`);
+      } else if (format === 'list') {
+        list.push(...cols.map((c) => literal(row, c)));
+      } else {
+        lines.push(cols.map((c) => value(row, c) ?? 'NULL').join(separator));
+      }
+    }
+    return format === 'list' ? list.join(', ') : lines.join('\n');
+  },
+  rangeStats: async (resultId, range) => {
+    const result = results.get(resultId);
+    const stats = { rows: 0, cells: 0, numbers: 0, sum: null as number | null, min: null as number | null, max: null as number | null, average: null as number | null };
+    if (!result) return stats;
+    const lastRow = Math.min(range.rowEnd, result.rows - 1);
+    const lastCol = Math.min(range.colEnd, result.columns.length - 1);
+    stats.rows = Math.max(0, lastRow - range.rowStart + 1);
+    stats.cells = stats.rows * Math.max(0, lastCol - range.colStart + 1);
+    let sum = 0;
+    // The mock adds up only the first rows; the real backend reads them all.
+    for (let row = range.rowStart; row <= Math.min(lastRow, range.rowStart + 4999); row++) {
+      for (let c = range.colStart; c <= lastCol; c++) {
+        const text = cellText(row, c % demoColumns.length);
+        const n = text === null || text.trim() === '' ? NaN : Number(text);
+        if (!Number.isFinite(n)) continue;
+        stats.numbers++;
+        sum += n;
+        stats.min = stats.min === null ? n : Math.min(stats.min, n);
+        stats.max = stats.max === null ? n : Math.max(stats.max, n);
+      }
+    }
+    if (stats.numbers > 0) {
+      stats.sum = sum;
+      stats.average = sum / stats.numbers;
+    }
+    return stats;
   },
   editTarget: async (_workspaceId, resultId) => {
     await wait(120);
@@ -477,6 +535,10 @@ export const mockBackend: Backend = {
       indexes: columns
         .filter(([, , , key]) => key === 'MUL' || key === 'UNI')
         .map(([name, , , key]) => ({ name: `idx_${name}`, columns: [name], unique: key === 'UNI', originalName: `idx_${name}`, locked: false })),
+      foreignKeys:
+        table === 'orders'
+          ? [{ name: 'fk_orders_customer', columns: ['customer_id'], referencedSchema: 'sales', referencedTable: 'customers', referencedColumns: ['id'], onUpdate: 'RESTRICT', onDelete: 'CASCADE', originalName: 'fk_orders_customer' }]
+          : [],
       engine: 'InnoDB',
       collation: 'utf8mb4_0900_ai_ci',
       comment: table === 'orders' ? 'One row per customer order' : '',
@@ -484,6 +546,12 @@ export const mockBackend: Backend = {
   },
   tableDdl: async (original, updated) => {
     if (updated.name.trim() === '') throw fail('other', 'Enter a name.');
+    const incomplete = updated.foreignKeys.find((k) => k.columns.length === 0 || k.referencedTable === '' || k.referencedColumns.length !== k.columns.length);
+    if (incomplete) throw fail('other', 'A foreign key needs its columns, the table it refers to, and one column there for each of its own.');
+    const names = (list: string[]) => list.map((n) => `\`${n}\``).join(', ');
+    const foreignKey = (k: (typeof updated.foreignKeys)[number]) =>
+      `${k.name ? `CONSTRAINT \`${k.name}\` ` : ''}FOREIGN KEY (${names(k.columns)}) REFERENCES \`${k.referencedSchema || updated.schema}\`.\`${k.referencedTable}\` (${names(k.referencedColumns)})` +
+      `${k.onDelete ? ` ON DELETE ${k.onDelete.toUpperCase()}` : ''}${k.onUpdate ? ` ON UPDATE ${k.onUpdate.toUpperCase()}` : ''}`;
     const blank = updated.columns.find((c) => c.name.trim() === '' || c.dataType.trim() === '');
     if (blank) throw fail('other', 'Every column needs a name and a type.');
     const define = (c: (typeof updated.columns)[number]) =>
@@ -492,9 +560,17 @@ export const mockBackend: Backend = {
       const lines = updated.columns.map(define);
       if (updated.primaryKey.length) lines.push(`PRIMARY KEY (${updated.primaryKey.map((n) => `\`${n}\``).join(', ')})`);
       for (const i of updated.indexes) lines.push(`${i.unique ? 'UNIQUE ' : ''}INDEX \`${i.name}\` (${i.columns.map((n) => `\`${n}\``).join(', ')})`);
+      for (const k of updated.foreignKeys) lines.push(foreignKey(k));
       return `CREATE TABLE \`${updated.schema}\`.\`${updated.name}\` (\n  ${lines.join(',\n  ')}\n);`;
     }
     const clauses: string[] = [];
+    const drops: string[] = [];
+    for (const before of original.foreignKeys) {
+      const now = updated.foreignKeys.find((k) => k.originalName === before.name);
+      if (!now || foreignKey(now) !== foreignKey(before)) drops.push(`DROP FOREIGN KEY \`${before.name}\``);
+      if (now && foreignKey(now) !== foreignKey(before)) clauses.push(`ADD ${foreignKey(now)}`);
+    }
+    for (const k of updated.foreignKeys) if (k.originalName === null) clauses.push(`ADD ${foreignKey(k)}`);
     for (const before of original.columns) {
       if (!updated.columns.some((c) => c.originalName === before.name)) clauses.push(`DROP COLUMN \`${before.name}\``);
     }
@@ -505,8 +581,9 @@ export const mockBackend: Backend = {
       else if (define(before) !== define(c)) clauses.push(`MODIFY COLUMN ${define(c)}`);
     }
     if (updated.name !== original.name) clauses.push(`RENAME TO \`${updated.schema}\`.\`${updated.name}\``);
-    if (clauses.length === 0) throw fail('other', 'Nothing has been changed.');
-    return `ALTER TABLE \`${original.schema}\`.\`${original.name}\`\n  ${clauses.join(',\n  ')};`;
+    if (clauses.length === 0 && drops.length === 0) throw fail('other', 'Nothing has been changed.');
+    const alter = (parts: string[]) => `ALTER TABLE \`${original.schema}\`.\`${original.name}\`\n  ${parts.join(',\n  ')};`;
+    return [drops, clauses].filter((parts) => parts.length > 0).map(alter).join('\n\n');
   },
   objectDdl: async (action, kind, schema, name, newName) => {
     if (action === 'dropSchema') return `DROP SCHEMA \`${schema}\`;`;

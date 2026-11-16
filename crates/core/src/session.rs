@@ -66,6 +66,10 @@ pub struct Session {
     conn: Conn,
     opts: Opts,
     info: ServerInfo,
+    /// A second connection used only to interrupt this one. Opened the first
+    /// time it is needed and then kept, so repeated cancels and row-limit
+    /// stops do not each log in again.
+    control: Arc<tokio::sync::Mutex<Option<Conn>>>,
 }
 
 fn build_opts(profile: &ConnectProfile) -> Opts {
@@ -145,11 +149,18 @@ fn column_info(column: &Column) -> ColumnInfo {
     }
 }
 
-async fn status_value(conn: &mut Conn, name: &str) -> Result<Option<String>, Error> {
-    let row: Option<(String, Option<String>)> = conn
-        .query_first(format!("SHOW SESSION STATUS LIKE '{name}'"))
+/// The TLS version and cipher of this connection, in one round trip.
+async fn tls_status(conn: &mut Conn) -> Result<(Option<String>, Option<String>), Error> {
+    let rows: Vec<(String, Option<String>)> = conn
+        .query("SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_version', 'Ssl_cipher')")
         .await?;
-    Ok(row.and_then(|(_, v)| v).filter(|v| !v.is_empty()))
+    let find = |name: &str| {
+        rows.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .and_then(|(_, v)| v.clone())
+            .filter(|v| !v.is_empty())
+    };
+    Ok((find("Ssl_version"), find("Ssl_cipher")))
 }
 
 impl Session {
@@ -165,15 +176,21 @@ impl Session {
             .await?;
         let (version, comment, user) = row.unwrap_or_default();
         let version_comment = comment.unwrap_or_default();
+        let (tls_version, tls_cipher) = tls_status(&mut conn).await?;
         let info = ServerInfo {
             version: ServerVersion::parse(&version.unwrap_or_default(), &version_comment),
             version_comment,
             connection_id: conn.id(),
             current_user: user.unwrap_or_default(),
-            tls_version: status_value(&mut conn, "Ssl_version").await?,
-            tls_cipher: status_value(&mut conn, "Ssl_cipher").await?,
+            tls_version,
+            tls_cipher,
         };
-        Ok(Self { conn, opts, info })
+        Ok(Self {
+            conn,
+            opts,
+            info,
+            control: Arc::new(tokio::sync::Mutex::new(None)),
+        })
     }
 
     pub fn info(&self) -> &ServerInfo {
@@ -283,9 +300,12 @@ impl Session {
         F: FnMut(RunEvent),
     {
         // A small first batch gets rows on screen quickly; larger batches
-        // after that keep lock traffic on the store low.
+        // after that keep lock traffic on the store low. A batch is also
+        // handed over once it holds this many bytes, so rows with very large
+        // values cannot pile up in memory before reaching the store.
         const FIRST_BATCH: usize = 256;
         const BATCH: usize = 4096;
+        const BATCH_BYTES: usize = 8 * 1024 * 1024;
 
         let canceller = self.canceller();
         let mut kill: Option<tokio::task::JoinHandle<Result<(), Error>>> = None;
@@ -330,7 +350,7 @@ impl Session {
                             let pending = batch.rows() as u64;
                             let at_cap = max_rows.is_some_and(|max| stored + pending >= max);
                             let limit = if stored == 0 { FIRST_BATCH } else { BATCH };
-                            if at_cap || batch.rows() >= limit {
+                            if at_cap || batch.rows() >= limit || batch.bytes() >= BATCH_BYTES {
                                 stored += pending;
                                 store.append(&mut batch);
                                 on_event(RunEvent::Progress { rows: stored });
@@ -392,6 +412,7 @@ impl Session {
         Canceller {
             opts: self.opts.clone(),
             connection_id: self.info.connection_id,
+            control: self.control.clone(),
         }
     }
 
@@ -407,13 +428,23 @@ impl Session {
 pub struct Canceller {
     opts: Opts,
     connection_id: u32,
+    control: Arc<tokio::sync::Mutex<Option<Conn>>>,
 }
 
 impl Canceller {
     pub async fn cancel(&self) -> Result<(), Error> {
-        let mut side = Conn::new(self.opts.clone()).await?;
-        side.query_drop(format!("KILL QUERY {}", self.connection_id)).await?;
-        side.disconnect().await?;
+        let kill = format!("KILL QUERY {}", self.connection_id);
+        let mut control = self.control.lock().await;
+        if let Some(conn) = control.as_mut() {
+            if conn.query_drop(&kill).await.is_ok() {
+                return Ok(());
+            }
+            // The kept connection has gone stale (timed out, most likely).
+            *control = None;
+        }
+        let mut conn = Conn::new(self.opts.clone()).await?;
+        conn.query_drop(&kill).await?;
+        *control = Some(conn);
         Ok(())
     }
 }

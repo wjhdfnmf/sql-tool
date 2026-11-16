@@ -67,6 +67,8 @@ export interface ServerInfo {
 
 export interface WorkspaceInfo {
   id: number;
+  /** The saved connection this came from; null for the demo server. */
+  profileId: string | null;
   name: string;
   color: string | null;
   host: string;
@@ -111,6 +113,37 @@ export interface Concern {
 
 export type ExportFormat = 'csv' | 'tsv' | 'json' | 'sql';
 
+export interface Exported {
+  path: string;
+  rows: number;
+  /** The result stopped at the row limit, so the file is not everything the query returns. */
+  truncated: boolean;
+  /** A filter was on, so only matching rows were written. */
+  filtered: boolean;
+}
+
+/** A rectangle of cells in the rows a grid shows. Both ends are included. */
+export interface CellRange {
+  rowStart: number;
+  rowEnd: number;
+  colStart: number;
+  colEnd: number;
+}
+
+/** `list` is quoted values separated by commas, for an IN (...) clause. */
+export type CopyFormat = 'tsv' | 'csv' | 'sql' | 'list';
+
+/** Totals for a selection. The number fields are null when it holds no numbers. */
+export interface RangeStats {
+  rows: number;
+  cells: number;
+  numbers: number;
+  sum: number | null;
+  min: number | null;
+  max: number | null;
+  average: number | null;
+}
+
 /** Where edits made in a result grid go. */
 export interface EditTarget {
   schema: string;
@@ -152,12 +185,27 @@ export interface IndexSpec {
   locked: boolean;
 }
 
+export interface ForeignKeySpec {
+  /** May be empty for a new key; the server then names it. */
+  name: string;
+  columns: string[];
+  /** Empty means the table's own schema. */
+  referencedSchema: string;
+  referencedTable: string;
+  referencedColumns: string[];
+  /** RESTRICT, CASCADE, SET NULL, NO ACTION or SET DEFAULT; empty for the server's default. */
+  onUpdate: string;
+  onDelete: string;
+  originalName: string | null;
+}
+
 export interface TableSpec {
   schema: string;
   name: string;
   columns: ColumnSpec[];
   primaryKey: string[];
   indexes: IndexSpec[];
+  foreignKeys: ForeignKeySpec[];
   engine: string | null;
   collation: string | null;
   comment: string;

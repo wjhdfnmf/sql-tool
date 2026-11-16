@@ -313,8 +313,10 @@ impl Session {
     pub async fn completion_columns(&mut self, schema: &str) -> Result<Vec<(String, String)>, Error> {
         Ok(self
             .query_params(
+                // Bounded, so a schema with tens of thousands of tables
+                // cannot flood the editor with names.
                 "SELECT table_name, column_name FROM information_schema.columns \
-                 WHERE table_schema = ? ORDER BY table_name, ordinal_position",
+                 WHERE table_schema = ? ORDER BY table_name, ordinal_position LIMIT 50000",
                 (schema,),
             )
             .await?
@@ -449,12 +451,29 @@ impl Session {
             index.columns.extend(column);
         }
 
+        let foreign_keys = self
+            .foreign_keys(schema, table)
+            .await?
+            .into_iter()
+            .map(|key| crate::table::ForeignKeySpec {
+                original_name: Some(key.name.clone()),
+                name: key.name,
+                columns: key.columns,
+                referenced_schema: key.referenced_schema,
+                referenced_table: key.referenced_table,
+                referenced_columns: key.referenced_columns,
+                on_update: key.on_update,
+                on_delete: key.on_delete,
+            })
+            .collect();
+
         Ok(Some(TableSpec {
             schema: schema.to_string(),
             name: table.to_string(),
             columns,
             primary_key,
             indexes,
+            foreign_keys,
             engine: details.engine,
             collation: details.collation,
             comment: details.comment,

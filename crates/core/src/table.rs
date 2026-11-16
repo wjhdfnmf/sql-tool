@@ -3,8 +3,8 @@
 //! A [`TableSpec`] describes a table the way the designer shows it. Creating
 //! a table writes the whole spec out. Altering compares the spec read from
 //! the server with the edited one and writes only the differences, so
-//! anything the designer does not model (foreign keys, checks, generated
-//! columns, partitioning) is left alone as long as it is not touched.
+//! anything the designer does not model (checks, generated columns,
+//! partitioning) is left alone as long as it is not touched.
 
 use serde::{Deserialize, Serialize};
 
@@ -51,12 +51,32 @@ pub struct IndexSpec {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+pub struct ForeignKeySpec {
+    /// The constraint's name. May be left empty for a new one; the server
+    /// then names it.
+    pub name: String,
+    pub columns: Vec<String>,
+    /// Empty means the table's own schema.
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    /// `RESTRICT`, `CASCADE`, `SET NULL`, `NO ACTION` or `SET DEFAULT`;
+    /// empty leaves it to the server's default.
+    pub on_update: String,
+    pub on_delete: String,
+    /// The constraint's name on the server; `None` for one being added.
+    pub original_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct TableSpec {
     pub schema: String,
     pub name: String,
     pub columns: Vec<ColumnSpec>,
     pub primary_key: Vec<String>,
     pub indexes: Vec<IndexSpec>,
+    pub foreign_keys: Vec<ForeignKeySpec>,
     pub engine: Option<String>,
     pub collation: Option<String>,
     pub comment: String,
@@ -104,6 +124,33 @@ fn index_definition(index: &IndexSpec) -> String {
     )
 }
 
+const REFERENCE_ACTIONS: [&str; 5] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION", "SET DEFAULT"];
+
+fn action(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase()
+}
+
+fn foreign_key_definition(key: &ForeignKeySpec, own_schema: &str) -> String {
+    let mut sql = String::new();
+    if !key.name.trim().is_empty() {
+        sql.push_str(&format!("CONSTRAINT {} ", quote_identifier(key.name.trim())));
+    }
+    let schema = if key.referenced_schema.trim().is_empty() { own_schema } else { key.referenced_schema.trim() };
+    sql.push_str(&format!(
+        "FOREIGN KEY ({}) REFERENCES {} ({})",
+        column_list(&key.columns),
+        qualified(schema, &key.referenced_table),
+        column_list(&key.referenced_columns)
+    ));
+    if !action(&key.on_delete).is_empty() {
+        sql.push_str(&format!(" ON DELETE {}", action(&key.on_delete)));
+    }
+    if !action(&key.on_update).is_empty() {
+        sql.push_str(&format!(" ON UPDATE {}", action(&key.on_update)));
+    }
+    sql
+}
+
 fn validate(spec: &TableSpec) -> Result<(), Error> {
     check_name(&spec.name)?;
     if spec.columns.is_empty() {
@@ -143,6 +190,35 @@ fn validate(spec: &TableSpec) -> Result<(), Error> {
             return Err(fail(format!("Index {} refers to a column that does not exist: {missing}.", index.name.trim())));
         }
     }
+    let mut key_names = std::collections::HashSet::new();
+    for key in &spec.foreign_keys {
+        let label = if key.name.trim().is_empty() { "A foreign key".to_string() } else { format!("Foreign key {}", key.name.trim()) };
+        if !key.name.trim().is_empty() {
+            check_name(&key.name).map_err(|_| fail("A foreign key's name can be at most 64 characters."))?;
+            if !key_names.insert(key.name.trim().to_lowercase()) {
+                return Err(fail(format!("There are two foreign keys named {}.", key.name.trim())));
+            }
+        }
+        if key.columns.is_empty() {
+            return Err(fail(format!("{label} needs at least one column.")));
+        }
+        if let Some(missing) = key.columns.iter().find(|name| !known(name)) {
+            return Err(fail(format!("{label} refers to a column that does not exist: {missing}.")));
+        }
+        check_name(&key.referenced_table).map_err(|_| fail(format!("{label} needs the table it refers to.")))?;
+        if key.referenced_columns.len() != key.columns.len() || key.referenced_columns.iter().any(|c| c.trim().is_empty()) {
+            return Err(fail(format!(
+                "{label} needs one column in {} for each of its own columns.",
+                key.referenced_table.trim()
+            )));
+        }
+        for rule in [&key.on_update, &key.on_delete] {
+            let rule = action(rule);
+            if !rule.is_empty() && !REFERENCE_ACTIONS.contains(&rule.as_str()) {
+                return Err(fail(format!("{rule} is not something a foreign key can do on update or delete.")));
+            }
+        }
+    }
     if let Some(engine) = spec.engine.as_deref().filter(|e| !e.is_empty()) {
         check_word("engine", engine)?;
     }
@@ -167,6 +243,7 @@ pub fn create_table(spec: &TableSpec) -> Result<String, Error> {
         lines.push(format!("PRIMARY KEY ({})", column_list(&spec.primary_key)));
     }
     lines.extend(spec.indexes.iter().map(index_definition));
+    lines.extend(spec.foreign_keys.iter().map(|key| foreign_key_definition(key, &spec.schema)));
 
     let mut sql = format!("CREATE TABLE {} (\n  {}\n)", qualified(&spec.schema, &spec.name), lines.join(",\n  "));
     if let Some(engine) = spec.engine.as_deref().filter(|e| !e.is_empty()) {
@@ -182,7 +259,12 @@ pub fn create_table(spec: &TableSpec) -> Result<String, Error> {
     Ok(sql)
 }
 
-/// The `ALTER TABLE` that turns `original` into `updated`. Fails if nothing changed.
+/// The SQL that turns `original` into `updated`. Fails if nothing changed.
+///
+/// This is one `ALTER TABLE`, except when foreign keys are removed or
+/// changed: those are dropped in a statement of their own first. Servers do
+/// not reliably accept dropping a foreign key and adding one of the same
+/// name, or dropping a column a foreign key uses, in a single statement.
 pub fn alter_table(original: &TableSpec, updated: &TableSpec) -> Result<String, Error> {
     validate(updated)?;
     // Renamed columns are compared by the name they have on the server.
@@ -205,6 +287,43 @@ pub fn alter_table(original: &TableSpec, updated: &TableSpec) -> Result<String, 
     };
 
     let mut clauses = Vec::new();
+
+    // Foreign keys that go away or change.
+    let mut key_drops = Vec::new();
+    let mut key_adds = Vec::new();
+    let own_schema = original.schema.as_str();
+    let referenced = |key: &ForeignKeySpec| {
+        let schema = if key.referenced_schema.trim().is_empty() { own_schema } else { key.referenced_schema.trim() };
+        (
+            schema.to_string(),
+            key.referenced_table.trim().to_string(),
+            key.referenced_columns.iter().map(|c| c.trim().to_string()).collect::<Vec<_>>(),
+        )
+    };
+    for key in &original.foreign_keys {
+        match updated.foreign_keys.iter().find(|k| k.original_name.as_deref() == Some(key.name.as_str())) {
+            None => key_drops.push(format!("DROP FOREIGN KEY {}", quote_identifier(&key.name))),
+            Some(now) => {
+                let same = now.name.trim() == key.name
+                    && !involves_new_column(&now.columns)
+                    && on_server(&now.columns) == key.columns
+                    && referenced(now) == referenced(key)
+                    && action(&now.on_update) == action(&key.on_update)
+                    && action(&now.on_delete) == action(&key.on_delete);
+                if !same {
+                    key_drops.push(format!("DROP FOREIGN KEY {}", quote_identifier(&key.name)));
+                    key_adds.push(format!("ADD {}", foreign_key_definition(now, own_schema)));
+                }
+            }
+        }
+    }
+    key_adds.extend(
+        updated
+            .foreign_keys
+            .iter()
+            .filter(|k| k.original_name.is_none())
+            .map(|k| format!("ADD {}", foreign_key_definition(k, own_schema))),
+    );
 
     // Indexes that go away or change are dropped first.
     let mut index_adds = Vec::new();
@@ -278,6 +397,7 @@ pub fn alter_table(original: &TableSpec, updated: &TableSpec) -> Result<String, 
         clauses.push(format!("ADD PRIMARY KEY ({})", column_list(&updated.primary_key)));
     }
     clauses.extend(index_adds);
+    clauses.extend(key_adds);
 
     if updated.engine != original.engine {
         if let Some(engine) = updated.engine.as_deref().filter(|e| !e.is_empty()) {
@@ -296,14 +416,18 @@ pub fn alter_table(original: &TableSpec, updated: &TableSpec) -> Result<String, 
         clauses.push(format!("RENAME TO {}", qualified(&updated.schema, &updated.name)));
     }
 
-    if clauses.is_empty() {
+    if clauses.is_empty() && key_drops.is_empty() {
         return Err(fail("Nothing has been changed."));
     }
-    Ok(format!(
-        "ALTER TABLE {}\n  {};",
-        qualified(&original.schema, &original.name),
-        clauses.join(",\n  ")
-    ))
+    let table = qualified(&original.schema, &original.name);
+    let mut statements = Vec::new();
+    if !key_drops.is_empty() {
+        statements.push(format!("ALTER TABLE {table}\n  {};", key_drops.join(",\n  ")));
+    }
+    if !clauses.is_empty() {
+        statements.push(format!("ALTER TABLE {table}\n  {};", clauses.join(",\n  ")));
+    }
+    Ok(statements.join("\n\n"))
 }
 
 pub fn drop_object(kind: ObjectKind, schema: &str, name: &str) -> String {
@@ -353,10 +477,113 @@ mod tests {
                 original_name: Some("idx_status".into()),
                 locked: false,
             }],
+            foreign_keys: Vec::new(),
             engine: Some("InnoDB".into()),
             collation: Some("utf8mb4_bin".into()),
             comment: String::new(),
         }
+    }
+
+    fn customer_key() -> ForeignKeySpec {
+        ForeignKeySpec {
+            name: "fk_customer".into(),
+            columns: vec!["note".into()],
+            referenced_schema: "shop".into(),
+            referenced_table: "customers".into(),
+            referenced_columns: vec!["id".into()],
+            on_update: "NO ACTION".into(),
+            on_delete: "CASCADE".into(),
+            original_name: Some("fk_customer".into()),
+        }
+    }
+
+    #[test]
+    fn create_table_writes_foreign_keys() {
+        let mut spec = orders();
+        spec.foreign_keys = vec![
+            customer_key(),
+            // No name, same schema, no rules: the server fills those in.
+            ForeignKeySpec {
+                columns: vec!["status".into()],
+                referenced_table: "statuses".into(),
+                referenced_columns: vec!["code".into()],
+                ..ForeignKeySpec::default()
+            },
+        ];
+        let sql = create_table(&spec).unwrap();
+        assert!(sql.contains(
+            "CONSTRAINT `fk_customer` FOREIGN KEY (`note`) REFERENCES `shop`.`customers` (`id`) ON DELETE CASCADE ON UPDATE NO ACTION,\n"
+        ));
+        assert!(sql.contains("  FOREIGN KEY (`status`) REFERENCES `shop`.`statuses` (`code`)\n)"));
+    }
+
+    #[test]
+    fn foreign_keys_are_checked() {
+        let broken = |change: fn(&mut ForeignKeySpec)| {
+            let mut spec = orders();
+            let mut key = customer_key();
+            change(&mut key);
+            spec.foreign_keys = vec![key];
+            create_table(&spec).unwrap_err().to_string()
+        };
+        assert!(broken(|k| k.columns.clear()).contains("at least one column"));
+        assert!(broken(|k| k.columns = vec!["nope".into()]).contains("does not exist"));
+        assert!(broken(|k| k.referenced_table = " ".into()).contains("needs the table it refers to"));
+        assert!(broken(|k| k.referenced_columns.clear()).contains("one column in customers for each"));
+        assert!(broken(|k| k.on_delete = "CASCADE; DROP TABLE x".into()).contains("is not something a foreign key can do"));
+    }
+
+    #[test]
+    fn an_untouched_foreign_key_is_left_alone() {
+        let mut original = orders();
+        original.foreign_keys = vec![customer_key()];
+        let mut updated = original.clone();
+        // The designer may hand rules back in another case or with the schema left out.
+        updated.foreign_keys[0].on_delete = "cascade".into();
+        updated.foreign_keys[0].referenced_schema = String::new();
+        updated.comment = "x".into();
+        assert_eq!(alter_table(&original, &updated).unwrap(), "ALTER TABLE `shop`.`orders`\n  COMMENT = 'x';");
+
+        // Renaming a column the key uses does not rebuild the key; the server carries it over.
+        let mut renamed = original.clone();
+        renamed.columns[1].name = "customer_id".into();
+        renamed.foreign_keys[0].columns = vec!["customer_id".into()];
+        assert_eq!(
+            alter_table(&original, &renamed).unwrap(),
+            "ALTER TABLE `shop`.`orders`\n  CHANGE COLUMN `note` `customer_id` VARCHAR(100) NULL;"
+        );
+    }
+
+    #[test]
+    fn changed_and_removed_foreign_keys_are_dropped_in_their_own_statement_first() {
+        let mut original = orders();
+        original.foreign_keys = vec![customer_key(), ForeignKeySpec { name: "fk_old".into(), original_name: Some("fk_old".into()), ..customer_key() }];
+        let mut updated = original.clone();
+        updated.foreign_keys.remove(1);
+        updated.foreign_keys[0].on_delete = "SET NULL".into();
+        updated.foreign_keys.push(ForeignKeySpec {
+            columns: vec!["status".into()],
+            referenced_table: "statuses".into(),
+            referenced_columns: vec!["code".into()],
+            ..ForeignKeySpec::default()
+        });
+        assert_eq!(
+            alter_table(&original, &updated).unwrap(),
+            "ALTER TABLE `shop`.`orders`\n  \
+             DROP FOREIGN KEY `fk_customer`,\n  \
+             DROP FOREIGN KEY `fk_old`;\n\n\
+             ALTER TABLE `shop`.`orders`\n  \
+             ADD CONSTRAINT `fk_customer` FOREIGN KEY (`note`) REFERENCES `shop`.`customers` (`id`) ON DELETE SET NULL ON UPDATE NO ACTION,\n  \
+             ADD FOREIGN KEY (`status`) REFERENCES `shop`.`statuses` (`code`);"
+        );
+
+        // Only removing: a single statement.
+        let mut removed = original.clone();
+        removed.foreign_keys.clear();
+        assert_eq!(
+            alter_table(&original, &removed).unwrap(),
+            "ALTER TABLE `shop`.`orders`\n  DROP FOREIGN KEY `fk_customer`,\n  DROP FOREIGN KEY `fk_old`;"
+        );
     }
 
     #[test]

@@ -11,11 +11,12 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **Connections**: saved profiles, test connection, colour tags. Passwords go in the operating system keychain or are asked for each time; they are never written to a settings file.
 - **Authentication**: `mysql_native_password`, `caching_sha2_password`, MariaDB `ed25519`, and the cleartext plugin (`mysql_clear_password`) that LDAP and PAM accounts need.
 - **Encryption**: verified TLS, a pinned certificate (trust one server certificate by its fingerprint, with no CA file), or "encrypted, not verified" as an explicit choice. Cleartext authentication on an unverified connection requires a visible acknowledgement.
-- **Editor**: tabs, MySQL and MariaDB syntax highlighting, run the statement at the cursor (Ctrl+Enter) or the whole script (Ctrl+Shift+Enter), `DELIMITER` support, stop a running statement.
-- **Results**: rows appear while they stream, in a grid that stays smooth with millions of rows. Resizable columns, full-value viewer, one tab per result set.
+- **Editor**: tabs, MySQL and MariaDB syntax highlighting, run the statement at the cursor (Ctrl+Enter) or the whole script (Ctrl+Shift+Enter), `DELIMITER` support, stop a running statement. Open query tabs come back the next time the connection is opened. Right-click a table to write its name or a full SELECT into the editor; double-click a column to insert its name.
+- **Results**: rows appear while they stream, in a grid that stays smooth with millions of rows. Columns size themselves to their contents, full-value viewer, one tab per result set.
+- **Selecting and copying**: drag, Shift+click or Shift+arrows to select cells; click a row number for a row, Ctrl+click a header for a column, Ctrl+A for everything. Ctrl+C copies in a form spreadsheets paste as cells; the right-click menu also copies as CSV, as SQL INSERT statements, or as a list for an `IN (...)` clause. The count, sum, average, smallest and largest of the selection show under the grid.
 - **Row limit**: 1,000 to 100,000 rows per result, or none. At the limit the query is interrupted on the server.
 - **Working with results**: sort and filter without re-running, export as CSV, TSV, JSON or SQL INSERT, and edit rows in place with changes reviewed as SQL and applied in one transaction.
-- **Table designer**: create and alter tables in a form that shows the SQL before it runs.
+- **Table designer**: create and alter tables, with their indexes and foreign keys, in a form that shows the SQL before it runs.
 - **Safety**: read-only connections, and confirmation of risky statements on connections marked as production.
 - **Schema browser**: schemas, tables, views, columns, routines, triggers and events, loaded on demand, with right-click actions and an information pane for the selected object.
 - **Schema changes**: create and alter schemas in a dialog that shows the SQL first; create and alter tables, views and routines from generated scripts.
@@ -31,7 +32,8 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 
 ## Known limits
 
-- Tested only on Windows, and only against MariaDB 11.8 and MySQL 8.4. MySQL 5.7, MySQL Enterprise, Linux and macOS are untested.
+- The automated tests run against MariaDB 11.8 and MySQL 8.4. MySQL Enterprise 8.4.3 and 5.7.37 have been connected to and used by hand. Hands-on use has been on Windows; the Linux and macOS builds pass the automated tests but have had no hands-on use.
+- Query history and remembered query tabs are kept on this computer without encryption. Statements that contain a password are left out of both.
 - `sha256_password` accounts are not supported.
 - A result keeps about 512 MB in memory and spills the rest to a temporary file, which is private and removed when the result closes, but not encrypted.
 - No automatic reconnect and no commit/rollback controls yet.
