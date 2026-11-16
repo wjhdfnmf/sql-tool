@@ -67,6 +67,19 @@ impl Error {
             Error::Other(_) => "other",
         }
     }
+
+    /// True when the connection itself is gone, as opposed to a statement
+    /// having failed on a connection that still works.
+    pub fn is_connection_lost(&self) -> bool {
+        match self {
+            Error::Io(_) => true,
+            // 1053: the server is shutting down. 1152: connection aborted.
+            // 1927: the connection was killed (MariaDB). 4031: the server
+            // closed an idle connection (MySQL 8.0.24 and later).
+            Error::Server { code, .. } => matches!(code, 1053 | 1152 | 1927 | 4031),
+            _ => false,
+        }
+    }
 }
 
 impl From<mysql_async::Error> for Error {
@@ -77,6 +90,9 @@ impl From<mysql_async::Error> for Error {
                 Error::UnsupportedAuthPlugin(name)
             }
             mysql_async::Error::Driver(DriverError::NoClientSslFlagFromServer) => Error::ServerHasNoTls,
+            mysql_async::Error::Driver(DriverError::ConnectionClosed) => {
+                Error::Io("the connection to the server is closed".into())
+            }
             mysql_async::Error::Io(IoError::Tls(e)) => Error::Tls(e.to_string()),
             // A failed TLS handshake (bad certificate, wrong host name, no
             // shared protocol version) arrives as an I/O error wrapping the

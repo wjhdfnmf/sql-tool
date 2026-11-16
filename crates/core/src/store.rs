@@ -23,6 +23,7 @@
 
 use std::cmp::Ordering;
 use std::io::{Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::RwLock;
 
 use serde::Serialize;
@@ -170,9 +171,27 @@ fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
     needle.is_empty() || haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
-/// How much of one result is kept in RAM before spilling to disk, unless
-/// `SQLTOOL_RESULT_MEMORY_MB` says otherwise.
+/// How much result data is kept in RAM before spilling to disk, unless the
+/// settings or `SQLTOOL_RESULT_MEMORY_MB` say otherwise.
 const DEFAULT_MEMORY_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// The budget in force. It applies to each result, and also to all open
+/// results together: ten tabs of large results must not use ten times the
+/// memory one is allowed.
+static MEMORY_BUDGET: AtomicU64 = AtomicU64::new(DEFAULT_MEMORY_BUDGET);
+/// Result data held in memory right now, across every open result.
+static MEMORY_IN_USE: AtomicU64 = AtomicU64::new(0);
+
+/// Sets how much result data may be held in memory before more goes to disk.
+/// Applies to results started from now on, and to the shared total at once.
+pub fn set_memory_budget(bytes: u64) {
+    MEMORY_BUDGET.store(bytes.max(1024 * 1024), Relaxed);
+}
+
+/// Result data held in memory across all open results.
+pub fn memory_in_use() -> u64 {
+    MEMORY_IN_USE.load(Relaxed)
+}
 const DEFAULT_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// Memory maps must start on a multiple of this (the strictest platform, Windows).
 const MAP_ALIGNMENT: u64 = 64 * 1024;
@@ -264,6 +283,7 @@ impl Inner {
         let start = open.len();
         open.extend_from_slice(row);
         self.memory_bytes += row.len() as u64;
+        MEMORY_IN_USE.fetch_add(row.len() as u64, Relaxed);
         self.rows.push(RowLocation {
             chunk: chunk as u32,
             start: start as u32,
@@ -274,7 +294,9 @@ impl Inner {
     /// Called when the last chunk will not be written to again. If memory is
     /// over budget, the chunk moves to disk.
     fn seal_last_chunk(&mut self) {
-        if self.memory_bytes <= self.memory_budget || self.spill_failed {
+        let own = self.memory_bytes > self.memory_budget;
+        let shared = MEMORY_IN_USE.load(Relaxed) > MEMORY_BUDGET.load(Relaxed);
+        if !(own || shared) || self.spill_failed {
             return;
         }
         let Some(Chunk::Memory(bytes)) = self.chunks.last() else {
@@ -284,6 +306,7 @@ impl Inner {
         match write_to_disk(&mut self.spill_file, bytes) {
             Ok(map) => {
                 self.memory_bytes -= len;
+                MEMORY_IN_USE.fetch_sub(len, Relaxed);
                 self.disk_bytes += len;
                 *self.chunks.last_mut().expect("checked above") = Chunk::Disk(map);
             }
@@ -299,6 +322,13 @@ impl Inner {
             Some(view) => view.get(visible_row as usize).map(|r| *r as usize),
             None => (visible_row < self.total()).then_some(visible_row as usize),
         }
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Closing a result gives its memory back to the shared budget.
+        MEMORY_IN_USE.fetch_sub(self.memory_bytes, Relaxed);
     }
 }
 
@@ -335,7 +365,7 @@ impl ResultStore {
         let budget = std::env::var("SQLTOOL_RESULT_MEMORY_MB")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .map_or(DEFAULT_MEMORY_BUDGET, |mb| mb * 1024 * 1024);
+            .map_or(MEMORY_BUDGET.load(Relaxed), |mb| mb * 1024 * 1024);
         Self::with_limits(budget, DEFAULT_CHUNK_SIZE)
     }
 

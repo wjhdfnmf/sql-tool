@@ -110,7 +110,23 @@ impl ProfileStore {
 
     pub fn load(&self) -> Result<Vec<SavedProfile>, Error> {
         match std::fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(storage),
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+                // Set the file aside: the app can then start with an empty
+                // list, and saving a new connection cannot overwrite what
+                // might still be recovered by hand.
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let aside = self.path.with_extension(format!("unreadable-{stamp}.json"));
+                match std::fs::rename(&self.path, &aside) {
+                    Ok(()) => Error::Storage(format!(
+                        "the saved connections file was damaged ({e}). It has been kept as {} and the list \
+                         starts empty. Saved passwords are still in the keychain",
+                        aside.display()
+                    )),
+                    Err(_) => storage(e),
+                }
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(storage(e)),
         }
@@ -211,6 +227,26 @@ mod tests {
         let raw = std::fs::read_to_string(&store.path).unwrap().to_lowercase();
         assert!(raw.contains("savepassword"));
         assert!(!raw.contains("\"password\""));
+    }
+
+    #[test]
+    fn a_damaged_file_is_set_aside_and_the_list_starts_empty() {
+        let store = temp_store("damaged");
+        store.upsert(sample()).unwrap();
+        std::fs::write(&store.path, b"{ this is not json").unwrap();
+
+        let error = store.load().unwrap_err().to_string();
+        assert!(error.contains("damaged") && error.contains("unreadable-"), "{error}");
+        // The app can carry on: the list is empty and can be saved to again.
+        assert!(store.load().unwrap().is_empty());
+        store.upsert(sample()).unwrap();
+        assert_eq!(store.load().unwrap().len(), 1);
+        // And the damaged file is still there to look at.
+        let kept = std::fs::read_dir(store.path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains("unreadable-"));
+        assert!(kept);
     }
 
     #[test]

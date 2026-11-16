@@ -22,6 +22,8 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **Schema changes**: create and alter schemas in a tab that shows the SQL first; create and alter views and routines from generated scripts.
 - **Menus and toolbars**: menu bar, toolbars, open and save script files, explain the statement under the cursor, reformat a query.
 - **History**: searchable. Statements that contain a password are not stored in full.
+- **Timeouts and dropped connections**: connecting gives up after 15 seconds (adjustable). A query runs until it finishes or is stopped, unless a query timeout is set, in which case it is interrupted on the server. A connection the server has closed for sitting idle is reopened before the next statement is sent, with a note in the output; an optional keep-alive prevents the closing.
+- **Settings and themes**: light, dark, midnight, sepia and high-contrast themes, or follow the system; size of text; editor indent and wrapping; default row limit; timeouts; whether history and open tabs are kept.
 
 ## Security defaults
 
@@ -36,7 +38,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - Query history and remembered query tabs are kept on this computer without encryption. Statements that contain a password are left out of both.
 - `sha256_password` accounts are not supported.
 - A result keeps about 512 MB in memory and spills the rest to a temporary file, which is private and removed when the result closes, but not encrypted.
-- No automatic reconnect and no commit/rollback controls yet.
+- No commit/rollback controls yet. When a dropped connection is reopened, session variables, temporary tables and an open transaction are not carried over; the output says so.
 - Installers are not code-signed, so Windows and macOS show a warning.
 
 [PLAN.md](PLAN.md) has the design, the roadmap and the test results in detail. See [SECURITY.md](SECURITY.md) to report a security problem and [CONTRIBUTING.md](CONTRIBUTING.md) to build and test.

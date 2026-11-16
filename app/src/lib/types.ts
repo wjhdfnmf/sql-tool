@@ -247,6 +247,7 @@ export type RunMsg =
     }
   | { type: 'failed'; index: number; message: string; elapsedMs: number }
   | { type: 'database'; name: string | null }
+  | { type: 'reconnected' }
   | { type: 'finished'; ran: number; total: number; failed: boolean; elapsedMs: number };
 
 export interface TableEntry {
@@ -321,6 +322,27 @@ export interface CellValue {
   text: string | null;
   bytes: number;
   truncated: boolean;
+}
+
+/** What the Settings screen changes. Stored by the backend, which corrects values outside their range. */
+export interface Settings {
+  /** system, light, dark, midnight, sepia or contrast. */
+  theme: string;
+  /** Size of everything in the window, in percent. */
+  zoom: number;
+  editorTabSize: number;
+  editorWordWrap: boolean;
+  uppercaseKeywords: boolean;
+  rememberTabs: boolean;
+  /** Rows kept per result for a new connection; null means no limit. */
+  defaultRowLimit: number | null;
+  /** 0 means a query is never stopped for running long. */
+  queryTimeoutSecs: number;
+  connectTimeoutSecs: number;
+  /** 0 means idle connections are not pinged. */
+  keepAliveSecs: number;
+  keepHistory: boolean;
+  resultMemoryMb: number;
 }
 
 export interface AppInfo {

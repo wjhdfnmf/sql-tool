@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use sqltool_core::metadata::{Charset, ColumnEntry, ForeignKeyEntry, SchemaDefaul
 use sqltool_core::table::{self, IndexSpec, TableSpec};
 use sqltool_core::{
     ddl, split, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
-    ResultStore, RunEvent, SavedProfile, ServerInfo, Session, TlsMode,
+    ResultStore, RunEvent, SavedProfile, ServerInfo, Session, Settings, SettingsStore, TlsMode,
 };
 use tauri::ipc::{Channel, Response};
 use tauri::{Manager, State};
@@ -32,6 +32,9 @@ use tauri::{Manager, State};
 const MAX_CELL_BYTES: usize = 2 * 1024 * 1024;
 /// Largest script file the editor will open.
 const MAX_SCRIPT_BYTES: u64 = 20 * 1024 * 1024;
+/// A connection that has been quiet this long is checked before it is used
+/// again, and reopened if the server has dropped it meanwhile.
+const IDLE_CHECK: Duration = Duration::from_secs(30);
 
 // ---------- errors ----------
 
@@ -77,6 +80,14 @@ struct Workspace {
 }
 
 impl Workspace {
+    /// The schema browser's connection, checked for life first: servers
+    /// close connections that sit idle, and the browser's often does.
+    async fn utility(&self) -> Result<tokio::sync::MutexGuard<'_, Session>, Error> {
+        let mut session = self.utility.lock().await;
+        session.ensure_alive(IDLE_CHECK).await?;
+        Ok(session)
+    }
+
     async fn tab(&self, tab_id: &str) -> Result<Arc<Tab>, Error> {
         if let Some(tab) = self.tabs.lock().await.get(tab_id) {
             return Ok(tab.clone());
@@ -113,6 +124,8 @@ struct Demo {
 struct AppState {
     profiles: ProfileStore,
     history: History,
+    settings_store: SettingsStore,
+    settings: RwLock<Settings>,
     workspaces: Mutex<HashMap<u64, Arc<Workspace>>>,
     results: Mutex<HashMap<u64, Arc<ResultStore>>>,
     /// Files the user picked in a native dialog this session. The UI can
@@ -125,9 +138,12 @@ struct AppState {
 
 impl AppState {
     fn new(data_dir: PathBuf) -> Self {
+        let settings_store = SettingsStore::new(data_dir.join("settings.json"));
         Self {
             profiles: ProfileStore::new(data_dir.join("profiles.json")),
             history: History::new(data_dir.join("history.jsonl")),
+            settings: RwLock::new(settings_store.load()),
+            settings_store,
             workspaces: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
             approved_files: Mutex::new(HashSet::new()),
@@ -139,6 +155,10 @@ impl AppState {
 
     fn id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn settings(&self) -> Settings {
+        self.settings.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     fn workspace(&self, id: u64) -> Result<Arc<Workspace>, UiError> {
@@ -299,9 +319,15 @@ async fn certificate_probe(host: String, port: u16) -> Result<sqltool_core::prob
 
 /// Connects with the given settings and disconnects again.
 #[tauri::command]
-async fn connection_test(profile: SavedProfile, password: Option<String>) -> Result<ServerInfo, UiError> {
+async fn connection_test(
+    state: State<'_, AppState>,
+    profile: SavedProfile,
+    password: Option<String>,
+) -> Result<ServerInfo, UiError> {
     let password = resolve_password(&profile, password)?;
-    let session = Session::connect(&profile.to_connect_profile(password)).await?;
+    let mut connect = profile.to_connect_profile(password);
+    connect.connect_timeout = state.settings().connect_timeout();
+    let session = Session::connect(&connect).await?;
     let info = session.info().clone();
     let _ = session.close().await;
     Ok(info)
@@ -323,9 +349,11 @@ async fn connect(
     } else {
         saved.name.clone()
     };
+    let mut profile = saved.to_connect_profile(password);
+    profile.connect_timeout = state.settings().connect_timeout();
     open_workspace(
         &state,
-        saved.to_connect_profile(password),
+        profile,
         Some(saved.id.clone()),
         name,
         saved.color.clone(),
@@ -337,8 +365,21 @@ async fn connect(
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>, workspace_id: u64) -> Result<(), UiError> {
-    // Dropping the workspace closes its connections.
-    state.workspaces.lock().unwrap().remove(&workspace_id);
+    let removed = state.workspaces.lock().unwrap().remove(&workspace_id);
+    if let Some(workspace) = removed {
+        // A statement still running would otherwise carry on at the server
+        // with nothing left here to stop it. Interrupt it; the connections
+        // themselves close when the last reference to the workspace goes.
+        let tabs: Vec<Arc<Tab>> = workspace.tabs.lock().await.values().cloned().collect();
+        for tab in tabs {
+            if tab.session.try_lock().is_err() {
+                tab.cancel_requested.store(true, Ordering::Relaxed);
+                tauri::async_runtime::spawn(async move {
+                    let _ = tab.canceller.cancel().await;
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -406,6 +447,9 @@ enum RunMsg {
     Database {
         name: Option<String>,
     },
+    /// The server had closed the tab's connection; a new one was opened
+    /// before anything was sent.
+    Reconnected,
     Finished {
         ran: usize,
         total: usize,
@@ -485,6 +529,23 @@ async fn run(
         .map_err(|_| ui_error("busy", "A query is already running in this tab."))?;
     tab.cancel_requested.store(false, Ordering::Relaxed);
 
+    // Nothing has been sent yet, so reopening a dropped connection here can
+    // never run a statement twice.
+    match session.ensure_alive(IDLE_CHECK).await {
+        Ok(true) => {
+            let _ = on_event.send(RunMsg::Reconnected);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            return Err(ui_error(
+                e.kind(),
+                format!("The connection to the server was lost and could not be reopened: {e}"),
+            ))
+        }
+    }
+    let settings = state.settings();
+    let query_timeout = settings.query_timeout();
+
     let run_started = Instant::now();
     let total = statements.len();
     let mut ran = 0;
@@ -513,7 +574,20 @@ async fn run(
             break;
         }
 
-        let outcome = session
+        // The query timeout from the settings: interrupt the statement on
+        // the server once it has run that long.
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timer = query_timeout.map(|limit| {
+            let canceller = tab.canceller.clone();
+            let timed_out = timed_out.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(limit).await;
+                timed_out.store(true, Ordering::Relaxed);
+                let _ = canceller.cancel().await;
+            })
+        });
+
+        let mut outcome = session
             .run(&statement.text, max_rows, |event| {
                 let message = match event {
                     RunEvent::ResultSet { store } => {
@@ -562,9 +636,37 @@ async fn run(
             })
             .await;
 
+        if let Some(timer) = timer {
+            if timed_out.load(Ordering::Relaxed) {
+                // Let the interrupt finish going out, then make sure a late
+                // one cannot hit whatever runs next.
+                let _ = timer.await;
+                session.absorb_stray_kill().await;
+            } else {
+                timer.abort();
+                if timed_out.load(Ordering::Relaxed) {
+                    session.absorb_stray_kill().await;
+                }
+            }
+        }
+        if timed_out.load(Ordering::Relaxed) && outcome.is_err() {
+            let seconds = query_timeout.map_or(0, |limit| limit.as_secs());
+            outcome = Err(Error::Other(format!(
+                "Stopped after {seconds} second{}, the query timeout in Settings",
+                if seconds == 1 { "" } else { "s" }
+            )));
+        }
+
         ran += 1;
         if let Err(e) = &outcome {
             summary = e.to_string();
+            if e.is_connection_lost() {
+                summary.push_str(
+                    ". The connection to the server was lost. It will be reopened the next time \
+                     something is run in this tab; session variables, temporary tables and any \
+                     open transaction are gone",
+                );
+            }
             failed = true;
             let _ = on_event.send(RunMsg::Failed {
                 index,
@@ -573,14 +675,16 @@ async fn run(
             });
         }
         // History is a convenience; failing to write it must not fail the query.
-        let _ = state.history.append(HistoryEntry {
-            at_ms: now_ms(),
-            profile_name: workspace.name.clone(),
-            sql: statement.text.clone(),
-            duration_ms: elapsed(),
-            ok: outcome.is_ok(),
-            summary,
-        });
+        if settings.keep_history {
+            let _ = state.history.append(HistoryEntry {
+                at_ms: now_ms(),
+                profile_name: workspace.name.clone(),
+                sql: statement.text.clone(),
+                duration_ms: elapsed(),
+                ok: outcome.is_ok(),
+                summary,
+            });
+        }
         if failed {
             break;
         }
@@ -672,7 +776,7 @@ fn close_results(state: State<'_, AppState>, result_ids: Vec<u64>) {
 #[tauri::command]
 async fn schema_list(state: State<'_, AppState>, workspace_id: u64) -> Result<Vec<String>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.schemas().await?)
 }
 
@@ -683,7 +787,7 @@ async fn schema_objects(
     schema: String,
 ) -> Result<SchemaObjects, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.schema_objects(&schema).await?)
 }
 
@@ -695,7 +799,7 @@ async fn table_columns(
     table: String,
 ) -> Result<Vec<ColumnEntry>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.table_columns(&schema, &table).await?)
 }
 
@@ -707,7 +811,7 @@ async fn table_details(
     table: String,
 ) -> Result<Option<TableDetails>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.table_details(&schema, &table).await?)
 }
 
@@ -718,21 +822,21 @@ async fn schema_defaults(
     schema: String,
 ) -> Result<Option<SchemaDefaults>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.schema_defaults(&schema).await?)
 }
 
 #[tauri::command]
 async fn charsets(state: State<'_, AppState>, workspace_id: u64) -> Result<Vec<Charset>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.charsets().await?)
 }
 
 #[tauri::command]
 async fn collations(state: State<'_, AppState>, workspace_id: u64, charset: String) -> Result<Vec<String>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.collations(&charset).await?)
 }
 
@@ -759,7 +863,7 @@ async fn alter_script(
     name: String,
 ) -> Result<String, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     let create = session.show_create(kind, &schema, &name).await?;
     // MariaDB can replace routines, triggers and events in one statement.
     let or_replace = session.info().version.flavor == sqltool_core::Flavor::MariaDb;
@@ -964,7 +1068,7 @@ async fn edit_target(state: State<'_, AppState>, workspace_id: u64, result_id: u
         return Err(ui_error("not-editable", "This connection is read-only."));
     }
     let store = state.result(result_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     session
         .edit_target(&store)
         .await
@@ -998,6 +1102,8 @@ async fn apply_edits(
         .session
         .try_lock()
         .map_err(|_| ui_error("busy", "A query is running in this tab. Wait for it to finish."))?;
+    session.ensure_alive(IDLE_CHECK).await?;
+    let keep_history = state.settings().keep_history;
     let started = Instant::now();
     let target = session
         .edit_target(&store)
@@ -1005,7 +1111,7 @@ async fn apply_edits(
         .map_err(|e| ui_error("not-editable", e.to_string()))?;
     let planned = edit::plan(&target, &store, &edits)?;
     let outcome = session.apply(&planned).await;
-    for statement in &planned {
+    for statement in planned.iter().filter(|_| keep_history) {
         let _ = state.history.append(HistoryEntry {
             at_ms: now_ms(),
             profile_name: workspace.name.clone(),
@@ -1041,7 +1147,7 @@ async fn table_keys(
     table: String,
 ) -> Result<Option<TableKeys>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     let Some(spec) = session.table_spec(&schema, &table).await? else {
         return Ok(None);
     };
@@ -1061,7 +1167,7 @@ async fn table_spec(
     table: String,
 ) -> Result<Option<TableSpec>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.table_spec(&schema, &table).await?)
 }
 
@@ -1109,7 +1215,7 @@ async fn completion_columns(
     schema: String,
 ) -> Result<Vec<(String, String)>, UiError> {
     let workspace = state.workspace(workspace_id)?;
-    let mut session = workspace.utility.lock().await;
+    let mut session = workspace.utility().await?;
     Ok(session.completion_columns(&schema).await?)
 }
 
@@ -1127,6 +1233,76 @@ fn history_list(
 #[tauri::command(async)]
 fn history_clear(state: State<'_, AppState>) -> Result<(), UiError> {
     Ok(state.history.clear()?)
+}
+
+// ---------- settings ----------
+
+/// Puts settings into effect that the shell or the core acts on directly.
+fn apply_settings(app: &tauri::AppHandle, settings: &Settings) {
+    sqltool_core::store::set_memory_budget(u64::from(settings.result_memory_mb) * 1024 * 1024);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_zoom(f64::from(settings.zoom) / 100.0);
+    }
+}
+
+#[tauri::command(async)]
+fn settings_get(state: State<'_, AppState>) -> Settings {
+    state.settings()
+}
+
+/// Saves the settings and returns them as stored: values outside their
+/// allowed range come back corrected.
+#[tauri::command(async)]
+fn settings_set(app: tauri::AppHandle, state: State<'_, AppState>, settings: Settings) -> Result<Settings, UiError> {
+    let saved = state.settings_store.save(settings)?;
+    apply_settings(&app, &saved);
+    *state.settings.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = saved.clone();
+    Ok(saved)
+}
+
+/// Pings idle connections as often as the settings ask, so the server does
+/// not close them. Off unless a keep-alive interval is set.
+async fn keep_alive_loop(app: tauri::AppHandle) {
+    let mut tick = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        tick.tick().await;
+        let state = app.state::<AppState>();
+        let Some(every) = state.settings().keep_alive() else {
+            continue;
+        };
+        let workspaces: Vec<Arc<Workspace>> = state.workspaces.lock().unwrap().values().cloned().collect();
+        for workspace in workspaces {
+            // A connection that is busy is not idle; skip it.
+            if let Ok(mut session) = workspace.utility.try_lock() {
+                if session.idle_for() >= every {
+                    let _ = session.ping().await;
+                }
+            }
+            let tabs: Vec<Arc<Tab>> = workspace.tabs.lock().await.values().cloned().collect();
+            for tab in tabs {
+                if let Ok(mut session) = tab.session.try_lock() {
+                    if session.idle_for() >= every {
+                        let _ = session.ping().await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Records a crash in `crash.log` in the data folder, so that "it just
+/// closed" can be looked into afterwards. Only the panic message and where
+/// it happened are written, never queries or data.
+fn log_panics(dir: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+            let _ = writeln!(file, "{} sqltool {}: {info}", now_ms(), env!("CARGO_PKG_VERSION"));
+        }
+        previous(info);
+    }));
 }
 
 // ---------- app info and development tools ----------
@@ -1173,6 +1349,7 @@ async fn connect_demo(state: State<'_, AppState>) -> Result<WorkspaceDto, UiErro
             .map_err(|e| ui_error("other", e.to_string()))?;
 
         let mut profile = ConnectProfile::new("127.0.0.1", demo.server.port(), "demo", PASSWORD.to_string().into());
+        profile.connect_timeout = state.settings().connect_timeout();
         profile.ca = Some(CaSource::Pem(demo.ca_pem.clone().into_bytes()));
         profile.allow_cleartext_auth = true;
         open_workspace(&state, profile, None, "Demo server".into(), None, false, false).await
@@ -1253,7 +1430,11 @@ fn main() {
                 Some(dir) => PathBuf::from(dir),
                 None => app.path().app_data_dir()?,
             };
-            app.manage(AppState::new(data_dir));
+            log_panics(data_dir.clone());
+            let state = AppState::new(data_dir);
+            apply_settings(app.handle(), &state.settings());
+            app.manage(state);
+            tauri::async_runtime::spawn(keep_alive_loop(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1299,6 +1480,8 @@ fn main() {
             completion_columns,
             history_list,
             history_clear,
+            settings_get,
+            settings_set,
             selftest_config,
             selftest_report
         ])

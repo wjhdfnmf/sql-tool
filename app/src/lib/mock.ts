@@ -4,7 +4,7 @@
 // without the desktop shell or a database.
 
 import type { Backend } from './backend';
-import type { ColumnInfo, HistoryEntry, Profile, RunMsg, ServerInfo, UiError, WorkspaceInfo } from './types';
+import type { ColumnInfo, HistoryEntry, Profile, RunMsg, ServerInfo, Settings, UiError, WorkspaceInfo } from './types';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const fail = (kind: string, message: string): UiError => ({ kind, message });
@@ -115,6 +115,11 @@ const schemas: Record<string, Record<string, [string, string, boolean, string][]
   },
   information_schema: {},
   mysql: {},
+};
+
+const mockDefaults: Settings = {
+  theme: 'system', zoom: 100, editorTabSize: 2, editorWordWrap: false, uppercaseKeywords: true, rememberTabs: true,
+  defaultRowLimit: 10_000, queryTimeoutSecs: 0, connectTimeoutSecs: 15, keepAliveSecs: 0, keepHistory: true, resultMemoryMb: 512,
 };
 
 let nextId = 100;
@@ -602,6 +607,18 @@ export const mockBackend: Backend = {
   },
   historyClear: async () => {
     history.length = 0;
+  },
+  settingsGet: async () => {
+    try {
+      return { ...mockDefaults, ...JSON.parse(localStorage.getItem('sqltool.mock.settings') ?? '{}') };
+    } catch {
+      return { ...mockDefaults };
+    }
+  },
+  settingsSet: async (settings) => {
+    const saved = { ...settings, connectTimeoutSecs: Math.min(300, Math.max(3, settings.connectTimeoutSecs)) };
+    localStorage.setItem('sqltool.mock.settings', JSON.stringify(saved));
+    return saved;
   },
   selftestConfig: async () => null,
   selftestReport: async () => {},

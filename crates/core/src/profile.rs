@@ -52,6 +52,8 @@ pub struct ConnectProfile {
     /// Allow cleartext auth even though the transport does not verify the
     /// server. Only for links secured some other way, such as an SSH tunnel.
     pub accept_cleartext_on_unverified_transport: bool,
+    /// Give up connecting (network, TLS and login together) after this long.
+    pub connect_timeout: std::time::Duration,
 }
 
 impl ConnectProfile {
@@ -68,6 +70,7 @@ impl ConnectProfile {
             pinned_sha256: None,
             allow_cleartext_auth: false,
             accept_cleartext_on_unverified_transport: false,
+            connect_timeout: std::time::Duration::from_secs(15),
         }
     }
 }

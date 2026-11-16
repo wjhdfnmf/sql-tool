@@ -2,6 +2,64 @@
 
 Status: Phases 0 to 2 done; Phase 3 partly done (see "Phase 3 status"); 0.1.0 released 2026-11-16, followed by a pass over everyday use and a code review (see "Everyday-use pass"). Project name is still to be chosen.
 
+## Reliability pass, settings and themes (after 0.1.2)
+
+### How a query "timing out" is handled
+
+Before this pass there were three gaps. They are closed as follows.
+
+- **Connecting.** There was no limit of the tool's own; an address that swallowed packets held the dialog for as long as the operating system kept trying. Connecting (network, TLS and login together) now gives up after 15 seconds, a setting.
+- **A query that runs long.** There is no time limit unless one is set, on purpose: a report may need an hour. Stop interrupts it on the server. A new setting, off by default, interrupts any statement that runs longer than a chosen number of seconds and does not run the rest of the script. A limit set on the server (`max_execution_time`, `max_statement_time`) shows as that statement's error and the connection stays usable.
+- **A connection that has gone.** Servers close connections that sit idle (`wait_timeout`), and firewalls drop quiet ones. A tab whose connection had been closed failed on every run until the tab was closed, and so did the schema browser. Now a connection that has been quiet for 30 seconds is checked with a ping before use and reopened if it is gone. Nothing has been sent at that point, so a statement can never run twice. A statement that loses its connection midway is reported and not retried, because it may have taken effect; the next run reopens the connection. Read-only mode and the default schema are restored; session variables, temporary tables and an open transaction are not, and the output says so. The connection used for cancelling follows the new connection.
+- **A connection cut without a word.** With no reply at all a query could wait for ever. TCP keep-alive probes (30 seconds) now turn that into an error.
+
+### Other reliability findings fixed
+
+- Closing a connection in the app left its running statements running on the server. They are now interrupted.
+- Each result had its own memory allowance, so ten tabs of large results could use ten times it. The allowance is now shared by all open results.
+- A damaged connections file stopped the home screen from loading. It is now set aside under another name, the list starts empty, and the app says what happened.
+- A crash left no trace. The panic message and location are now written to `crash.log` in the data folder (never queries or data).
+
+### Settings
+
+Chosen by looking at what MySQL Workbench and DBeaver offer and keeping what bears on everyday querying:
+
+| Setting | Default | Why |
+|---|---|---|
+| Theme | Follow the system | Light, dark, midnight, sepia, high contrast |
+| Size of text and controls | 100% | Accessibility |
+| Editor indent, line wrap, upper-case keywords | 2 spaces, off, on | Workbench and DBeaver both have these |
+| Bring back open query tabs | On | Workbench saves a snapshot of open editors |
+| Row limit for a new connection | 10,000 | Workbench "Limit Rows" |
+| Stop a query after | Never | Workbench "read timeout", DBeaver query timeout |
+| Give up connecting after | 15 s | Workbench "connection timeout" |
+| Keep idle connections alive | Off | Workbench and DBeaver keep-alive interval |
+| Memory for results | 512 MB | Was an environment variable |
+| Keep a history | On | Privacy |
+
+Considered and left out for now: CSV delimiter and quoting options, a "safe updates" mode for every connection (production connections already confirm risky statements), per-connection overrides of these settings, custom key bindings, and font choice.
+
+### Security findings from this pass
+
+- Settings read from disk are not trusted: every value is pulled into its allowed range, and the theme must be one of the known names.
+- A reconnect uses the same TLS verification and policy as the first connection, and the password it uses is the one already held for the open connection; nothing new is stored.
+- Recorded as a known limit, not changed: CSV exports write values as they are, so a spreadsheet may run a value beginning with `=` as a formula.
+- Not changed: internal locks are not poison-tolerant, so a panic while one is held would make later calls fail until restart. No path to such a panic was found.
+
+### How it was verified
+
+- 106 unit tests, 25 fake-server tests (new: the connect timeout against a listener that never answers; the liveness check leaving a live session alone) and a test of the shared memory allowance.
+- 7 real-server tests on MariaDB 11.8.6 and MySQL 8.4.13. New: a connection killed from another session is noticed and reopened, the default schema and read-only mode come back, and cancelling reaches the new connection.
+- The desktop self-test, 31 steps on both servers. New: settings are stored and corrected; a 1-second query timeout stops a long query in about a second and the session stays usable; a killed connection is reported, then reopened on the next run.
+- Themes and the settings screen were checked in the browser preview.
+
+### Not verified
+
+- An idle timeout as it really happens (hours of quiet, or a firewall dropping the connection); the tests kill the connection from another session instead.
+- The keep-alive setting over a long idle period.
+- The size setting (zoom) and the themes in the packaged app by eye; the self-test stores and reads the theme but does not look at the window.
+- LDAP accounts on reconnect; the tests reconnect with the PAM cleartext account on MariaDB.
+
 ## Everyday-use pass and code review (after 0.1.0)
 
 The remaining Phase 3 and 4 items (SSH tunnels, client certificates, user management, dump and restore, the wider version matrix) are parked: the project owner does not use them. This pass went instead into what is done all day: writing queries, reading results, copying and exporting them, and creating tables.

@@ -2,6 +2,7 @@
 // else talks to the backend about connections, tabs or running statements.
 
 import { backend } from './backend';
+import { settings } from './settings.svelte';
 import {
   asUiError,
   formatCount,
@@ -125,7 +126,7 @@ export class WorkspaceState {
   activeTabId = $state('');
   database = $state<string | null>(null);
   /** Rows kept per result set; null means no limit. */
-  maxRows = $state<number | null>(10_000);
+  maxRows = $state<number | null>(settings.current.defaultRowLimit);
   showNavigator = $state(true);
   showOutput = $state(true);
   /** What is selected in the schema tree, shown in the information pane. */
@@ -143,7 +144,7 @@ export class WorkspaceState {
   constructor(info: WorkspaceInfo) {
     this.info = info;
     this.database = info.database;
-    const saved = loadSavedTabs(info.profileId);
+    const saved = settings.current.rememberTabs ? loadSavedTabs(info.profileId) : [];
     for (const tab of saved) {
       this.addTab(tab.text, tab.title);
       // Keep new tabs from reusing the number of a restored "Query 3".
@@ -159,6 +160,10 @@ export class WorkspaceState {
   saveTabs(): void {
     const profileId = this.info.profileId;
     if (!profileId) return;
+    if (!settings.current.rememberTabs) {
+      forgetSavedTabs(profileId);
+      return;
+    }
     const saved: SavedTab[] = [];
     let total = 0;
     for (const tab of this.tabs) {
@@ -372,6 +377,15 @@ export class WorkspaceState {
         tab.activeResult = 'messages';
         break;
       }
+      case 'reconnected':
+        tab.messages.push({
+          id: ++lineCounter,
+          sql: '',
+          state: 'ok',
+          text: 'The server had closed this tab\'s connection, most likely because it sat idle. A new one was opened. Session variables, temporary tables and any open transaction did not carry over.',
+          elapsedMs: null,
+        });
+        break;
       case 'database':
         this.database = m.name;
         if (m.name) void this.loadCatalog(m.name);
@@ -390,6 +404,8 @@ class AppState {
   workspaces = $state<WorkspaceState[]>([]);
   /** 'home' or a workspace id. */
   active = $state<'home' | number>('home');
+  /** The Settings screen is open. */
+  showSettings = $state(false);
 
   get activeWorkspace(): WorkspaceState | null {
     return this.workspaces.find((w) => w.info.id === this.active) ?? null;
@@ -397,6 +413,9 @@ class AppState {
 
   async load(): Promise<void> {
     this.info = await backend.appInfo();
+    // Before the connections: a damaged connections file must not keep the
+    // theme and the other settings from loading.
+    await settings.load().catch(() => {});
     this.profiles = await backend.profilesList();
   }
 
