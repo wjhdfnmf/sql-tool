@@ -574,6 +574,12 @@
         <strong>Only the {formatCount(rows)} {rows === 1 ? 'row' : 'rows'} shown</strong>
         <span>What the grid shows now, in its order.</span>
       </button>
+      <p class="muted why">
+        The query has to run again because the row limit stops it on the server: the rows past the limit were never sent, so there is
+        nothing here to save. To have every row ready after one run, set the row limit to <strong>No limit</strong> before running.
+        All the rows are then fetched in the background, those that do not fit in memory are kept in a temporary file that is
+        removed when the result closes, and Export writes them without running anything again.
+      </p>
       <div class="buttons">
         <span class="spacer"></span>
         <button onclick={() => (exportChoice = false)}>Cancel</button>
@@ -755,6 +761,10 @@
 
   .option strong {
     font-size: 14px;
+  }
+
+  .choice .why {
+    font-size: 12px;
   }
 
   .state {
