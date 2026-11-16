@@ -1,25 +1,17 @@
 <script lang="ts">
   import { backend } from '../lib/backend';
   import type { WorkspaceState } from '../lib/state.svelte';
-  import {
-    asUiError,
-    formatBytes,
-    formatCount,
-    serverLabel,
-    type ColumnEntry,
-    type SchemaDefaults,
-    type TableDetails,
-    type TableKeys,
-  } from '../lib/types';
+  import { asUiError, serverLabel, type ColumnEntry, type SchemaDefaults, type TableKeys } from '../lib/types';
 
   interface Props {
     workspace: WorkspaceState;
+    /** A column was double-clicked: write its name into the editor. */
+    oninsert: (name: string) => void;
   }
 
-  let { workspace }: Props = $props();
+  let { workspace, oninsert }: Props = $props();
 
   let tab = $state<'object' | 'session'>('object');
-  let details = $state<TableDetails | null>(null);
   let columns = $state<ColumnEntry[]>([]);
   let defaults = $state<SchemaDefaults | null>(null);
   let keys = $state<TableKeys | null>(null);
@@ -29,19 +21,10 @@
   const info = $derived(workspace.info);
   const target = $derived(workspace.selected);
 
-  const kindLabels = {
-    schema: 'Schema',
-    table: 'Table',
-    view: 'View',
-    procedure: 'Stored procedure',
-    function: 'Function',
-    trigger: 'Trigger',
-    event: 'Event',
-  };
+  const isTable = $derived(!!target && (target.kind === 'table' || target.kind === 'view'));
 
   $effect(() => {
     const current = target;
-    details = null;
     columns = [];
     defaults = null;
     keys = null;
@@ -55,13 +38,11 @@
           const value = await backend.schemaDefaults(info.id, current.schema);
           if (!stale) defaults = value;
         } else if ((current.kind === 'table' || current.kind === 'view') && current.name) {
-          const [d, c, k] = await Promise.all([
-            backend.tableDetails(info.id, current.schema, current.name),
+          const [c, k] = await Promise.all([
             backend.tableColumns(info.id, current.schema, current.name),
             current.kind === 'table' ? backend.tableKeys(info.id, current.schema, current.name) : null,
           ]);
           if (!stale) {
-            details = d;
             columns = c;
             keys = k;
           }
@@ -101,15 +82,13 @@
 
   <div class="body" hidden={tab !== 'object'}>
     {#if !target}
-      <p class="muted">No object selected. Click a schema or table above.</p>
+      <p class="muted">Click a table above to see its columns and indexes.</p>
     {:else}
-      <h3>
-        <span class="muted">{kindLabels[target.kind]}</span>
-        {target.name ?? target.schema}
-      </h3>
-      {#if target.name}<p class="muted">in {target.schema}</p>{/if}
       {#if error}<p class="error-text" role="alert">{error}</p>{/if}
       {#if loading}<p class="muted">Loading&hellip;</p>{/if}
+      {#if !isTable && !defaults && !loading && !error}
+        <p class="muted">Click a table above to see its columns and indexes.</p>
+      {/if}
 
       {#if defaults}
         <dl>
@@ -120,37 +99,6 @@
         </dl>
       {/if}
 
-      {#if details}
-        <dl>
-          {#if details.engine}
-            <dt>Engine</dt>
-            <dd>{details.engine}</dd>
-          {/if}
-          {#if details.rowsEstimate !== null}
-            <dt>Rows</dt>
-            <dd>about {formatCount(details.rowsEstimate)}</dd>
-          {/if}
-          {#if details.dataBytes !== null}
-            <dt>Size</dt>
-            <dd>
-              {formatBytes(details.dataBytes)} data{#if details.indexBytes !== null}, {formatBytes(details.indexBytes)} indexes{/if}
-            </dd>
-          {/if}
-          {#if details.collation}
-            <dt>Collation</dt>
-            <dd>{details.collation}</dd>
-          {/if}
-          {#if details.created}
-            <dt>Created</dt>
-            <dd>{details.created}</dd>
-          {/if}
-          {#if details.comment && !details.isView}
-            <dt>Comment</dt>
-            <dd>{details.comment}</dd>
-          {/if}
-        </dl>
-      {/if}
-
       {#if columns.length > 0}
         <table>
           <thead>
@@ -158,7 +106,12 @@
           </thead>
           <tbody>
             {#each columns as column (column.name)}
-              <tr title={[column.default !== null ? `default ${column.default}` : '', column.extra].filter(Boolean).join(', ')}>
+              <tr
+                title={[column.default !== null ? `default ${column.default}` : '', column.extra, 'Double-click to insert the name into the editor']
+                  .filter(Boolean)
+                  .join('. ')}
+                ondblclick={() => oninsert(column.name)}
+              >
                 <td class:key={column.key === 'PRI'}>{column.name}</td>
                 <td class="muted">{column.columnType}</td>
                 <td class="muted">{column.nullable ? 'yes' : 'no'}</td>
@@ -267,16 +220,6 @@
     overflow: auto;
     padding: 8px 10px 12px;
     user-select: text;
-  }
-
-  h3 {
-    margin: 0;
-    font-size: 13px;
-    overflow-wrap: anywhere;
-  }
-
-  h3 .muted {
-    font-weight: 400;
   }
 
   p {

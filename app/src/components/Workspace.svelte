@@ -529,7 +529,6 @@
           onopen={openTable}
           onuse={useSchema}
           oncontext={(target, x, y) => (contextMenu = { items: treeMenu(target), x, y })}
-          oninsert={(name) => insertIntoEditor(quoteIdentifier(name))}
           onloaded={(schema) => void workspace.loadCatalog(schema)}
         />
       </div>
@@ -540,7 +539,7 @@
         <HistoryPanel refreshKey={historyKey} oninsert={insertFromHistory} />
       </div>
       <div class="info-pane">
-        <InfoPane {workspace} />
+        <InfoPane {workspace} oninsert={(name) => insertIntoEditor(quoteIdentifier(name))} />
       </div>
     </aside>
 
@@ -821,7 +820,8 @@
     align-items: stretch;
     gap: 2px;
     padding: 4px 8px 0;
-    overflow-x: auto;
+    /* No scroll bar: tabs that do not fit go onto another row. */
+    flex-wrap: wrap;
   }
 
   .editor-tab {
@@ -887,7 +887,8 @@
     gap: 4px;
     padding: 4px 8px;
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    /* No scroll bar: buttons that do not fit go onto another row. */
+    flex-wrap: wrap;
   }
 
   .main-toolbar {
