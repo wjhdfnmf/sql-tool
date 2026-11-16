@@ -1,7 +1,7 @@
 // Shapes shared with the Rust command layer. Field names match what the
 // Rust side serialises (camelCase).
 
-export type TlsSetting = 'disabled' | 'unverified' | 'verify-ca' | 'verify-identity';
+export type TlsSetting = 'disabled' | 'unverified' | 'verify-ca' | 'verify-identity' | 'pinned';
 
 export interface Profile {
   /** Empty until the profile has been saved. */
@@ -13,6 +13,8 @@ export interface Profile {
   database: string | null;
   tls: TlsSetting;
   caFile: string | null;
+  /** SHA-256 of the certificate trusted in pinned mode, as hex. */
+  pinnedSha256: string | null;
   cleartextAuth: boolean;
   cleartextRiskAccepted: boolean;
   savePassword: boolean;
@@ -35,6 +37,7 @@ export function newProfile(): Profile {
     database: null,
     tls: 'verify-identity',
     caFile: null,
+    pinnedSha256: null,
     cleartextAuth: false,
     cleartextRiskAccepted: false,
     savePassword: true,
@@ -69,7 +72,7 @@ export interface WorkspaceInfo {
   host: string;
   user: string;
   info: ServerInfo;
-  security: 'verified' | 'unverified' | 'none';
+  security: 'verified' | 'pinned' | 'unverified' | 'none';
   database: string | null;
   readOnly: boolean;
   production: boolean;
@@ -83,6 +86,20 @@ export interface ColumnInfo {
   /** The table column behind this result column; null for computed columns. */
   source: { schema: string; table: string; column: string } | null;
   primaryKey: boolean;
+}
+
+/** A server's certificate, shown before the user decides to trust it. */
+export interface CertificateInfo {
+  sha256: string;
+  subject: string;
+  issuer: string;
+  notAfter: string;
+  selfSigned: boolean;
+}
+
+/** `ab:cd:...` in groups, easier to compare by eye than 64 run-together digits. */
+export function formatFingerprint(hex: string): string {
+  return (hex.toUpperCase().match(/.{1,2}/g) ?? []).join(':');
 }
 
 /** Something to confirm before running on a production connection. */
@@ -289,7 +306,9 @@ export function asUiError(e: unknown): UiError {
 export function explainConnectError(error: UiError): string {
   switch (error.kind) {
     case 'tls':
-      return `${error.message}. The server's certificate could not be verified. Servers with a default or self-signed certificate need "Encrypted, not verified" (what most MySQL tools use), or their CA file.`;
+      return `${error.message}. The server's certificate could not be verified. Servers with a default or self-signed certificate can be reached by pinning their certificate, with "Encrypted, not verified" (what most MySQL tools use), or with their CA file.`;
+    case 'certificate-changed':
+      return `${error.message}.`;
     case 'cleartext-not-enabled':
       return `${error.message}. Turn on "Allow cleartext authentication" for this connection (LDAP and PAM accounts need it).`;
     case 'no-tls':

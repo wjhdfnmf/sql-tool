@@ -1,7 +1,15 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { backend } from '../lib/backend';
-  import { asUiError, explainConnectError, serverLabel, type Profile, type TlsSetting } from '../lib/types';
+  import {
+    asUiError,
+    explainConnectError,
+    formatFingerprint,
+    serverLabel,
+    type CertificateInfo,
+    type Profile,
+    type TlsSetting,
+  } from '../lib/types';
 
   interface Props {
     profile: Profile;
@@ -34,7 +42,12 @@
     {
       value: 'verify-ca',
       label: 'Encrypted, certificate authority verified',
-      help: 'Meant to check the certificate against the CA file but not the host name. A known driver defect currently makes it check the host name too.',
+      help: 'Checks the certificate against the CA file but not the host name. For servers whose certificate does not name them, such as MySQL auto-generated certificates.',
+    },
+    {
+      value: 'pinned',
+      label: 'Encrypted, pinned certificate',
+      help: "Trusts one specific certificate that you approve below. No CA file is needed, and a server that presents any other certificate is refused. If the server's certificate is replaced, you approve the new one.",
     },
     {
       value: 'unverified',
@@ -51,13 +64,40 @@
   const colors = [null, 'red', 'orange', 'green', 'blue', 'purple'];
 
   const tlsHelp = $derived(tlsOptions.find((o) => o.value === draft.tls)?.help ?? '');
-  const verifies = $derived(draft.tls === 'verify-identity' || draft.tls === 'verify-ca');
+  const usesCa = $derived(draft.tls === 'verify-identity' || draft.tls === 'verify-ca');
+  const verifies = $derived(usesCa || draft.tls === 'pinned');
   const needsRiskAck = $derived(draft.cleartextAuth && !verifies);
+
+  // Certificate pinning: fetch what the server presents, then trust it or not.
+  let fetched = $state<CertificateInfo | null>(null);
+  let fetching = $state(false);
+  let fetchError = $state<string | null>(null);
+
+  async function fetchCertificate() {
+    fetching = true;
+    fetchError = null;
+    fetched = null;
+    try {
+      fetched = await backend.certificateProbe(draft.host.trim(), draft.port);
+    } catch (e) {
+      fetchError = asUiError(e).message;
+    } finally {
+      fetching = false;
+    }
+  }
+
+  function trustFetched() {
+    if (!fetched) return;
+    draft.pinnedSha256 = fetched.sha256;
+    fetched = null;
+    testResult = null;
+  }
   const problem = $derived.by(() => {
     if (draft.host.trim() === '') return 'Enter the server host name or address.';
     if (draft.user.trim() === '') return 'Enter the user name.';
     if (!Number.isInteger(draft.port) || draft.port < 1 || draft.port > 65535) return 'Port must be between 1 and 65535.';
     if (needsRiskAck && !draft.cleartextRiskAccepted) return 'Accept the cleartext risk below, or choose a verified encryption mode.';
+    if (draft.tls === 'pinned' && !draft.pinnedSha256) return "Fetch the server's certificate and trust it, or choose another encryption mode.";
     return null;
   });
 
@@ -69,7 +109,8 @@
       host: draft.host.trim(),
       user: draft.user.trim(),
       database: database.trim() || null,
-      caFile: verifies && caFile.trim() ? caFile.trim() : null,
+      caFile: usesCa && caFile.trim() ? caFile.trim() : null,
+      pinnedSha256: draft.tls === 'pinned' ? draft.pinnedSha256 : null,
       cleartextRiskAccepted: needsRiskAck && draft.cleartextRiskAccepted,
     };
   }
@@ -86,14 +127,20 @@
       testResult = {
         ok: false,
         text: error.kind === 'password-required' ? 'Enter the password to test the connection.' : explainConnectError(error),
-        fix: error.kind === 'tls' && verifies ? 'unverified' : error.kind === 'cleartext-not-enabled' ? 'cleartext' : undefined,
+        fix: error.kind === 'tls' && usesCa ? 'unverified' : error.kind === 'cleartext-not-enabled' ? 'cleartext' : undefined,
       };
     } finally {
       testing = false;
     }
   }
 
-  function applyFix(fix: 'unverified' | 'cleartext') {
+  function applyFix(fix: 'unverified' | 'cleartext' | 'pin') {
+    if (fix === 'pin') {
+      draft.tls = 'pinned';
+      testResult = null;
+      void fetchCertificate();
+      return;
+    }
     if (fix === 'unverified') draft.tls = 'unverified';
     else draft.cleartextAuth = true;
     testResult = {
@@ -184,7 +231,50 @@
       </label>
       <p class="help muted">{tlsHelp}</p>
 
-      {#if verifies}
+      {#if draft.tls === 'pinned'}
+        <div class="pin">
+          {#if draft.pinnedSha256}
+            <div>
+              <span class="muted">Trusted certificate (SHA-256)</span>
+              <code>{formatFingerprint(draft.pinnedSha256)}</code>
+            </div>
+          {:else}
+            <p class="muted">No certificate is trusted for this connection yet.</p>
+          {/if}
+          <div>
+            <button type="button" disabled={fetching || draft.host.trim() === ''} onclick={fetchCertificate}>
+              {fetching ? 'Fetching…' : draft.pinnedSha256 ? "Fetch the server's certificate again" : "Fetch the server's certificate"}
+            </button>
+            <span class="muted">No user name or password is sent.</span>
+          </div>
+          {#if fetchError}<p class="error-text" role="alert">{fetchError}</p>{/if}
+          {#if fetched}
+            <div class="warning-box" role="group" aria-label="Certificate presented by the server">
+              <dl>
+                <dt>Issued to</dt>
+                <dd>{fetched.subject}</dd>
+                <dt>Issued by</dt>
+                <dd>{fetched.issuer}{fetched.selfSigned ? ' (self-signed)' : ''}</dd>
+                <dt>Expires</dt>
+                <dd>{fetched.notAfter}</dd>
+                <dt>SHA-256</dt>
+                <dd><code>{formatFingerprint(fetched.sha256)}</code></dd>
+              </dl>
+              {#if fetched.sha256 === draft.pinnedSha256}
+                <p>This is the certificate already trusted.</p>
+              {:else}
+                <p>
+                  Trust it only if you are confident this is your server, for example by comparing the fingerprint
+                  with one from your database administrator.
+                </p>
+                <div><button type="button" onclick={trustFetched}>Trust This Certificate</button></div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if usesCa}
         <label>
           <span>CA certificate file <span class="muted">(optional, PEM)</span></span>
           <input
@@ -233,6 +323,7 @@
       <div class="test-result" role="status">
         <p class={testResult.ok ? 'ok-text' : 'error-text'}>{testResult.text}</p>
         {#if testResult.fix === 'unverified'}
+          <button type="button" onclick={() => applyFix('pin')}>Pin This Server's Certificate</button>
           <button type="button" onclick={() => applyFix('unverified')}>Switch to "Encrypted, not verified"</button>
         {:else if testResult.fix === 'cleartext'}
           <button type="button" onclick={() => applyFix('cleartext')}>Allow cleartext authentication</button>
@@ -334,6 +425,36 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+
+  .pin {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pin code {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+
+  .pin dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px 10px;
+    margin: 0 0 8px;
+  }
+
+  .pin dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .pin .warning-box p {
+    margin: 0 0 8px;
   }
 
   .buttons {

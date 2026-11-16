@@ -79,7 +79,13 @@
   });
 
   const security = $derived(
-    info.security === 'verified' ? 'Server verified' : info.security === 'unverified' ? 'Server not verified' : 'Not encrypted',
+    info.security === 'verified'
+      ? 'Server verified'
+      : info.security === 'pinned'
+        ? 'Pinned certificate'
+        : info.security === 'unverified'
+          ? 'Server not verified'
+          : 'Not encrypted',
   );
 </script>
 

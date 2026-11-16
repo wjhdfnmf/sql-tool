@@ -20,6 +20,8 @@ pub enum TlsSetting {
     VerifyCa,
     #[default]
     VerifyIdentity,
+    /// Encrypted; the server must present the one certificate the user trusted.
+    Pinned,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +36,8 @@ pub struct SavedProfile {
     pub database: Option<String>,
     pub tls: TlsSetting,
     pub ca_file: Option<PathBuf>,
+    /// SHA-256 of the certificate trusted in pinned mode, as hex.
+    pub pinned_sha256: Option<String>,
     /// Allow the `mysql_clear_password` plugin (LDAP and PAM accounts).
     pub cleartext_auth: bool,
     /// The user has acknowledged that cleartext auth without a verified
@@ -60,6 +64,7 @@ impl Default for SavedProfile {
             database: None,
             tls: TlsSetting::default(),
             ca_file: None,
+            pinned_sha256: None,
             cleartext_auth: false,
             cleartext_risk_accepted: false,
             save_password: false,
@@ -79,7 +84,9 @@ impl SavedProfile {
             TlsSetting::Unverified => TlsMode::Required,
             TlsSetting::VerifyCa => TlsMode::VerifyCa,
             TlsSetting::VerifyIdentity => TlsMode::VerifyIdentity,
+            TlsSetting::Pinned => TlsMode::Pinned,
         };
+        profile.pinned_sha256 = self.pinned_sha256.as_deref().and_then(crate::probe::parse_fingerprint);
         profile.ca = self.ca_file.clone().map(CaSource::File);
         profile.allow_cleartext_auth = self.cleartext_auth;
         profile.accept_cleartext_on_unverified_transport = self.cleartext_risk_accepted;

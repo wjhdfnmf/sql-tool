@@ -19,6 +19,7 @@ let profiles: Profile[] = [
     database: 'sales',
     tls: 'unverified',
     caFile: null,
+    pinnedSha256: null,
     cleartextAuth: true,
     cleartextRiskAccepted: true,
     savePassword: true,
@@ -36,6 +37,7 @@ let profiles: Profile[] = [
     database: null,
     tls: 'verify-identity',
     caFile: null,
+    pinnedSha256: null,
     cleartextAuth: true,
     cleartextRiskAccepted: false,
     savePassword: false,
@@ -53,6 +55,7 @@ let profiles: Profile[] = [
     database: null,
     tls: 'disabled',
     caFile: null,
+    pinnedSha256: null,
     cleartextAuth: false,
     cleartextRiskAccepted: false,
     savePassword: true,
@@ -188,6 +191,17 @@ export const mockBackend: Backend = {
     }
     return serverInfo(profile);
   },
+  certificateProbe: async (host) => {
+    await wait(400);
+    if (host.includes('bad')) throw fail('network', 'network error: No such host is known.');
+    return {
+      sha256: '3f9a1c0e5b7d42a8916ce0d4f1b2a37c58e94d6072ab13cf8e5d09b6a4c7f210',
+      subject: 'CN=MySQL_Server_8.4.3_Auto_Generated_Server_Certificate',
+      issuer: 'CN=MySQL_Server_8.4.3_Auto_Generated_CA_Certificate',
+      notAfter: 'Mar 14 09:12:44 2034 +00:00',
+      selfSigned: false,
+    };
+  },
   connect: async (profileId, password) => {
     await wait(400);
     const profile = profiles.find((p) => p.id === profileId);
@@ -201,7 +215,7 @@ export const mockBackend: Backend = {
       host: `${profile.host}:${profile.port}`,
       user: profile.user,
       info: serverInfo(profile),
-      security: profile.tls === 'disabled' ? 'none' : profile.tls === 'unverified' ? 'unverified' : 'verified',
+      security: profile.tls === 'disabled' ? 'none' : profile.tls === 'unverified' ? 'unverified' : profile.tls === 'pinned' ? 'pinned' : 'verified',
       database: profile.database,
       readOnly: profile.readOnly,
       production: profile.production,

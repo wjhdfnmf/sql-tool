@@ -224,7 +224,7 @@ struct WorkspaceDto {
     host: String,
     user: String,
     info: ServerInfo,
-    /// `verified`, `unverified` or `none`.
+    /// `verified`, `pinned`, `unverified` or `none`.
     security: &'static str,
     database: Option<String>,
     read_only: bool,
@@ -250,6 +250,7 @@ async fn open_workspace(
         TlsMode::Disabled => "none",
         TlsMode::Required => "unverified",
         TlsMode::VerifyCa | TlsMode::VerifyIdentity => "verified",
+        TlsMode::Pinned => "pinned",
     };
     let dto = WorkspaceDto {
         id: state.id(),
@@ -274,6 +275,13 @@ async fn open_workspace(
         }),
     );
     Ok(dto)
+}
+
+/// Fetches the certificate a server presents, so the user can decide to
+/// trust it. Sends no credentials.
+#[tauri::command]
+async fn certificate_probe(host: String, port: u16) -> Result<sqltool_core::probe::CertificateInfo, UiError> {
+    Ok(sqltool_core::probe::probe_certificate(host.trim(), port).await?)
 }
 
 /// Connects with the given settings and disconnects again.
@@ -1157,6 +1165,7 @@ fn selftest_config() -> Option<SelfTest> {
                 Some("disabled") => sqltool_core::TlsSetting::Disabled,
                 Some("unverified") => sqltool_core::TlsSetting::Unverified,
                 Some("verify-ca") => sqltool_core::TlsSetting::VerifyCa,
+                Some("pinned") => sqltool_core::TlsSetting::Pinned,
                 _ => sqltool_core::TlsSetting::VerifyIdentity,
             },
             ca_file: var("CA").map(PathBuf::from),
@@ -1204,6 +1213,7 @@ fn main() {
             profile_save,
             profile_delete,
             connection_test,
+            certificate_probe,
             connect,
             connect_demo,
             disconnect,

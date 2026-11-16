@@ -6,6 +6,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { mockBackend } from './mock';
 import type {
   AppInfo,
+  CertificateInfo,
   CellValue,
   Charset,
   ColumnEntry,
@@ -37,6 +38,8 @@ export interface Backend {
   profileSave(profile: Profile, password: string | null): Promise<Profile>;
   profileDelete(id: string): Promise<void>;
   connectionTest(profile: Profile, password: string | null): Promise<ServerInfo>;
+  /** Fetches the certificate a server presents. Sends no credentials. */
+  certificateProbe(host: string, port: number): Promise<CertificateInfo>;
   /** `password` null uses the keychain; rejects with kind `password-required` if there is none. */
   connect(profileId: string, password: string | null): Promise<WorkspaceInfo>;
   connectDemo(): Promise<WorkspaceInfo>;
@@ -102,6 +105,7 @@ const tauriBackend: Backend = {
   profileSave: (profile, password) => invoke('profile_save', { profile, password }),
   profileDelete: (id) => invoke('profile_delete', { id }),
   connectionTest: (profile, password) => invoke('connection_test', { profile, password }),
+  certificateProbe: (host, port) => invoke('certificate_probe', { host, port }),
   connect: (profileId, password) => invoke('connect', { profileId, password }),
   connectDemo: () => invoke('connect_demo'),
   disconnect: (workspaceId) => invoke('disconnect', { workspaceId }),
