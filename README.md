@@ -16,10 +16,10 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **Selecting and copying**: drag, Shift+click or Shift+arrows to select cells; click a row number for a row, Ctrl+click a header for a column, Ctrl+A for everything. Ctrl+C copies in a form spreadsheets paste as cells; the right-click menu also copies as CSV, as SQL INSERT statements, or as a list for an `IN (...)` clause. The count, sum, average, smallest and largest of the selection show under the grid.
 - **Row limit**: 1,000 to 100,000 rows per result, or none. At the limit the query is interrupted on the server.
 - **Working with results**: sort and filter without re-running, export as CSV, TSV, JSON or SQL INSERT, and edit rows in place with changes reviewed as SQL and applied in one transaction.
-- **Table designer**: create and alter tables, with their indexes and foreign keys, in a form that shows the SQL before it runs.
+- **Table designer**: create and alter tables in a tab of their own, next to the query tabs. Columns, indexes and foreign keys each have a section; index and key columns are picked from the table's columns. The SQL that will run is always in view, and nothing runs until Apply is clicked.
 - **Safety**: read-only connections, and confirmation of risky statements on connections marked as production.
 - **Schema browser**: schemas, tables, views, columns, routines, triggers and events, loaded on demand, with right-click actions. Clicking a table shows its columns and indexes in the information pane below the tree.
-- **Schema changes**: create and alter schemas in a dialog that shows the SQL first; create and alter tables, views and routines from generated scripts.
+- **Schema changes**: create and alter schemas in a tab that shows the SQL first; create and alter views and routines from generated scripts.
 - **Menus and toolbars**: menu bar, toolbars, open and save script files, explain the statement under the cursor, reformat a query.
 - **History**: searchable. Statements that contain a password are not stored in full.
 
