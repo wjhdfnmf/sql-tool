@@ -512,3 +512,34 @@ async fn a_live_session_is_left_alone_by_the_liveness_check() {
     assert_eq!(session.info().connection_id, id);
     assert!(session.idle_for() < Duration::from_secs(5));
 }
+
+#[tokio::test]
+async fn a_query_is_exported_in_full_without_keeping_its_rows() {
+    use sqltool_core::export::ExportFormat;
+
+    let ca = identity();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(ca.clone()))).await.unwrap();
+    let mut session = Session::connect(&ldap_profile(&server, &ca)).await.unwrap();
+
+    // Far more rows than any row limit would keep.
+    let mut out: Vec<u8> = Vec::new();
+    let mut reported = Vec::new();
+    let rows = session
+        .export("SELECT fake_rows(50000, 3)", ExportFormat::Csv, "", &mut out, |n| reported.push(n))
+        .await
+        .unwrap();
+    assert_eq!(rows, 50_000);
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.lines().count(), 50_001, "a header line and every row");
+    assert_eq!(text.lines().next().unwrap().split(',').count(), 3);
+    assert_eq!(reported.last(), Some(&50_000), "the final count is reported");
+    assert!(reported.len() >= 2, "progress is reported along the way: {reported:?}");
+
+    // The same rows as INSERT statements, and the session is usable in between.
+    let mut sql: Vec<u8> = Vec::new();
+    let rows = session.export("SELECT fake_rows(7, 2)", ExportFormat::Sql, "copy", &mut sql, |_| {}).await.unwrap();
+    assert_eq!(rows, 7);
+    let sql = String::from_utf8(sql).unwrap();
+    assert_eq!(sql.lines().count(), 7);
+    assert!(sql.lines().all(|line| line.starts_with("INSERT INTO `copy` (") && line.ends_with(");")), "{sql}");
+}

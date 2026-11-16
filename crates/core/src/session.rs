@@ -11,6 +11,7 @@ use secrecy::ExposeSecret;
 use serde::Serialize;
 
 use crate::error::Error;
+use crate::export::{ExportFormat, RowWriter};
 use crate::policy;
 use crate::profile::{CaSource, ConnectProfile, TlsMode};
 use crate::store::{ColumnInfo, ColumnKind, ColumnSource, ResultStore, RowBatch};
@@ -544,6 +545,84 @@ impl Session {
             self.absorb_stray_kill().await;
         }
         outcome
+    }
+
+    /// Runs a statement and writes the rows of its result straight to `out`
+    /// in `format`, keeping none of them. This is how a result of any size,
+    /// and regardless of the row limit, is exported in full.
+    ///
+    /// `on_progress` is told the number of rows written, now and then.
+    /// Returns the number of rows written. If the statement or the writing
+    /// fails part-way, `out` holds an incomplete file.
+    pub async fn export<W, P>(
+        &mut self,
+        sql: &str,
+        format: ExportFormat,
+        table: &str,
+        out: &mut W,
+        on_progress: P,
+    ) -> Result<u64, Error>
+    where
+        W: std::io::Write + Send,
+        P: FnMut(u64) + Send,
+    {
+        let outcome = self.export_inner(sql, format, table, out, on_progress).await;
+        self.observe(outcome)
+    }
+
+    async fn export_inner<W, P>(
+        &mut self,
+        sql: &str,
+        format: ExportFormat,
+        table: &str,
+        out: &mut W,
+        mut on_progress: P,
+    ) -> Result<u64, Error>
+    where
+        W: std::io::Write + Send,
+        P: FnMut(u64) + Send,
+    {
+        const PROGRESS_EVERY: u64 = 20_000;
+        let storage = |e: std::io::Error| Error::Storage(format!("could not write the file: {e}"));
+
+        let mut result = self.conn.query_iter(sql).await?;
+        let columns: Vec<ColumnInfo> = result.columns_ref().iter().map(column_info).collect();
+        if columns.is_empty() {
+            result.drop_result().await?;
+            return Err(Error::Other("that statement returns no rows to export".into()));
+        }
+        let mut writer = RowWriter::new(format, columns, table);
+        let mut outcome = writer.begin(out).map_err(storage);
+        let mut rows = 0u64;
+        while outcome.is_ok() {
+            match result.next().await {
+                Ok(Some(row)) => {
+                    let cells: Vec<Option<Vec<u8>>> = row
+                        .unwrap()
+                        .into_iter()
+                        .map(|value| match value {
+                            Value::NULL => None,
+                            Value::Bytes(bytes) => Some(bytes),
+                            other => Some(other.as_sql(true).into_bytes()),
+                        })
+                        .collect();
+                    outcome = writer.row(out, cells.iter().map(|cell| cell.as_deref())).map_err(storage);
+                    rows += 1;
+                    if rows % PROGRESS_EVERY == 0 {
+                        on_progress(rows);
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => outcome = Err(Error::from(e)),
+            }
+        }
+        // Read off whatever is left, so the connection is usable afterwards.
+        let drained = result.drop_result().await;
+        outcome?;
+        drained?;
+        let rows = writer.end(out).map_err(storage)?;
+        on_progress(rows);
+        Ok(rows)
     }
 
     /// `KILL QUERY` can arrive just after the statement it was aimed at has

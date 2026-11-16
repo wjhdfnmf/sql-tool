@@ -427,6 +427,16 @@ export const mockBackend: Backend = {
     await wait(300);
     return { path: `C:\\exports\\result.${format}`, rows: results.get(resultId)?.rows ?? 0, truncated: false, filtered: false };
   },
+  exportQuery: async (_workspaceId, tabId, _sql, format, _table, onProgress) => {
+    // Pretends to stream six million rows.
+    cancelled.delete(tabId);
+    for (let rows = 500_000; rows <= 6_000_000; rows += 500_000) {
+      await wait(250);
+      if (cancelled.has(tabId)) throw fail('stopped', 'Export stopped. The incomplete file was removed.');
+      onProgress(rows);
+    }
+    return { path: `C:\\exports\\result.${format}`, rows: 6_000_000, truncated: false, filtered: false };
+  },
   copyRange: async (resultId, range, format, headers, table) => {
     const result = results.get(resultId);
     if (!result) throw fail('no-result', 'This result is no longer available.');

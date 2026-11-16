@@ -256,6 +256,50 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { list, sum: stats.sum, average: stats.average };
   });
 
+  await step('a result stopped at the row limit says so, and only what it holds is "shown"', async () => {
+    expect(workspace, 'not connected');
+    const messages = await run(config.bigQuery, { kind: 'all' }, 1000);
+    const done = ofType(messages, 'resultDone')[0];
+    expect(done && done.truncated && done.rows === 1000, `the limited result was ${JSON.stringify(done)}`);
+    await backend.closeResults([done.resultId]);
+    // Exporting every row of a query is refused for anything that is not a plain read.
+    try {
+      await backend.exportQuery(workspace.id, `selftest-export-${workspace.id}`, 'DELETE FROM nothing_at_all', 'csv', '', () => {});
+      throw new Error('a statement that changes data was accepted for a full export');
+    } catch (e) {
+      expect(asUiError(e).kind === 'not-exportable', `unexpected: ${asUiError(e).kind}: ${asUiError(e).message}`);
+    }
+    return { rowsHeld: done.rows };
+  });
+
+  await step('a result loaded in full is exported in full, from what is held', async () => {
+    expect(workspace, 'not connected');
+    // No row limit: every row is fetched and kept, as when scrolling through millions of rows.
+    const started = performance.now();
+    const messages = await run(config.exportQuery, { kind: 'all' }, null);
+    const done = ofType(messages, 'resultDone')[0];
+    expect(done && !done.truncated, `the full load ended as ${JSON.stringify(done ?? ofType(messages, 'failed')[0])}`);
+    const loadedMs = Math.round(performance.now() - started);
+    // The last row is really there.
+    const last = decodeCells(await backend.getRows(done.resultId, done.rows - 1, 1), 1);
+    expect(last.rows === 1, `the last row could not be read back: ${JSON.stringify(last)}`);
+
+    const exported: Record<string, number> = {};
+    for (const format of ['csv', 'sql'] as const) {
+      const saved = await backend.exportResult(done.resultId, format, 'copy');
+      expect(saved, 'the export was cancelled');
+      expect(saved.rows === done.rows, `${format}: exported ${saved.rows} of the ${done.rows} rows held`);
+      expect(!saved.truncated && !saved.filtered, `${format}: the export was marked partial: ${JSON.stringify(saved)}`);
+      exported[format] = saved.rows;
+    }
+    // Sorted and filtered, the export follows what is shown.
+    const visible = await backend.resultView(done.resultId, '77', 0, true);
+    const filtered = await backend.exportResult(done.resultId, 'tsv', '');
+    expect(filtered && filtered.rows === visible && filtered.filtered, `filtered export wrote ${filtered?.rows} of ${visible} visible rows`);
+    await backend.closeResults([done.resultId]);
+    return { rows: done.rows, loadedMs, exported, filteredRows: visible };
+  });
+
   await step('edit rows through a result, in one transaction', async () => {
     expect(workspace, 'not connected');
     const setup = await run(
@@ -565,7 +609,7 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     expect(input, 'the grid has no input layer');
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true }));
     await sleep(600);
-    const footer = document.querySelector('.result footer')?.textContent ?? '';
+    const footer = document.querySelector('footer.status .status-items:not([hidden])')?.textContent ?? '';
     expect(/1\s+row\s+×\s+2\s+columns/.test(footer) && /Sum\s+1\b/.test(footer), `selecting everything showed: ${footer.replace(/\s+/g, ' ').trim().slice(0, 200)}`);
 
     // The table designer opens in a tab, creates a table, then alters it.
