@@ -1,0 +1,512 @@
+# Project plan: open-source SQL client for MySQL and MariaDB
+
+Status: Phase 1 first build working on Windows, 2026-11-15, tested against real MariaDB 11.8 and MySQL 8.4 (see "Phase 1 status"). MySQL Enterprise, MySQL 5.7, Linux and macOS checks are still open. Project name is still to be chosen.
+
+## Phase 1 status
+
+The desktop app now connects, runs queries and browses schemas. It replaces the Phase 0 prototype; the prototype's grid was carried over, its benchmark mode was not.
+
+### What works
+
+| Area | State |
+|---|---|
+| Connection manager | Saved profiles (no secrets in the file), create, edit, delete, test connection, colour tags |
+| Passwords | Stored in the OS keychain, or asked for at connect time |
+| Encryption choices | Verified, CA verified, "Encrypted, not verified", "Not encrypted". Cleartext authentication on an unverified connection needs a visible acknowledgement in the dialog |
+| Editor | Tabs, MySQL and MariaDB syntax highlighting, keyword completion, search, undo history |
+| Running | Statement at the cursor or the selection (Ctrl+Enter), whole script (Ctrl+Shift+Enter), `DELIMITER` support, stops at the first error, stop button |
+| Sessions | Each editor tab has its own connection; the schema browser uses another, so it stays responsive during long queries |
+| Results | One tab per result set, rows shown while they stream, resizable columns, keyboard navigation, copy a cell, full-value viewer with JSON formatting, messages with timings |
+| Row limit | 1,000 / 10,000 / 100,000 / none per result. At the limit the query is interrupted on the server and the result is marked as cut short |
+| Schema browser | Schemas, tables, views, columns, routines, triggers, events; loaded on demand; filter box; double-click a table to see its rows |
+| History | Every statement with time, duration and outcome; searchable; statements containing a password are not stored in full |
+| Multiple connections | Several servers open at once, one tab each |
+
+### How it was verified
+
+| Check | Result |
+|---|---|
+| Core unit tests (splitter, store, profiles, history, version detection) | 40 pass |
+| Login, TLS and run tests against the fake server | 17 pass, 1 known driver defect switched off |
+| Core against real MariaDB 11.8.6 and MySQL 8.4.13: metadata, row changes, binary and non-ASCII data, a procedure returning two result sets, the row limit interrupting a 20-million-row query | 3 of 3 pass |
+| Desktop app end to end, driven through the same calls the screens make, against MariaDB (PAM cleartext over verified TLS) and MySQL 8.4 | 19 of 19 steps pass on each |
+| Screens, in a browser against a mock backend, light and dark | Looked at: connection list, connection dialog, editor, results, messages, schema tree, cell viewer |
+| UI type check | 0 errors, 0 warnings |
+
+The end-to-end run covers the keychain round trip, wrong-password handling, the binary row transport, cancel, `USE` tracking, history, that the editor and grid paint inside the real webview, and that nothing is blocked by the content security policy. It also confirms the password is in no settings or history file.
+
+### Not done or not verified
+
+- **Nobody has clicked through the packaged app by hand.** The screens were checked in a browser with a mock backend, and the real app was checked by the automated run. Column resizing, keyboard navigation in the grid and the history panel were not exercised in the real app.
+- **Your Enterprise servers, MySQL 5.7, Linux and macOS**: still untested, as after Phase 0.
+- **Continuous integration** and the container matrix: not set up. There is no remote repository yet and no container runtime on this machine.
+- **Verify CA and certificate pinning**: still blocked on the driver change described under Phase 0.
+- **Memory**: results are held in RAM. The row limit bounds this in normal use; "No limit" on a huge table can still exhaust memory. Spill to disk is not built.
+- **Lost connections**: a dropped connection surfaces as an error on the next statement. There is no automatic reconnect.
+- **Transactions**: sessions run in the server's default autocommit mode. There is no commit/rollback control or open-transaction indicator yet.
+- Installer packaging, signing and auto-update are Phase 3.
+
+Left for Phase 2 as planned: completion of table and column names, the table designer, data editing, export.
+
+### How to run it
+
+Development, with live reload (needs Node and Rust):
+
+```bash
+cd app && npm install && npm run tauri dev
+```
+
+A release build without the Tauri CLI:
+
+```bash
+cd app && npm run build && cd .. && cargo build --release -p sqltool-app --features custom-protocol
+```
+
+The UI alone in a browser, against a mock backend:
+
+```bash
+cd app && npm run dev
+```
+
+The end-to-end run against the local test servers (see `tests/servers/`):
+
+```bash
+bash tests/servers/selftest.sh mariadb
+```
+
+```bash
+cargo test -p sqltool-core --test real_servers -- --ignored
+```
+
+Development builds include a "Demo server" entry on the connection list: a fake MySQL Enterprise server inside the app, for trying the UI without a database.
+
+## Phase 0 results
+
+Run on Windows 10, WebView2 157, 160 Hz display, release builds. Your servers were not reachable, so a fake MySQL server (`crates/fakeserver`) stood in for them. It is hand-written, shares no code with the client driver, and imitates the login sequence of MySQL Enterprise 8.4.3 and 5.7.37 for an LDAP or PAM account.
+
+### What is now proven
+
+| Check | Result |
+|---|---|
+| Cleartext login, 8.4 shape (server offers `caching_sha2_password`, then switches to `mysql_clear_password`), verified TLS 1.3 | Pass |
+| Cleartext login, 5.7 shape (server offers `mysql_native_password`, then switches), TLS 1.2 only | Pass |
+| Server asks for cleartext but the profile has not enabled it | Refused; server received nothing |
+| Cleartext enabled with TLS off, or TLS on but unverified | Refused before a socket is opened |
+| Server certificate signed by an untrusted CA | Refused; no password sent |
+| Certificate does not match the host name (Verify Identity) | Refused; no password sent |
+| Profile requires TLS, server offers none | Refused; no password sent |
+| Hostile server answers a query with a `LOCAL INFILE` file request | Refused; zero bytes uploaded |
+| Cancel a running query from a second connection (`KILL QUERY`) | Interrupted in about 300 ms; session still usable |
+| Driver throughput, 1,000,000 rows x 10 columns (138 MB) over loopback TLS | 0.8 s, about 1.2 million rows/s |
+
+15 automated tests cover these (14 pass, 1 is a known driver defect, below).
+
+### Grid prototype against the performance targets
+
+1,000,000 rows x 50 columns (812 MB of cell data), full pipeline: connect, cleartext auth over TLS, stream into the Rust result store, UI fetches 512-row pages as binary.
+
+| Target (section 7) | Measured | Verdict |
+|---|---|---|
+| First rows on screen under 100 ms | 39 ms after clicking Run | Met |
+| Scrolling 1,000,000 x 50 with no dropped frames | 160 fps, worst frame 7.1 ms, at both 100 and 2,000 rows/s; no unloaded cells on screen | Met |
+| Start to usable window under 1 s | 743 ms, but a warm start; cold start not measured | Likely met |
+| Idle memory under 200 MB | 169 MB private across all 7 processes (296 MB working set) | Met, narrowly |
+| Installer under 20 MB | Executable is 12.3 MB before packaging | On track |
+
+Other measurements, not tied to a target:
+
+| Measure | Result |
+|---|---|
+| Load the full million rows | 3.6 s, about 280,000 rows/s |
+| Jump to a random position until fully painted | 7 ms typical, 9.9 ms worst of 40 |
+| Page fetch over binary IPC (405 KB) | 4.9 ms typical, 8.4 ms worst |
+
+Memory under load: the app process held 851 MB for the 812 MB result, because the store keeps everything in RAM. This is expected at this stage and confirms the planned memory budget with spill to disk is needed, not optional. The webview used about 305 MB with its page cache full.
+
+### Real servers
+
+Installed inside WSL (Ubuntu 26.04) with the scripts in `tests/servers/`, and tested from the Windows build of the smoke tool. Both servers use OpenSSL, as your Enterprise servers do.
+
+| Server | Check | Result |
+|---|---|---|
+| MariaDB 11.8.6 | PAM account through `mysql_clear_password`, Verify Identity, TLS 1.3 | Pass |
+| MariaDB 11.8.6 | Same login with the server limited to TLS 1.2 (`ECDHE-RSA-AES256-GCM-SHA384`) | Pass |
+| MariaDB 11.8.6 | Same account, cleartext not enabled in the profile | Refused; nothing sent |
+| MariaDB 11.8.6 | Wrong password | Reported as access denied |
+| MariaDB 11.8.6 | `mysql_native_password` and `ed25519` accounts | Pass |
+| MariaDB 11.8.6 | Server CA not trusted | Refused |
+| MariaDB 11.8.6 | Stream 1,000,000 rows x 10 columns | 0.7 s |
+| MySQL 8.4.13 | `caching_sha2_password` over verified TLS 1.3, first login and cached login | Pass |
+| MySQL 8.4.13 | `caching_sha2_password` without TLS (RSA key exchange) | Pass |
+| MySQL 8.4.13 | `mysql_native_password` | Pass |
+| MySQL 8.4.13 | `sha256_password` | Not supported; reported clearly |
+| MySQL 8.4.13 | Stream 1,000,000 rows x 10 columns | 1.1 s |
+| MySQL 8.4.13 | Server's auto-generated certificate, Verify Identity | Refused, as it should be: the certificate names no host |
+| MySQL 8.4.13 | Server's auto-generated certificate, Verify CA | Refused: the driver defect below, confirmed on a real server |
+
+Version detection, metadata queries and query cancel passed on both.
+
+**What this means for your servers.** A MySQL server running on its default auto-generated certificate can currently be reached only with unverified TLS, and the cleartext policy rightly refuses unverified TLS. Until the driver is fixed, cleartext login needs either a server certificate that includes the host name, or the explicit risk override. Fixing Verify CA is therefore the first item of Phase 1.
+
+### What is not proven
+
+- **MySQL Enterprise itself.** The Enterprise LDAP and PAM plugins use the same client-side `mysql_clear_password` exchange that passed against MariaDB's PAM plugin, and TLS 1.2 against OpenSSL passed, so the remaining risk is lower than before. It is still not a test of your servers. The smoke tool is ready for when one is reachable (command below).
+- **MySQL 5.7.** Not in Ubuntu's packages. Testing it needs a large download from Oracle's archive, which has not been done.
+- **Other versions.** MySQL 8.0, MariaDB 10.x and Percona Server have not run.
+- **Linux and macOS.** Only the Windows webview was measured. The Linux webview remains the main open risk for the stack.
+
+### Defects and limits found in the driver (`mysql_async` 0.37.1)
+
+1. **Verify CA mode does not work with `rustls`.** The driver detects a host name mismatch by searching the error text for a string that current `rustls` no longer prints. The connection is refused, so it fails safe, but the mode is unusable. Confirmed against real MySQL 8.4.13. This matters for you: MySQL 5.7's auto-generated certificates carry no usable host name, so Verify CA is the mode such servers need.
+2. **No hook for a custom TLS configuration.** Certificate fingerprint pinning (section 4) cannot be built on the driver as published.
+3. **`sha256_password` is not supported** in this version; it is rejected as an unknown plugin. A newer `mysql_common` lists it, so this may resolve on upgrade.
+4. TLS failures arrive as generic I/O errors. The core now recognises them and reports them as TLS errors.
+5. By default the driver reconnects over a local socket when the host is loopback, bypassing TLS settings. The core turns this off.
+6. The driver keeps the password in an ordinary string for the life of the connection, so it cannot be wiped from memory after login.
+
+Items 1 and 2 need a change to the driver. Recommended: send both fixes upstream, and carry a patched copy until they are released.
+
+### Decision
+
+The stack holds on Windows with a wide margin. Recommended: proceed to Phase 1 on Tauri and Rust, and treat the Linux webview check and the real-server run as gates that must close before Phase 1 ends.
+
+### How to run it
+
+```bash
+cargo test --workspace
+```
+
+```bash
+cargo run --release -p sqltool-cli -- demo
+```
+
+Local test servers inside WSL or Linux, as root from the repository root. MariaDB listens on 127.0.0.1:3307 and MySQL 8.4 on 127.0.0.1:3308; generated passwords and CA certificates go to `tests/servers/.local/`, which git ignores:
+
+```bash
+bash tests/servers/mariadb-pam.sh
+```
+
+```bash
+bash tests/servers/mysql84.sh san
+```
+
+Against a real server, once one is reachable. It prompts for the password and prints no secrets or table data:
+
+```bash
+cargo run --release -p sqltool-cli -- check --host HOST --user USER --cleartext --ca C:\path\to\ca.pem
+```
+
+## 1. Goals
+
+A free, open-source desktop SQL client in the spirit of MySQL Workbench, built to be much lighter and faster.
+
+- Runs on Windows, macOS and Linux from one codebase.
+- Connects to MySQL and MariaDB, including these two required servers:
+  - MySQL Enterprise Server 8.4.3-commercial
+  - MySQL Enterprise Server Advanced 5.7.37-enterprise-commercial-advanced-log
+- Supports the cleartext authentication plugin (`mysql_clear_password`), which is what LDAP and PAM logins on MySQL Enterprise use, plus the other common auth methods.
+- Clean interface covering the everyday jobs: writing and running queries, browsing schemas, creating and altering schemas and tables, editing data.
+- Secure by default, and fast with large result sets.
+
+Out of scope for 1.0: other database engines, server administration dashboards, ER diagram modelling, migration tooling, cloud sync of settings.
+
+## 2. Recommended stack
+
+**Tauri 2 shell, Rust core, Svelte + TypeScript UI.**
+
+| Layer | Choice | Why |
+|---|---|---|
+| Core (connections, queries, result storage, metadata, DDL generation) | Rust, async on Tokio | Memory safe, no garbage collector pauses, small binaries |
+| MySQL protocol | `mysql_async` crate (pure Rust, MIT/Apache) | Has cleartext auth built in; no dependency on Oracle's GPL client library |
+| TLS | `rustls` (TLS 1.2 and 1.3) | No OpenSSL to ship or patch; `native-tls` kept as a build option if a server needs it |
+| Desktop shell | Tauri 2 | Uses the operating system's webview, so installers are roughly 10 to 20 MB instead of 100+ MB for Electron |
+| UI | Svelte 5 + TypeScript | Compiles away the framework; small and fast |
+| SQL editor | CodeMirror 6 | Has MySQL and MariaDB dialects, light, extensible autocomplete |
+| Result grid | Virtualized grid fed by row windows from Rust | Only visible rows ever reach the UI |
+| Secrets | OS keychain through the `keyring` crate | Windows Credential Manager, macOS Keychain, Linux Secret Service |
+
+### What was checked
+
+The driver is the part most likely to sink the project, so I checked its current documentation (`mysql_async` 0.37.1, `mysql_common` 0.38.2):
+
+- `OptsBuilder::enable_cleartext_plugin` exists and defaults to off.
+- The auth plugin list includes `mysql_native_password`, `caching_sha2_password`, `mysql_clear_password`, `mysql_old_password`, MariaDB `ed25519` (feature flag `client_ed25519`) and MariaDB `parsec` (feature flag `client_parsec`). `sha256_password` is listed in the newer `mysql_common` 0.38 but is not handled by `mysql_async` 0.37.1.
+- TLS backends are selectable by feature flag: `rustls` or `native-tls`.
+
+Checked in Phase 0: binary IPC throughput on Windows. Still open: that `rustls` negotiates with the 5.7.37 server's TLS configuration, and IPC and rendering speed on Linux and macOS.
+
+### Alternatives considered
+
+| Option | Verdict |
+|---|---|
+| Electron | Rejected. Ships a full Chromium, uses several hundred MB of RAM at idle. Conflicts with "fast and efficient". |
+| Qt / C++ | Fastest fully native option, and MariaDB Connector/C supports every auth plugin. Rejected for memory-safety risk in a tool that handles credentials, and a slower path for outside contributors. This is the fallback if the webview approach fails the Phase 0 benchmarks. |
+| Pure Rust GUI (egui, iced, Slint, gpui) | Best raw performance, but none has a mature SQL editor with autocomplete or a production data grid. We would be building both from scratch. |
+| .NET Avalonia + MySqlConnector | Excellent driver coverage. Larger runtime and slower startup. |
+| Java (the SQL Workbench/J and DBeaver route) | Heavy startup and memory. |
+
+The core is a separate Rust library with no UI dependencies, so the shell can be replaced later without rewriting the database logic.
+
+## 3. Architecture
+
+```
+┌──────────────────────── UI (webview) ────────────────────────┐
+│ Connection manager │ Editor tabs │ Result grid │ Schema tree  │
+│ Table designer     │ History     │ Settings                   │
+└───────────────▲──────────────────────────────┬───────────────┘
+                │ row windows (binary)         │ typed commands
+┌───────────────┴──────────────────────────────▼───────────────┐
+│ app/src-tauri    thin command layer, no business logic        │
+├───────────────────────────────────────────────────────────────┤
+│ crates/core      sessions, query execution, cancel,           │
+│                  result store, metadata cache, history        │
+│ crates/dialect   server detection, capability flags,          │
+│                  statement splitter, DDL builders             │
+│ crates/secrets   keychain access, in-memory secret handling   │
+│ crates/cli       headless smoke-test tool (also used in CI)   │
+└───────────────────────────────────────────────────────────────┘
+                │ mysql_async + rustls
+                ▼
+        MySQL / MariaDB servers
+```
+
+Key rules:
+
+- **The UI never holds a full result set.** Rust decodes rows into a compact store and the grid asks for `rows(result_id, offset, count)`.
+- **The UI never sees a stored password.** It can send one in when the user types it. It cannot read one back.
+- **The driver sits behind our own trait.** If `mysql_async` cannot do something we need (an unsupported auth plugin, say), we can patch, fork or replace it in one place.
+- **Server differences live in `crates/dialect` only.** The rest of the code asks "does this server support CHECK constraints?" and never compares version numbers itself.
+
+## 4. Authentication and transport
+
+### Auth plugins
+
+| Plugin | Where it appears | Plan |
+|---|---|---|
+| `mysql_native_password` | Default on 5.7 and MariaDB. Disabled by default on 8.4, removed in 9.0 | 1.0 |
+| `caching_sha2_password` | Default on 8.0 and 8.4 | 1.0, including full authentication over TLS and RSA key exchange |
+| `mysql_clear_password` | LDAP simple and PAM on MySQL Enterprise; MariaDB PAM with `pam_use_cleartext_plugin` | 1.0, **required for your servers** |
+| `sha256_password` | Older 5.6 to 8.0 setups, deprecated | Not in the current driver; revisit on driver upgrade |
+| `client_ed25519` | MariaDB | 1.0 |
+| `parsec` | MariaDB 11.6+ | 1.0 |
+| MariaDB `dialog` (interactive PAM) | MariaDB PAM default | After 1.0, needs our own implementation |
+| Kerberos / GSSAPI, LDAP SASL, Windows native auth | Enterprise single sign-on | After 1.0 |
+| WebAuthn / FIDO, OCI, OpenID Connect | Newer Enterprise options | Not planned until requested |
+
+### Cleartext policy
+
+Cleartext auth sends the real password to the server, so the client has to be strict about when it will do that. A hostile or impersonated server can ask any client to switch to cleartext mid-handshake in order to harvest the password.
+
+1. Off by default. Enabled per connection with a clearly labelled toggle.
+2. When enabled, the connection must use TLS with the server certificate verified (against a CA file or a pinned fingerprint). Unverified TLS does not count, because it does not stop impersonation.
+3. Without verified TLS (unverified TLS, or none), cleartext is allowed only after an explicit acknowledgement on that connection, shown as a warning in the connection dialog.
+4. A server that requests cleartext on a connection where it is not enabled gets a refused login and a clear error that says why. This is tested against a fake hostile server in CI.
+
+### TLS
+
+- Four modes: Verify Identity (the default for a new connection), Verify CA, Encrypted but not verified, and Not encrypted. "Encrypted, not verified" is what most MySQL clients do by default and is offered openly, with its limits explained in the dialog. There is no "use TLS if available" mode: silently falling back to no encryption is the downgrade this tool refuses.
+- TLS 1.2 and 1.3 only. 5.7.37 Enterprise is built with OpenSSL and supports TLS 1.2, so this should work; the spike confirms it against your actual server.
+- Self-signed and auto-generated server certificates are common on 5.7. The connection dialog shows the certificate fingerprint and offers to pin it, so users are not pushed into turning verification off.
+- Client certificates (mutual TLS) supported.
+- Servers that only speak TLS 1.0 or 1.1 (old community builds linked against yaSSL) are not supported by default. See open decisions.
+
+### Other transport
+
+- TCP, Unix socket, Windows named pipe.
+- SSH tunnel with key or agent authentication, using the pure Rust `russh` crate (Phase 3).
+- Protocol compression optional.
+
+## 5. Server compatibility
+
+### Target matrix
+
+| Family | Versions tested |
+|---|---|
+| MySQL Community | 5.7, 8.0, 8.4 LTS, current 9.x |
+| MySQL Enterprise | 5.7.37 and 8.4.3 (your servers, manual acceptance run) |
+| MariaDB | 10.6, 10.11, 11.4, 11.8 and the current release |
+| Percona Server | 8.0, 8.4 |
+
+MySQL 5.6 and MariaDB 10.4/10.5 get best-effort support: expected to work, not in the release gate.
+
+### Differences the dialect layer handles
+
+- MariaDB before 11 prefixes its version string with `5.5.5-`; detection must strip it.
+- `information_schema` is slow on large 5.7 instances. Metadata queries are always filtered by schema, loaded lazily, and cached.
+- 8.4 removed `SHOW MASTER STATUS` and turned `mysql_native_password` off by default.
+- Collations differ (`utf8mb4_0900_ai_ci` on MySQL 8+, `uca1400` on MariaDB 10.10+). The table designer lists only what the connected server reports.
+- Feature availability varies: CHECK constraints, invisible columns, generated columns, JSON as a real type (MySQL) versus an alias (MariaDB), sequences and system-versioned tables (MariaDB only), roles.
+- Query timeout uses `max_execution_time` on MySQL (SELECT only) and `max_statement_time` on MariaDB.
+- Query cancel uses `KILL QUERY` from a second connection.
+
+## 6. Features
+
+### 1.0
+
+**Connections**
+- Saved profiles with folders, colour tags, and an environment label (for example "production").
+- Test connection button with specific error messages for auth and TLS failures.
+- Passwords in the OS keychain, or "ask every time".
+
+**Query editor**
+- Tabs, syntax highlighting for the connected dialect, formatting.
+- Run current statement, run selection, run all. Statement splitting understands `DELIMITER`, comments, strings and `/*! */` version comments.
+- Autocomplete for schemas, tables, columns, functions and keywords.
+- Cancel a running query.
+- Query history and saved snippets, searchable.
+- Autocommit toggle with a visible open-transaction indicator, commit and rollback buttons.
+
+**Results**
+- Rows appear as they arrive. Smooth scrolling through millions of rows.
+- Multiple result sets per run, with timing and affected-row counts.
+- Sort and filter without re-running the query.
+- Viewers for long text, JSON and binary values.
+- Copy and export as CSV, TSV, JSON and SQL INSERT statements.
+- Configurable automatic row limit (default 1000) with a one-click "fetch all".
+
+**Schema browser**
+- Tree of schemas, tables, views, routines, triggers and events, loaded on demand, with search.
+- Table detail view: columns, indexes, foreign keys, DDL, row count estimate.
+
+**Schema and table tools**
+- Create and alter schema (character set, collation).
+- Table designer: columns, types, defaults, nullability, auto-increment, primary key, indexes, foreign keys, engine, charset, comment.
+- Alter table through the same designer. It compares before and after and generates the `ALTER`.
+- Every change shows the exact SQL for review before it runs.
+- Drop, truncate and rename with confirmation.
+
+**Data editing**
+- Edit, insert and delete rows in the grid for tables with a primary or unique key.
+- Changes are staged, shown as SQL, and applied in one transaction.
+
+**Guardrails**
+- Read-only mode per connection.
+- On connections labelled production: confirmation for DDL, and for `UPDATE` or `DELETE` without a `WHERE`.
+
+### After 1.0
+
+Visual EXPLAIN, process list and kill, server variables and status, user and privilege management, dump and restore, CSV import wizard, schema comparison, ER diagrams, the remaining auth plugins.
+
+## 7. Performance design
+
+Targets, to be validated in Phase 0 and then enforced by CI benchmarks:
+
+| Measure | Target |
+|---|---|
+| Installer size | Under 20 MB |
+| Cold start to usable window | Under 1 second |
+| Idle memory, webview included | Under 200 MB |
+| First rows on screen after the server starts replying | Under 100 ms |
+| Scrolling a 1,000,000 x 50 result | No dropped frames |
+| Schema tree on a server with 10,000 tables | Opens instantly, loads per schema |
+
+How:
+
+- Results stream from the driver into a compact store in Rust that keeps raw bytes plus column types. Values are formatted only for cells that are actually displayed.
+- The store has a memory budget. Past it, rows spill to a temporary file that is private to the user and deleted when the result is closed.
+- Row windows cross to the UI as binary, not JSON.
+- Sorting and filtering of large results run in Rust.
+- Metadata loads lazily and is cached per connection; the autocomplete index is built in the background.
+- A small connection pool per profile: one session per editor tab (so session state and transactions behave as users expect), plus one shared utility connection for metadata and cancel.
+
+## 8. Security design
+
+**Credentials**
+- Stored only in the OS keychain. Configuration files contain no secrets.
+- Held in memory in zeroizing containers, never logged, never returned to the UI.
+- On Linux without a keyring service: no storage, prompt each time.
+
+**Server trust**
+- TLS and cleartext rules as in section 4.
+- `LOAD DATA LOCAL INFILE` is refused unless the user starts an import, and then only the chosen file is served. Without this a malicious server can request arbitrary local files.
+
+**Application hardening**
+- Strict content security policy: no remote content, no `eval`, no inline scripts.
+- Tauri capabilities at the minimum: the UI has no shell or filesystem access, only our typed commands.
+- All database content is rendered as text. A cell value containing HTML or script must never be interpreted by the webview.
+- No telemetry. The only outbound connections are to the user's databases and an optional update check.
+
+**History and logs**
+- Query history is local and can be disabled.
+- Statements containing passwords (`IDENTIFIED BY`, `SET PASSWORD`, and similar) are redacted before being saved.
+
+**Supply chain and releases**
+- Dependencies pinned by lockfile, checked with `cargo-deny`, `cargo-audit` and `npm audit` in CI.
+- Signed installers on Windows and macOS, checksums and signatures on Linux, signed update manifests.
+- `SECURITY.md` with a private reporting channel.
+- An external security review before 1.0 if a volunteer or sponsor can be found.
+
+## 9. Testing
+
+- **Unit tests**: statement splitter, DDL generation (snapshot tests per dialect), version detection, redaction.
+- **Compatibility matrix**: the core test suite runs against every server in section 5 in containers on each pull request.
+- **Cleartext auth in CI without an Enterprise licence**: MariaDB with PAM and `pam_use_cleartext_plugin`, and Percona Server's PAM plugin, both exercise the same client-side `mysql_clear_password` path. (Percona's availability to be confirmed in the spike.)
+- **Hostile server tests**: a small fake server that attempts an unsolicited cleartext switch, a TLS downgrade and a `LOCAL INFILE` file request. The client must refuse all three.
+- **Enterprise acceptance**: Oracle's Enterprise images cannot be used in public CI. Before each release, the `cli` smoke tool is run against your 8.4.3 and 5.7.37 servers. It checks connect, auth, TLS, metadata, a query round trip and cancel, and prints a report with no secrets or data in it.
+- **UI tests**: component tests in a browser with a mocked backend; a small end-to-end suite on Windows and Linux.
+- **Benchmarks**: the section 7 targets, tracked per commit.
+
+## 10. Open-source setup and distribution
+
+- Licence: Apache-2.0 recommended (see open decisions).
+- GitHub repository with CI on Windows, macOS (Intel and Apple Silicon) and Linux.
+- `README`, `CONTRIBUTING`, `SECURITY`, code of conduct, issue templates, an architecture note.
+- Packages: Windows installer and `winget`; macOS universal `.dmg` and Homebrew cask; Linux AppImage, `.deb`, `.rpm`, Flatpak later.
+- Semantic versioning, changelog, signed auto-update that the user can turn off.
+
+## 11. Roadmap
+
+Each phase ends at a checkpoint that can be demonstrated.
+
+### Phase 0: feasibility spike
+
+Purpose: prove the two risky assumptions before building anything else.
+
+- Rust command-line prototype that connects, authenticates and runs a query.
+- Run it against your 8.4.3 and 5.7.37 servers with cleartext auth over verified TLS.
+- Run it across the container matrix for the other auth plugins.
+- Tauri prototype: stream a 1,000,000 row result into a grid on Windows, macOS and Linux, and measure against section 7.
+
+**Checkpoint:** both of your servers connect; the grid meets the targets on all three systems. If the Linux webview misses the targets, decide between optimising and switching to the Qt fallback now, while it is cheap.
+
+### Phase 1: connect and query (0.1 alpha)
+
+Connection manager, keychain storage, TLS options, editor with tabs and highlighting, run and cancel, result grid, history, schema tree, compatibility matrix in CI.
+
+**Checkpoint:** usable as a daily query tool against both of your servers.
+
+### Phase 2: schema and data tools (0.2)
+
+Autocomplete, create and alter schema, table designer with SQL preview, data editing, export, read-only mode and production guardrails.
+
+**Checkpoint:** a table can be designed, created, altered and populated without typing SQL.
+
+### Phase 3: hardening and release (beta, then 1.0)
+
+SSH tunnels, signed installers for all three systems, auto-update, performance benchmarks in CI, hostile-server tests, accessibility and keyboard navigation pass, documentation, security review.
+
+**Checkpoint:** public 1.0 with installers.
+
+### Phase 4: after 1.0
+
+The "After 1.0" list in section 6, ordered by user demand.
+
+## 12. Risks
+
+| Risk | Mitigation |
+|---|---|
+| `rustls` cannot negotiate with a server's TLS setup (old ciphers or certificates) | Tested in Phase 0 against the real 5.7.37 server; `native-tls` build option as fallback |
+| The Linux webview (WebKitGTK) is slow for the grid | Benchmarked in Phase 0; core is UI-independent so the shell can change |
+| `mysql_async` lacks a needed auth plugin or protocol feature | Driver is wrapped behind our own trait; contribute upstream or carry a patch. Phase 0 found two cases already (Verify CA, custom TLS configuration) |
+| Enterprise-only behaviour cannot be tested in public CI | Manual acceptance run with the smoke tool before each release |
+| Three different webview engines behave differently | UI tests run on all three; avoid cutting-edge web features |
+| Code signing costs money for a free project | See open decisions |
+
+## 13. Open decisions
+
+1. **Stack.** Recommended: Tauri 2 + Rust + Svelte, confirmed or replaced at the end of Phase 0.
+2. **Licence.** Recommended: Apache-2.0 (permissive, includes a patent grant). Choose GPL-3.0 instead if you want to prevent closed-source forks.
+3. **Your servers' auth setup.** Is it LDAP or PAM behind the cleartext plugin, is TLS enabled on both servers, and which CA signs the server certificates? This decides what the Phase 0 test looks like.
+4. **Legacy TLS.** Recommended: do not support TLS 1.0 and 1.1. Say so if you have servers that need it.
+5. **Code signing.** macOS notarisation needs an Apple Developer account (paid yearly). Windows signing needs a certificate; free programmes for open-source projects exist and need an application. Unsigned builds work but show operating system warnings.
+6. **Name.**

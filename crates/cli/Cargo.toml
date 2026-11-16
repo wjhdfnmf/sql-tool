@@ -1,0 +1,18 @@
+[package]
+name = "sqltool-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sqltool-smoke"
+path = "src/main.rs"
+
+[dependencies]
+sqltool-core = { path = "../core" }
+sqltool-fakeserver = { path = "../fakeserver" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+rpassword = "7"

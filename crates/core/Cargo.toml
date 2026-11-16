@@ -1,0 +1,26 @@
+[package]
+name = "sqltool-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Pure-Rust MySQL/MariaDB driver. rustls + ring: no OpenSSL, no C toolchain extras.
+mysql_async = { version = "0.37", default-features = false, features = [
+    "default-rustls-ring",
+    "client_ed25519",
+] }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+# Same rustls the driver uses; needed only to recognise TLS failures, which
+# the driver reports as plain I/O errors.
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+sqltool-fakeserver = { path = "../fakeserver" }
+mysql_async = { version = "0.37", default-features = false }

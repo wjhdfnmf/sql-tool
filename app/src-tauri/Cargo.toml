@@ -1,0 +1,30 @@
+[package]
+name = "sqltool-app"
+description = "Desktop SQL client for MySQL and MariaDB."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[features]
+default = ["devtools"]
+# Serve the built UI from inside the executable. `tauri build` turns this on;
+# pass it by hand when building with plain cargo.
+custom-protocol = ["tauri/custom-protocol"]
+# Built-in fake server ("Demo server") and the unattended self-test.
+# On during development; release packaging turns it off.
+devtools = ["dep:sqltool-fakeserver"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { workspace = true }
+secrecy = "0.10"
+sqltool-core = { path = "../../crates/core" }
+sqltool-secrets = { path = "../../crates/secrets" }
+sqltool-fakeserver = { path = "../../crates/fakeserver", optional = true }

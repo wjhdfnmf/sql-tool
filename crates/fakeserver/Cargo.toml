@@ -1,0 +1,13 @@
+[package]
+name = "sqltool-fakeserver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Minimal fake MySQL server used to test client-side auth and TLS policy. Not a database."
+
+[dependencies]
+tokio = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+rcgen = "0.13"
