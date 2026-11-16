@@ -2,7 +2,9 @@
   import { format } from 'sql-formatter';
   import { adminQueries } from '../lib/admin';
   import { backend } from '../lib/backend';
-  import { separator, type MenuDef, type MenuItem } from '../lib/menu';
+  import { layout, saveLayout } from '../lib/layout.svelte';
+  import { separator, type MenuItem } from '../lib/menu';
+  import { placeIn } from '../lib/place';
   import { app, type EditorTab, type WorkspaceState } from '../lib/state.svelte';
   import {
     asUiError,
@@ -14,13 +16,11 @@
     type ObjectKind,
     type TreeTarget,
   } from '../lib/types';
-  import AdminPanel from './AdminPanel.svelte';
   import ConfirmSqlDialog from './ConfirmSqlDialog.svelte';
   import Editor from './Editor.svelte';
   import HistoryPanel from './HistoryPanel.svelte';
   import InfoPane from './InfoPane.svelte';
   import Menu from './Menu.svelte';
-  import MenuBar from './MenuBar.svelte';
   import Results from './Results.svelte';
   import SchemaEditor from './SchemaEditor.svelte';
   import SchemaTree from './SchemaTree.svelte';
@@ -33,8 +33,11 @@
   let { workspace }: Props = $props();
 
   let editors = $state<Record<string, Editor | undefined>>({});
-  let navTab = $state<'schemas' | 'admin' | 'history'>('schemas');
   let editorHeight = $state(260);
+  let historyOpen = $state(false);
+  let infoOpen = $state(false);
+  let aside = $state<HTMLElement | undefined>();
+  let strip = $state<HTMLDivElement | undefined>();
   let historyKey = $state(0);
   let main: HTMLDivElement;
   let contextMenu = $state<{ items: MenuItem[]; x: number; y: number } | null>(null);
@@ -44,7 +47,6 @@
   let confirmation = $state<{ concerns: Concern[]; resolve: (go: boolean) => void } | null>(null);
   let closing = $state<EditorTab | null>(null);
   let closeDialog: HTMLDialogElement;
-  let aboutDialog: HTMLDialogElement;
 
   const info = $derived(workspace.info);
   const tab = $derived(workspace.activeTab);
@@ -122,11 +124,65 @@
     void openAndRun(table, `SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)} LIMIT 1000;`);
   }
 
+  /** Makes a schema the default for every tab of this connection, and remembers it. */
   async function useSchema(schema: string) {
-    // In the query tab's own session, without disturbing its results.
-    await workspace.run(queryTab ?? workspace.addTab(), `USE ${quoteIdentifier(schema)}`, { kind: 'all' }, true);
-    historyKey++;
+    try {
+      await workspace.setDefaultSchema(schema);
+    } catch (e) {
+      report(asUiError(e).message);
+    }
   }
+
+  /** A tab shows its output once it has something to show; until then the editor has the room. */
+  function hasOutput(t: EditorTab): boolean {
+    return t.running || t.messages.length > 0 || t.results.length > 0;
+  }
+
+  // ---------- tabs ----------
+
+  /** Goes to the first, previous, next or last tab. */
+  function stepTab(to: 'first' | 'last' | -1 | 1) {
+    const tabs = workspace.tabs;
+    const at = tabs.findIndex((t) => t.id === workspace.activeTabId);
+    const index = to === 'first' ? 0 : to === 'last' ? tabs.length - 1 : Math.min(Math.max(at + to, 0), tabs.length - 1);
+    workspace.activeTabId = tabs[index].id;
+  }
+
+  function tabLabel(t: EditorTab): string {
+    return t.title + ((t.filePath && t.dirty) || t.designDirty ? ' •' : '');
+  }
+
+  function showTabList(e: MouseEvent) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    contextMenu = {
+      items: workspace.tabs.map(
+        (t): MenuItem => ({
+          label: tabLabel(t) + (t.running ? '  (running)' : ''),
+          checked: t.id === workspace.activeTabId,
+          action: () => (workspace.activeTabId = t.id),
+        }),
+      ),
+      x: rect.right - 240,
+      y: rect.bottom + 2,
+    };
+  }
+
+  // The tabs stay on one row; the one in front is kept in view.
+  $effect(() => {
+    void workspace.activeTabId;
+    void workspace.tabs.length;
+    const row = strip;
+    if (!row) return;
+    queueMicrotask(() => {
+      const active = row.querySelector<HTMLElement>('.editor-tab.active');
+      if (!active) return;
+      const left = active.offsetLeft - row.offsetLeft;
+      if (left < row.scrollLeft) row.scrollLeft = left - 8;
+      else if (left + active.offsetWidth > row.scrollLeft + row.clientWidth) {
+        row.scrollLeft = left + active.offsetWidth - row.clientWidth + 8;
+      }
+    });
+  });
 
   // ---------- script files ----------
 
@@ -400,91 +456,39 @@
     }
   }
 
-  // ---------- menu bar ----------
+  // ---------- the connection's menu ----------
 
-  const menus = $derived<MenuDef[]>([
-    {
-      label: 'File',
+  // There is no menu bar: it took a row, and nearly everything in it has a
+  // button, a shortcut or a right-click menu of its own. What does not is
+  // gathered here, behind one button in the row of connection tabs.
+  function showMainMenu(e: MouseEvent) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    contextMenu = {
       items: [
+        { label: 'History…', action: () => (historyOpen = true) },
+        { label: 'Connection Info', action: () => (infoOpen = true) },
+        separator,
         { label: 'New Query Tab', shortcut: 'Ctrl+T', action: () => workspace.addTab() },
         { label: 'Open SQL Script…', shortcut: 'Ctrl+O', action: () => void openScript() },
+        { label: 'Find and Replace…', shortcut: 'Ctrl+F', disabled: !!tab.design, action: () => editors[tab.id]?.openSearch() },
         separator,
-        { label: 'Save Script', shortcut: 'Ctrl+S', disabled: !!tab.design, action: () => void saveScript(tab) },
-        { label: 'Save Script As…', shortcut: 'Ctrl+Shift+S', disabled: !!tab.design, action: () => void saveScript(tab, true) },
-        separator,
-        { label: 'Close Tab', shortcut: 'Ctrl+W', action: () => requestClose(tab) },
-        { label: 'Close Connection', action: () => void app.close(workspace) },
-      ],
-    },
-    {
-      label: 'Edit',
-      items: [
-        { label: 'Undo', shortcut: 'Ctrl+Z', action: () => editors[tab.id]?.undo() },
-        { label: 'Redo', shortcut: 'Ctrl+Y', action: () => editors[tab.id]?.redo() },
-        separator,
-        { label: 'Select All', shortcut: 'Ctrl+A', action: () => editors[tab.id]?.selectAll() },
-        { label: 'Find and Replace…', shortcut: 'Ctrl+F', action: () => editors[tab.id]?.openSearch() },
-        separator,
-        { label: 'Reformat Query', shortcut: 'Ctrl+B', disabled: !!tab.design, action: reformat },
-        separator,
-        { label: 'Settings…', action: () => (app.showSettings = true) },
-      ],
-    },
-    {
-      label: 'View',
-      items: [
-        { label: 'Navigator', checked: workspace.showNavigator, action: () => (workspace.showNavigator = !workspace.showNavigator) },
-        { label: 'Output', checked: workspace.showOutput, action: () => (workspace.showOutput = !workspace.showOutput) },
-        separator,
-        { label: 'Schemas', checked: navTab === 'schemas', action: () => showNav('schemas') },
-        { label: 'Administration', checked: navTab === 'admin', action: () => showNav('admin') },
-        { label: 'History', checked: navTab === 'history', action: () => showNav('history') },
-      ],
-    },
-    {
-      label: 'Query',
-      items: [
-        { label: 'Execute (All or Selection)', shortcut: 'Ctrl+Shift+Enter', disabled: tab.running || !!tab.design, action: () => void run(tab, 'script') },
-        { label: 'Execute Current Statement', shortcut: 'Ctrl+Enter', disabled: tab.running || !!tab.design, action: () => void run(tab, 'statement') },
-        { label: 'Explain Current Statement', shortcut: 'Ctrl+Alt+X', disabled: tab.running || !!tab.design, action: () => void run(tab, 'explain') },
-        { label: 'Stop', disabled: !tab.running, action: () => void workspace.cancel(tab) },
-        separator,
-        ...rowLimits.map(
-          (option): MenuItem => ({
-            label: option.value === null ? "Don't Limit" : `Limit to ${option.label}`,
-            checked: workspace.maxRows === option.value,
-            action: () => (workspace.maxRows = option.value),
-          }),
-        ),
-      ],
-    },
-    {
-      label: 'Database',
-      items: [
-        { label: 'Manage Connections', action: () => (app.active = 'home') },
-        separator,
-        { label: 'Refresh All Schemas', action: refreshSchemas },
-        { label: 'Create Schema…', action: () => (openSchemaEditor(null)) },
-        separator,
+        { label: 'Create Schema…', action: () => openSchemaEditor(null) },
         { label: 'Create Table…', action: () => openDesigner(null) },
         { label: 'Create View…', action: () => void createFromTemplate('view') },
         { label: 'Create Stored Procedure…', action: () => void createFromTemplate('procedure') },
         { label: 'Create Function…', action: () => void createFromTemplate('function') },
+        { label: 'Refresh All Schemas', action: refreshSchemas },
+        separator,
+        ...adminQueries.map((item): MenuItem => ({ label: item.title, action: () => void openAndRun(item.title, item.sql) })),
+        separator,
+        { label: 'Settings…', action: () => (app.showSettings = true) },
+        { label: 'Keyboard Shortcuts and Help', action: () => (app.showHelp = true) },
+        separator,
+        { label: 'Close Connection', action: () => void app.close(workspace) },
       ],
-    },
-    {
-      label: 'Server',
-      items: adminQueries.map((item): MenuItem => ({ label: item.title, action: () => void openAndRun(item.title, item.sql) })),
-    },
-    {
-      label: 'Help',
-      items: [{ label: 'About and Keyboard Shortcuts', action: () => aboutDialog.showModal() }],
-    },
-  ]);
-
-  function showNav(which: typeof navTab) {
-    navTab = which;
-    workspace.showNavigator = true;
+      x: rect.right - 250,
+      y: rect.bottom + 4,
+    };
   }
 
   // ---------- keyboard ----------
@@ -503,8 +507,55 @@
   }
 
   function insertFromHistory(sql: string) {
-    const editor = editors[tab.id];
-    editor?.insert(editor.getText().trim() === '' ? sql : `\n${sql}`);
+    historyOpen = false;
+    // Into the query tab; a designer in front has no editor.
+    const target = queryTab ?? workspace.addTab();
+    workspace.activeTabId = target.id;
+    queueMicrotask(() => {
+      const editor = editors[target.id];
+      editor?.insert(editor.getText().trim() === '' ? sql : `\n${sql}`);
+    });
+  }
+
+  // ---------- pane sizes ----------
+
+  /** Drags a pane edge. `apply` gets how far the pointer has moved from where it started. */
+  function drag(e: PointerEvent, axis: 'x' | 'y', apply: (delta: number) => void) {
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    const start = axis === 'x' ? e.clientX : e.clientY;
+    const move = (m: PointerEvent) => apply((axis === 'x' ? m.clientX : m.clientY) - start);
+    const stop = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', stop);
+      saveLayout();
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', stop);
+  }
+
+  const clampNav = (width: number) => Math.min(Math.max(width, 180), Math.max(180, window.innerWidth - 420));
+  const clampInfo = (height: number) => Math.min(Math.max(height, 70), Math.max(70, (aside?.clientHeight ?? 600) - 120));
+
+  function startNavResize(e: PointerEvent) {
+    const from = layout.navWidth;
+    drag(e, 'x', (delta) => (layout.navWidth = clampNav(from + delta)));
+  }
+
+  /** The edge between the schema tree and the object info: dragging up gives the info more room. */
+  function startInfoResize(e: PointerEvent) {
+    const from = layout.infoHeight;
+    drag(e, 'y', (delta) => (layout.infoHeight = clampInfo(from - delta)));
+  }
+
+  function paneKey(e: KeyboardEvent, which: 'nav' | 'info') {
+    const step = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -24 : e.key === 'ArrowRight' || e.key === 'ArrowUp' ? 24 : 0;
+    if (step === 0) return;
+    if (which === 'nav' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) layout.navWidth = clampNav(layout.navWidth + step);
+    else if (which === 'info' && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) layout.infoHeight = clampInfo(layout.infoHeight + step);
+    else return;
+    saveLayout();
+    e.preventDefault();
   }
 
   function startResize(e: PointerEvent) {
@@ -539,32 +590,26 @@
 <svelte:window onkeydown={onWindowKey} />
 
 <div class="workspace">
-  <MenuBar {menus} />
-
-  <div class="toolbar main-toolbar" role="toolbar" aria-label="Main">
-    <button onclick={() => workspace.addTab()} title="New query tab (Ctrl+T)">New Tab</button>
-    <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open Script</button>
-    <span class="divider"></span>
-    <button onclick={() => (openSchemaEditor(null))} title="Create a new schema">Create Schema</button>
-    <button onclick={() => openDesigner(null)} title="Design a new table">Create Table</button>
-    <button onclick={() => createFromTemplate('view')} title="Start a CREATE VIEW script">Create View</button>
-    <button onclick={() => createFromTemplate('procedure')} title="Start a CREATE PROCEDURE script">Create Procedure</button>
+  <!-- Shown at the end of the row of connection tabs while this connection is in front. -->
+  <div class="row-tools" use:placeIn={app.toolsHost} hidden={app.active !== info.id}>
+    <button
+      class="quiet"
+      aria-pressed={workspace.showNavigator}
+      title="Show or hide the navigator (schemas and object info)"
+      onclick={() => (workspace.showNavigator = !workspace.showNavigator)}>Navigator</button
+    >
+    <button
+      class="quiet"
+      aria-pressed={workspace.showOutput}
+      title="Show or hide the output (messages and results)"
+      onclick={() => (workspace.showOutput = !workspace.showOutput)}>Output</button
+    >
+    <button class="quiet menu-button" aria-label="Menu" aria-haspopup="menu" title="History, connection info, create, server information, settings, help" onclick={showMainMenu}>&#9776;</button>
   </div>
 
-  <div class="columns" class:no-navigator={!workspace.showNavigator}>
-    <aside hidden={!workspace.showNavigator} aria-label="Navigator">
-      <div class="side-tabs" role="tablist" aria-label="Navigator">
-        <button role="tab" aria-selected={navTab === 'schemas'} class:active={navTab === 'schemas'} onclick={() => (navTab = 'schemas')}>
-          Schemas
-        </button>
-        <button role="tab" aria-selected={navTab === 'admin'} class:active={navTab === 'admin'} onclick={() => (navTab = 'admin')}>
-          Administration
-        </button>
-        <button role="tab" aria-selected={navTab === 'history'} class:active={navTab === 'history'} onclick={() => (navTab = 'history')}>
-          History
-        </button>
-      </div>
-      <div class="side-body" hidden={navTab !== 'schemas'}>
+  <div class="columns">
+    <aside bind:this={aside} hidden={!workspace.showNavigator} style:width={`${layout.navWidth}px`} aria-label="Navigator">
+      <div class="side-body">
         <SchemaTree
           workspaceId={info.id}
           current={workspace.database}
@@ -575,56 +620,75 @@
           onuse={useSchema}
           oncontext={(target, x, y) => (contextMenu = { items: treeMenu(target), x, y })}
           onloaded={(schema) => void workspace.loadCatalog(schema)}
+          oncreate={(kind, schema) => (kind === 'table' ? openDesigner(null, schema) : void createFromTemplate(kind, schema))}
         />
       </div>
-      <div class="side-body" hidden={navTab !== 'admin'}>
-        <AdminPanel onrun={openAndRun} />
-      </div>
-      <div class="side-body" hidden={navTab !== 'history'}>
-        <HistoryPanel refreshKey={historyKey} oninsert={insertFromHistory} />
-      </div>
-      <div class="info-pane">
+      <!-- A focusable separator is an interactive widget (it resizes with the arrow keys). -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="splitter"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize the object info"
+        aria-valuenow={layout.infoHeight}
+        tabindex="0"
+        onpointerdown={startInfoResize}
+        onkeydown={(e) => paneKey(e, 'info')}
+      ></div>
+      <div class="info-pane" style:height={`${layout.infoHeight}px`}>
         <InfoPane {workspace} oninsert={(name) => insertIntoEditor(quoteIdentifier(name))} />
       </div>
     </aside>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div
+      class="splitter upright"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the navigator"
+      aria-valuenow={layout.navWidth}
+      tabindex="0"
+      hidden={!workspace.showNavigator}
+      onpointerdown={startNavResize}
+      onkeydown={(e) => paneKey(e, 'nav')}
+    ></div>
 
     <div class="main" bind:this={main}>
       <div class="editor-tabs">
-        <div class="tab-strip" role="tablist" aria-label="Query and designer tabs">
+        <div class="tab-strip" role="tablist" aria-label="Query and designer tabs" bind:this={strip}>
           {#each workspace.tabs as t (t.id)}
-            <div class="editor-tab" class:active={t.id === workspace.activeTabId}>
+            <div class="editor-tab" class:active={t.id === workspace.activeTabId} class:running={t.running}>
               <button
                 role="tab"
                 aria-selected={t.id === workspace.activeTabId}
-                title={t.design ? (t.designDirty ? `${t.title}: changes not applied` : t.title) : (t.filePath ?? t.title)}
+                title={t.running
+                  ? `${t.title}: a query is running`
+                  : t.design
+                    ? t.designDirty
+                      ? `${t.title}: changes not applied`
+                      : t.title
+                    : (t.filePath ?? t.title)}
                 onclick={() => (workspace.activeTabId = t.id)}
               >
-                {t.title}{(t.filePath && t.dirty) || t.designDirty ? ' •' : ''}{t.running ? ' …' : ''}
+                {#if t.running}<span class="pulse" aria-hidden="true"></span>{/if}{tabLabel(t)}
               </button>
               <button class="quiet close" aria-label={`Close ${t.title}`} title="Close tab (Ctrl+W)" onclick={() => requestClose(t)}>&#215;</button>
             </div>
           {/each}
           <button class="quiet add" aria-label="New query tab" title="New query tab (Ctrl+T)" onclick={() => workspace.addTab()}>+</button>
         </div>
-        <div class="toggles">
-          <button
-            class="quiet"
-            aria-pressed={workspace.showNavigator}
-            title="Show or hide the navigator"
-            onclick={() => (workspace.showNavigator = !workspace.showNavigator)}>Navigator</button
-          >
-          <button
-            class="quiet"
-            aria-pressed={workspace.showOutput}
-            title="Show or hide the output"
-            onclick={() => (workspace.showOutput = !workspace.showOutput)}>Output</button
-          >
+        <div class="tab-nav">
+          <button class="quiet" aria-label="First tab" title="First tab" disabled={workspace.tabs[0]?.id === workspace.activeTabId} onclick={() => stepTab('first')}>&laquo;</button>
+          <button class="quiet" aria-label="Previous tab" title="Previous tab" disabled={workspace.tabs[0]?.id === workspace.activeTabId} onclick={() => stepTab(-1)}>&lsaquo;</button>
+          <button class="quiet" aria-label="Next tab" title="Next tab" disabled={workspace.tabs.at(-1)?.id === workspace.activeTabId} onclick={() => stepTab(1)}>&rsaquo;</button>
+          <button class="quiet" aria-label="Last tab" title="Last tab" disabled={workspace.tabs.at(-1)?.id === workspace.activeTabId} onclick={() => stepTab('last')}>&raquo;</button>
+          <button class="quiet" aria-label="All open tabs" aria-haspopup="menu" title={`All open tabs (${workspace.tabs.length})`} onclick={showTabList}>&#9662;</button>
         </div>
       </div>
 
       <div class="toolbar" role="toolbar" aria-label="Editor" hidden={!!tab.design}>
         <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open</button>
         <button onclick={() => saveScript(tab)} title="Save this script (Ctrl+S)">Save</button>
+        <button onclick={() => saveScript(tab, true)} title="Save this script under another name (Ctrl+Shift+S)">Save As</button>
         <span class="divider"></span>
         <button class="primary" disabled={tab.running} title="Execute the selection, or everything (Ctrl+Shift+Enter)" onclick={() => run(tab, 'script')}>
           &#9654; Execute
@@ -660,12 +724,8 @@
             {/if}
           </div>
         {:else}
-          <div
-            class="editor-area"
-            class:fill={!workspace.showOutput}
-            style:height={workspace.showOutput ? `${editorHeight}px` : undefined}
-            hidden={t.id !== workspace.activeTabId}
-          >
+          {@const split = workspace.showOutput && hasOutput(t)}
+          <div class="editor-area" class:fill={!split} style:height={split ? `${editorHeight}px` : undefined} hidden={t.id !== workspace.activeTabId}>
             <Editor
               bind:this={editors[t.id]}
               value={t.text}
@@ -679,7 +739,6 @@
         {/if}
       {/each}
 
-      <!-- A focusable separator is an interactive widget (it resizes with the arrow keys). -->
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="splitter"
@@ -688,14 +747,14 @@
         aria-label="Resize editor"
         aria-valuenow={editorHeight}
         tabindex="0"
-        hidden={!workspace.showOutput || !!tab.design}
+        hidden={!workspace.showOutput || !!tab.design || !hasOutput(tab)}
         onpointerdown={startResize}
         onkeydown={resizeByKey}
       ></div>
 
       {#each workspace.tabs as t (t.id)}
         {#if !t.design}
-          <div class="results-area" hidden={!workspace.showOutput || t.id !== workspace.activeTabId}>
+          <div class="results-area" hidden={!workspace.showOutput || !hasOutput(t) || t.id !== workspace.activeTabId}>
             <Results {workspace} tab={t} />
           </div>
         {/if}
@@ -769,34 +828,46 @@
   </div>
 </dialog>
 
-<dialog bind:this={aboutDialog} aria-labelledby="about-title">
-  <div class="prompt about">
-    <h2 id="about-title">SQL Tool {app.info?.version ?? ''}</h2>
-    <p class="muted">A free, open-source SQL client for MySQL and MariaDB. Early alpha.</p>
-    <table>
-      <tbody>
-        <tr><td>Execute selection or everything</td><td>Ctrl+Shift+Enter</td></tr>
-        <tr><td>Execute statement under the cursor</td><td>Ctrl+Enter</td></tr>
-        <tr><td>Explain statement under the cursor</td><td>Ctrl+Alt+X</td></tr>
-        <tr><td>Reformat query</td><td>Ctrl+B</td></tr>
-        <tr><td>New query tab</td><td>Ctrl+T</td></tr>
-        <tr><td>Close tab</td><td>Ctrl+W</td></tr>
-        <tr><td>Open script</td><td>Ctrl+O</td></tr>
-        <tr><td>Save script, Save as</td><td>Ctrl+S, Ctrl+Shift+S</td></tr>
-        <tr><td>Find and replace</td><td>Ctrl+F</td></tr>
-        <tr><td>Comment or uncomment lines</td><td>Ctrl+/</td></tr>
-        <tr><td>Results: select cells</td><td>Drag, Shift+Click, Shift+Arrows</td></tr>
-        <tr><td>Results: select rows, columns, everything</td><td>Shift+Space, Ctrl+Space, Ctrl+A</td></tr>
-        <tr><td>Results: copy, copy with column names</td><td>Ctrl+C, Ctrl+Shift+C</td></tr>
-        <tr><td>Results: fit a column to its contents</td><td>Double-click the header's edge</td></tr>
-        <tr><td>Schema tree: actions menu</td><td>Right-click, or Shift+F10</td></tr>
-      </tbody>
-    </table>
-    <div class="buttons">
-      <button class="primary" onclick={() => aboutDialog.close()}>Close</button>
+{#if historyOpen}
+  <dialog use:modal class="panel-dialog" aria-labelledby="history-title" onclose={() => (historyOpen = false)}>
+    <div class="panel-head">
+      <h2 id="history-title">History</h2>
+      <span class="muted">Double-click a statement, or use its button, to put it in the editor.</span>
+      <span class="spacer"></span>
+      <button onclick={() => (historyOpen = false)}>Close</button>
     </div>
-  </div>
-</dialog>
+    <div class="panel-body">
+      <HistoryPanel refreshKey={historyKey} oninsert={insertFromHistory} />
+    </div>
+  </dialog>
+{/if}
+
+{#if infoOpen}
+  <dialog use:modal aria-labelledby="info-title" onclose={() => (infoOpen = false)}>
+    <div class="prompt about">
+      <h2 id="info-title">{info.name}</h2>
+      <table>
+        <tbody>
+          <tr><td>Host</td><td>{info.host}</td></tr>
+          <tr><td>Logged in as</td><td>{info.info.currentUser}</td></tr>
+          <tr><td>Server</td><td>{serverLabel(info.info.version)}</td></tr>
+          <tr><td>Version</td><td>{info.info.version.raw}</td></tr>
+          {#if info.info.versionComment}<tr><td>Edition</td><td>{info.info.versionComment}</td></tr>{/if}
+          <tr><td>Connection id</td><td>{info.info.connectionId}</td></tr>
+          <tr><td>Encryption</td><td>{tls ?? 'None'}</td></tr>
+          {#if info.info.tlsCipher}<tr><td>Cipher</td><td>{info.info.tlsCipher}</td></tr>{/if}
+          <tr><td>Verification</td><td>{security.text}</td></tr>
+          <tr><td>Default schema</td><td>{workspace.database ?? 'none selected'}</td></tr>
+          <tr><td>Read-only</td><td>{info.readOnly ? 'Yes' : 'No'}</td></tr>
+          <tr><td>Marked as production</td><td>{info.production ? 'Yes' : 'No'}</td></tr>
+        </tbody>
+      </table>
+      <div class="buttons">
+        <button class="primary" onclick={() => (infoOpen = false)}>Close</button>
+      </div>
+    </div>
+  </dialog>
+{/if}
 
 <style>
   .workspace {
@@ -806,58 +877,56 @@
     flex-direction: column;
   }
 
-  .columns {
-    flex: 1;
-    min-height: 0;
-    display: grid;
-    grid-template-columns: 290px minmax(0, 1fr);
-  }
-
-  .columns.no-navigator {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  aside {
+  .row-tools {
     display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-right: 1px solid var(--border);
-    background: var(--panel);
+    align-items: center;
+    gap: 2px;
   }
 
-  .side-tabs {
-    flex: none;
-    display: flex;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .side-tabs button {
-    flex: 1;
-    border: none;
-    border-radius: 0;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    padding: 6px 4px;
+  .row-tools button {
+    padding: 2px 9px;
+    font-size: 12px;
     color: var(--muted);
   }
 
-  .side-tabs button.active {
-    border-bottom-color: var(--accent);
+  .row-tools button[aria-pressed='true'] {
+    background: var(--bg);
+    border-color: var(--border);
     color: var(--text);
-    font-weight: 600;
+  }
+
+  .row-tools .menu-button {
+    font-size: 15px;
+    line-height: 18px;
+    color: var(--text);
+  }
+
+  .columns {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
+  aside {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--panel);
   }
 
   .side-body {
-    flex: 3;
-    min-height: 0;
+    flex: 1;
+    min-height: 60px;
   }
 
   .info-pane {
-    flex: 2;
-    min-height: 120px;
+    flex: none;
+    min-height: 0;
   }
 
   .main {
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-width: 0;
@@ -879,16 +948,62 @@
     align-items: stretch;
     gap: 2px;
     padding: 4px 8px 0;
-    /* No scroll bar: tabs that do not fit go onto another row. */
-    flex-wrap: wrap;
+    /* One row, no scroll bar. Tabs that do not fit are reached with the
+       arrows and the list at the end of the row. */
+    overflow: hidden;
   }
 
   .editor-tab {
+    flex: none;
     display: flex;
     align-items: center;
     border: 1px solid transparent;
+    border-top-width: 2px;
     border-bottom: none;
     border-radius: 5px 5px 0 0;
+  }
+
+  /* A tab with a query running stands out wherever it is in the row. */
+  .editor-tab.running {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+
+  .pulse {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    50% {
+      opacity: 0.25;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pulse {
+      animation: none;
+    }
+  }
+
+  .tab-nav {
+    flex: none;
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    border-left: 1px solid var(--border);
+  }
+
+  .tab-nav button {
+    padding: 0 6px;
+    font-size: 15px;
+    line-height: 22px;
+    color: var(--muted);
   }
 
   .editor-tab > button:first-child {
@@ -903,8 +1018,7 @@
   .editor-tab.active {
     background: var(--bg);
     border-color: var(--border);
-    margin-bottom: -1px;
-    padding-bottom: 1px;
+    border-top-color: var(--accent);
     font-weight: 600;
   }
 
@@ -917,26 +1031,8 @@
   }
 
   .add {
-    align-self: center;
-  }
-
-  .toggles {
     flex: none;
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 0 8px;
-  }
-
-  .toggles button {
-    padding: 2px 8px;
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  .toggles button[aria-pressed='true'] {
-    background: var(--panel-2);
-    color: var(--text);
+    align-self: center;
   }
 
   .toolbar {
@@ -948,10 +1044,6 @@
     border-bottom: 1px solid var(--border);
     /* No scroll bar: buttons that do not fit go onto another row. */
     flex-wrap: wrap;
-  }
-
-  .main-toolbar {
-    background: var(--panel);
   }
 
   .toolbar button {
@@ -1008,6 +1100,38 @@
   .splitter:hover,
   .splitter:focus-visible {
     background: var(--accent);
+  }
+
+  /* The edge between the navigator and the editor. */
+  .splitter.upright {
+    width: 6px;
+    height: auto;
+    cursor: col-resize;
+    border-top: none;
+    border-bottom: none;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+
+  dialog.panel-dialog {
+    width: min(760px, calc(100vw - 32px));
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 14px 16px 6px;
+  }
+
+  .panel-head h2 {
+    margin: 0;
+    font-size: 16px;
+  }
+
+  .panel-body {
+    height: min(60vh, 560px);
+    border-top: 1px solid var(--border);
   }
 
   .results-area {
@@ -1120,12 +1244,16 @@
     border-bottom: 1px solid var(--border);
   }
 
+  .prompt td:first-child {
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
   .prompt td:last-child {
     text-align: right;
-    font-family: var(--mono);
-    font-size: 12px;
-    white-space: nowrap;
     padding-left: 16px;
+    overflow-wrap: anywhere;
+    user-select: text;
   }
 
   .buttons {

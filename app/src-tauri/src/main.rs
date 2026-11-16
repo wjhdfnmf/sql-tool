@@ -74,6 +74,10 @@ struct Workspace {
     name: String,
     /// Refuse anything that is not a read.
     read_only: bool,
+    /// The default schema of the connection as the user sees it: one for all
+    /// its tabs, although each tab has a session of its own. A tab adopts it
+    /// when its session is opened and again before each run.
+    default_schema: Mutex<Option<String>>,
     /// Used for the schema browser, so it stays responsive while tabs run.
     utility: tokio::sync::Mutex<Session>,
     tabs: tokio::sync::Mutex<HashMap<String, Arc<Tab>>>,
@@ -88,6 +92,25 @@ impl Workspace {
         Ok(session)
     }
 
+    fn default_schema(&self) -> Option<String> {
+        self.default_schema.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    fn set_default_schema(&self, schema: Option<String>) {
+        *self.default_schema.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = schema;
+    }
+
+    /// Selects the connection's default schema in a tab's session, if it is
+    /// not already selected there. A schema that has since been dropped is
+    /// left unselected; the statement that needs it will say so.
+    async fn adopt_default_schema(&self, session: &mut Session) {
+        if let Some(schema) = self.default_schema() {
+            if session.database() != Some(schema.as_str()) {
+                let _ = session.use_database(&schema).await;
+            }
+        }
+    }
+
     async fn tab(&self, tab_id: &str) -> Result<Arc<Tab>, Error> {
         if let Some(tab) = self.tabs.lock().await.get(tab_id) {
             return Ok(tab.clone());
@@ -98,6 +121,7 @@ impl Workspace {
         if self.read_only {
             session.set_read_only().await?;
         }
+        self.adopt_default_schema(&mut session).await;
         let tab = Arc::new(Tab {
             canceller: session.canceller(),
             session: tokio::sync::Mutex::new(session),
@@ -303,6 +327,7 @@ async fn open_workspace(
             profile,
             name,
             read_only,
+            default_schema: Mutex::new(dto.database.clone()),
             utility: tokio::sync::Mutex::new(session),
             tabs: tokio::sync::Mutex::new(HashMap::new()),
         }),
@@ -543,6 +568,7 @@ async fn run(
             ))
         }
     }
+    workspace.adopt_default_schema(&mut session).await;
     let settings = state.settings();
     let query_timeout = settings.query_timeout();
 
@@ -690,6 +716,8 @@ async fn run(
         }
         if split::first_keyword(&statement.text) == "USE" {
             if let Ok(name) = session.current_database().await {
+                // USE in a script changes the default for the whole connection.
+                workspace.set_default_schema(name.clone());
                 let _ = on_event.send(RunMsg::Database { name });
             }
         }
@@ -704,6 +732,16 @@ async fn run(
         failed,
         elapsed_ms: run_started.elapsed().as_millis() as u64,
     });
+    Ok(())
+}
+
+/// Makes `schema` the default for every tab of the connection. Checked
+/// against the server first, so a schema that does not exist is refused here.
+#[tauri::command]
+async fn set_default_schema(state: State<'_, AppState>, workspace_id: u64, schema: String) -> Result<(), UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    workspace.utility().await?.use_database(&schema).await?;
+    workspace.set_default_schema(Some(schema));
     Ok(())
 }
 
@@ -1449,6 +1487,7 @@ fn main() {
             disconnect,
             close_tab,
             run,
+            set_default_schema,
             cancel,
             get_rows,
             get_cell,

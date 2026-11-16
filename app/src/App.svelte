@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import HelpDialog from './components/HelpDialog.svelte';
   import Home from './components/Home.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import Workspace from './components/Workspace.svelte';
@@ -44,7 +45,14 @@
         >
       </div>
     {/each}
-    <button class="tab settings" title="Themes, timeouts and other settings" onclick={() => (app.showSettings = true)}>Settings</button>
+    <!-- The connection in front shows its own buttons here: its menu, and Navigator and Output. -->
+    <span class="end" bind:this={app.toolsHost} hidden={app.active === 'home'}></span>
+    {#if app.active === 'home'}
+      <span class="end">
+        <button class="tab" title="Themes, timeouts and other settings" onclick={() => (app.showSettings = true)}>Settings</button>
+        <button class="tab" title="Keyboard shortcuts and where things are" onclick={() => (app.showHelp = true)}>Help</button>
+      </span>
+    {/if}
   </nav>
 
   {#if loadError}
@@ -63,6 +71,10 @@
 
 {#if app.showSettings}
   <SettingsDialog onclose={() => (app.showSettings = false)} />
+{/if}
+
+{#if app.showHelp}
+  <HelpDialog onclose={() => (app.showHelp = false)} />
 {/if}
 
 <style>
@@ -85,9 +97,18 @@
   }
 
   /* Pushed to the far end of the strip. */
-  .tab.settings {
+  .end {
+    display: flex;
+    gap: 2px;
     margin-left: auto;
+  }
+
+  .end .tab {
     color: var(--muted);
+  }
+
+  .end {
+    align-items: center;
   }
 
   .tab,

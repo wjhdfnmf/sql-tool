@@ -298,6 +298,10 @@ export const mockBackend: Backend = {
   cancel: async (_workspaceId, tabId) => {
     cancelled.add(tabId);
   },
+  setDefaultSchema: async (_workspaceId, schema) => {
+    await wait(80);
+    if (!(schema in schemas)) throw fail('server', `server error 1049 (42000): Unknown database '${schema}'`);
+  },
   getRows: async (resultId, offset, count) => {
     await wait(4);
     const result = results.get(resultId);

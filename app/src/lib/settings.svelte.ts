@@ -20,14 +20,36 @@ export const defaultSettings: Settings = {
   resultMemoryMb: 512,
 };
 
-export const themes: { value: string; label: string; note: string }[] = [
-  { value: 'system', label: 'Follow the system', note: 'Light or dark, whichever the operating system is set to' },
-  { value: 'light', label: 'Light', note: '' },
-  { value: 'dark', label: 'Dark', note: '' },
-  { value: 'midnight', label: 'Midnight', note: 'A darker, bluer dark theme' },
-  { value: 'sepia', label: 'Sepia', note: 'A warm, low-glare light theme' },
-  { value: 'contrast', label: 'High contrast', note: 'Black background, strong borders' },
+export interface Theme {
+  value: string;
+  label: string;
+  note: string;
+  group: 'Automatic' | 'Light' | 'Dark' | 'Bold';
+}
+
+// Every colour pair in every theme is checked for contrast (text, each
+// syntax colour on the background, on a selection and on the current line,
+// selections, pending edits), so the editor reads clearly in all of them.
+export const themes: Theme[] = [
+  { value: 'system', label: 'Follow the system', note: 'Light or dark, whichever the operating system is set to', group: 'Automatic' },
+  { value: 'light', label: 'Light', note: 'White with blue', group: 'Light' },
+  { value: 'mist', label: 'Mist', note: 'Soft cool greys and blue', group: 'Light' },
+  { value: 'sage', label: 'Sage', note: 'Soft greens', group: 'Light' },
+  { value: 'sepia', label: 'Sepia', note: 'Warm and low-glare', group: 'Light' },
+  { value: 'rose', label: 'Rose', note: 'Soft pinks', group: 'Light' },
+  { value: 'lavender', label: 'Lavender', note: 'Soft purples', group: 'Light' },
+  { value: 'dark', label: 'Dark', note: 'Charcoal with blue', group: 'Dark' },
+  { value: 'midnight', label: 'Midnight', note: 'Blue-black', group: 'Dark' },
+  { value: 'graphite', label: 'Graphite', note: 'Charcoal and steel with teal', group: 'Dark' },
+  { value: 'forest', label: 'Forest', note: 'Deep greens', group: 'Dark' },
+  { value: 'orchid', label: 'Orchid', note: 'Plum with pink', group: 'Dark' },
+  { value: 'ember', label: 'Ember', note: 'Near-black with orange', group: 'Bold' },
+  { value: 'neon', label: 'Neon', note: 'Violet-black with vivid pink and cyan', group: 'Bold' },
+  { value: 'cobalt', label: 'Cobalt', note: 'Deep blue with yellow', group: 'Bold' },
+  { value: 'contrast', label: 'High contrast', note: 'Black with strong borders, for the most legibility', group: 'Bold' },
 ];
+
+export const themeGroups: Theme['group'][] = ['Automatic', 'Light', 'Dark', 'Bold'];
 
 /** Where the last theme is remembered, so the window opens in it instead of flashing the default first. */
 const THEME_CACHE = 'sqltool.theme';

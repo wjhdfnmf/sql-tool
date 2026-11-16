@@ -9,9 +9,13 @@
   }
 
   let { workspace, tab }: Props = $props();
+
+  /** Where the result in front puts its filter, export and copy controls: the end of the tab row. */
+  let toolsHost = $state<HTMLElement | undefined>();
 </script>
 
 <section class="results">
+  <div class="tab-row">
   <div class="tabs" role="tablist" aria-label="Results">
     <button
       role="tab"
@@ -33,6 +37,8 @@
         <span class="muted">{formatCount(result.rows)}{result.done ? '' : '…'}</span>
       </button>
     {/each}
+  </div>
+  <div class="tools" bind:this={toolsHost}></div>
   </div>
 
   <div class="panel" hidden={tab.activeResult !== 'messages'}>
@@ -64,7 +70,7 @@
 
   {#each tab.results as result (result.id)}
     <div class="panel result-panel" hidden={tab.activeResult !== result.id}>
-      <ResultView {workspace} {tab} {result} />
+      <ResultView {workspace} {tab} {result} {toolsHost} active={tab.activeResult === result.id} />
     </div>
   {/each}
 </section>
@@ -77,15 +83,30 @@
     min-height: 0;
   }
 
-  .tabs {
+  .tab-row {
     flex: none;
+    display: flex;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .tabs {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     gap: 2px;
     padding: 4px 8px 0;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
     /* No scroll bar: tabs that do not fit go onto another row. */
     flex-wrap: wrap;
+  }
+
+  /* Filled by the result in front. Empty while Messages is. */
+  .tools {
+    flex: none;
+    margin-left: auto;
+    padding: 3px 8px;
   }
 
   .tabs button {

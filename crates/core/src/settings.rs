@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
-pub const THEMES: [&str; 6] = ["system", "light", "dark", "midnight", "sepia", "contrast"];
+pub const THEMES: [&str; 16] = [
+    "system", "light", "dark", "midnight", "sepia", "contrast", "mist", "rose", "lavender", "sage", "graphite", "forest",
+    "orchid", "ember", "neon", "cobalt",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

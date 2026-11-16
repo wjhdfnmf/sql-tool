@@ -60,6 +60,8 @@ export interface Backend {
     onEvent: (message: RunMsg) => void,
   ): Promise<void>;
   cancel(workspaceId: number, tabId: string): Promise<void>;
+  /** Makes a schema the default for every tab of the connection. Rejects if it does not exist. */
+  setDefaultSchema(workspaceId: number, schema: string): Promise<void>;
   /** Rows as raw bytes: u32 row count, then length-prefixed cells. */
   getRows(resultId: number, offset: number, count: number): Promise<Uint8Array>;
   getCell(resultId: number, row: number, column: number): Promise<CellValue>;
@@ -128,6 +130,7 @@ const tauriBackend: Backend = {
     return invoke('run', { workspaceId, tabId, script, mode, maxRows, onEvent: channel });
   },
   cancel: (workspaceId, tabId) => invoke('cancel', { workspaceId, tabId }),
+  setDefaultSchema: (workspaceId, schema) => invoke('set_default_schema', { workspaceId, schema }),
   getRows: async (resultId, offset, count) => {
     const data = await invoke<ArrayBuffer | number[]>('get_rows', { resultId, offset, count });
     return data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data);

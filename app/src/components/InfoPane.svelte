@@ -1,7 +1,7 @@
 <script lang="ts">
   import { backend } from '../lib/backend';
   import type { WorkspaceState } from '../lib/state.svelte';
-  import { asUiError, serverLabel, type ColumnEntry, type SchemaDefaults, type TableKeys } from '../lib/types';
+  import { asUiError, type ColumnEntry, type SchemaDefaults, type TableKeys } from '../lib/types';
 
   interface Props {
     workspace: WorkspaceState;
@@ -11,7 +11,6 @@
 
   let { workspace, oninsert }: Props = $props();
 
-  let tab = $state<'object' | 'session'>('object');
   let columns = $state<ColumnEntry[]>([]);
   let defaults = $state<SchemaDefaults | null>(null);
   let keys = $state<TableKeys | null>(null);
@@ -59,28 +58,12 @@
     };
   });
 
-  const security = $derived(
-    info.security === 'verified'
-      ? 'Server verified'
-      : info.security === 'pinned'
-        ? 'Pinned certificate'
-        : info.security === 'unverified'
-          ? 'Server not verified'
-          : 'Not encrypted',
-  );
 </script>
 
 <section class="info">
-  <div class="tabs" role="tablist" aria-label="Information">
-    <button role="tab" aria-selected={tab === 'object'} class:active={tab === 'object'} onclick={() => (tab = 'object')}>
-      Object info
-    </button>
-    <button role="tab" aria-selected={tab === 'session'} class:active={tab === 'session'} onclick={() => (tab = 'session')}>
-      Session
-    </button>
-  </div>
+  <div class="caption">Object info</div>
 
-  <div class="body" hidden={tab !== 'object'}>
+  <div class="body">
     {#if !target}
       <p class="muted">Click a table above to see its columns and indexes.</p>
     {:else}
@@ -151,36 +134,6 @@
     {/if}
   </div>
 
-  <div class="body" hidden={tab !== 'session'}>
-    <dl>
-      <dt>Connection</dt>
-      <dd>{info.name}</dd>
-      <dt>Host</dt>
-      <dd>{info.host}</dd>
-      <dt>Logged in as</dt>
-      <dd>{info.info.currentUser}</dd>
-      <dt>Server</dt>
-      <dd>{serverLabel(info.info.version)}</dd>
-      <dt>Version</dt>
-      <dd>{info.info.version.raw}</dd>
-      {#if info.info.versionComment}
-        <dt>Edition</dt>
-        <dd>{info.info.versionComment}</dd>
-      {/if}
-      <dt>Connection id</dt>
-      <dd>{info.info.connectionId}</dd>
-      <dt>Encryption</dt>
-      <dd>{info.info.tlsVersion ? info.info.tlsVersion.replace('TLSv', 'TLS ') : 'None'}</dd>
-      {#if info.info.tlsCipher}
-        <dt>Cipher</dt>
-        <dd>{info.info.tlsCipher}</dd>
-      {/if}
-      <dt>Verification</dt>
-      <dd>{security}</dd>
-      <dt>Default schema</dt>
-      <dd>{workspace.database ?? 'none selected'}</dd>
-    </dl>
-  </div>
 </section>
 
 <style>
@@ -191,27 +144,15 @@
     min-height: 0;
   }
 
-  .tabs {
+  .caption {
     flex: none;
-    display: flex;
-    border-top: 1px solid var(--border);
+    padding: 4px 10px;
     border-bottom: 1px solid var(--border);
-  }
-
-  .tabs button {
-    flex: 1;
-    border: none;
-    border-radius: 0;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    padding: 5px;
-    color: var(--muted);
-  }
-
-  .tabs button.active {
-    border-bottom-color: var(--accent);
-    color: var(--text);
+    font-size: 11px;
     font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
   }
 
   .body {

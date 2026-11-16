@@ -2,6 +2,7 @@
   import { backend } from '../lib/backend';
   import type { CellPosition, GridOverlay } from '../lib/grid';
   import { separator, type MenuItem } from '../lib/menu';
+  import { placeIn } from '../lib/place';
   import type { EditorTab, ResultTab, WorkspaceState } from '../lib/state.svelte';
   import {
     asUiError,
@@ -23,9 +24,15 @@
     workspace: WorkspaceState;
     tab: EditorTab;
     result: ResultTab;
+    /** The end of the results tab row, where this result's controls are shown while it is in front. */
+    toolsHost: HTMLElement | undefined;
+    /** This result is the one in front. */
+    active: boolean;
   }
 
-  let { workspace, tab, result }: Props = $props();
+  let { workspace, tab, result, toolsHost, active }: Props = $props();
+
+
 
   // ---------- sorting and filtering ----------
 
@@ -385,6 +392,8 @@
       separator,
       { label: 'Fit Column to Contents', shortcut: 'Double-click edge', action: () => grid?.autoSizeColumn(column) },
       { label: 'Fit All Columns', action: () => grid?.autoSizeAll() },
+      // Also here, so a row can be added to a result that has none to right-click.
+      ...(target ? [separator, { label: 'Add Row…', action: () => (newRow = {}) }] : []),
     ];
   }
 
@@ -400,7 +409,7 @@
 </script>
 
 <div class="result">
-  <div class="bar">
+  <div class="bar" use:placeIn={toolsHost} hidden={!active}>
     <input
       type="search"
       class="filter"
@@ -433,17 +442,11 @@
     <button disabled={!selection} onclick={() => void copy('tsv')} title="Copy the selected cells (Ctrl+C). Right-click the grid for CSV, SQL INSERT and other forms.">
       Copy
     </button>
-    <span class="divider"></span>
-    {#if target}
-      <span class="muted" title={`Changes go to ${target.schema}.${target.table}`}>Editable</span>
-      <button onclick={() => (newRow = {})}>Add Row</button>
-      {#if pending > 0}
-        <span class="pending">{pending} pending {pending === 1 ? 'change' : 'changes'}</span>
-        <button class="primary" onclick={openReview}>Review and Apply&hellip;</button>
-        <button onclick={discard}>Discard</button>
-      {/if}
-    {:else if whyNot}
-      <span class="muted" title={whyNot}>Read-only result</span>
+    {#if target && pending > 0}
+      <span class="divider"></span>
+      <span class="pending">{pending} pending {pending === 1 ? 'change' : 'changes'}</span>
+      <button class="primary" onclick={openReview}>Review and Apply&hellip;</button>
+      <button onclick={discard}>Discard</button>
     {/if}
   </div>
 
@@ -465,6 +468,13 @@
   </div>
 
   <footer>
+    {#if !result.done}
+      <span class="state loading" role="status" aria-label="Loading rows" title="Rows are still arriving"></span>
+    {:else if result.truncated}
+      <span class="state partial" role="img" aria-label="Stopped at the row limit" title="Complete up to the row limit; more rows exist">&#9888;</span>
+    {:else}
+      <span class="state complete" role="img" aria-label="Complete" title="Every row has arrived">&#10003;</span>
+    {/if}
     <span>
       {#if visibleRows !== null && visibleRows !== result.rows}
         {formatCount(visibleRows)} of {formatCount(result.rows)} rows shown
@@ -494,7 +504,9 @@
     {:else if focusCell}
       <span class="muted">Row {formatCount(focusCell.row + 1)}, {result.columns[focusCell.column]?.name}</span>
     {/if}
-    <span class="muted hint-text">Drag to select &middot; Ctrl+C copies &middot; right-click for more</span>
+    <span class="muted hint-text" title={whyNot ? `This result cannot be edited: ${whyNot}` : undefined}>
+      Drag to select &middot; Ctrl+C copies &middot; right-click for more{target ? ', including Add Row' : ''}
+    </span>
   </footer>
 </div>
 
@@ -579,14 +591,11 @@
     min-height: 0;
   }
 
+  /* Shown at the end of the results tab row (see `placeIn`), not here. */
   .bar {
-    flex: none;
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 8px;
-    border-bottom: 1px solid var(--border);
-    /* No scroll bar: controls that do not fit go onto another row. */
     flex-wrap: wrap;
     white-space: nowrap;
   }
@@ -598,7 +607,7 @@
   }
 
   .filter {
-    width: 190px;
+    width: 160px;
   }
 
   .table {
@@ -637,6 +646,50 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     overflow: hidden;
+  }
+
+  .state {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-right: -8px;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .state.complete {
+    border-radius: 50%;
+    background: var(--ok);
+    color: var(--bg);
+    font-size: 11px;
+  }
+
+  .state.partial {
+    color: var(--warn-border);
+    font-size: 15px;
+  }
+
+  .state.loading {
+    border: 2px solid var(--placeholder);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: turn 0.8s linear infinite;
+  }
+
+  @keyframes turn {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .state.loading {
+      animation-duration: 3s;
+    }
   }
 
   footer .limit {

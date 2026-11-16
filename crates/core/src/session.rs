@@ -365,6 +365,23 @@ impl Session {
         Ok(())
     }
 
+    /// The default database as this session last knew it, without asking the server.
+    pub fn database(&self) -> Option<&str> {
+        self.database.as_deref()
+    }
+
+    /// Makes `name` the default database of this session.
+    pub async fn use_database(&mut self, name: &str) -> Result<(), Error> {
+        let outcome = self
+            .conn
+            .query_drop(format!("USE {}", crate::split::quote_identifier(name)))
+            .await
+            .map_err(Error::from);
+        self.observe(outcome)?;
+        self.database = Some(name.to_string());
+        Ok(())
+    }
+
     /// The default database of this session, if one is selected.
     pub async fn current_database(&mut self) -> Result<Option<String>, Error> {
         let outcome = self.conn.query_first("SELECT DATABASE()").await.map_err(Error::from);
