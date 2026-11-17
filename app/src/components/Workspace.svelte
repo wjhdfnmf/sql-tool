@@ -50,6 +50,8 @@
 
   const info = $derived(workspace.info);
   const tab = $derived(workspace.activeTab);
+  /** The navigator shows when it is switched on, and always beside a designer. */
+  const navigatorShown = $derived(workspace.showNavigator || !!tab.design);
   /** The tab that queries run in: the active one, unless that is a designer. */
   const queryTab = $derived(tab.design ? (workspace.tabs.find((t) => !t.design) ?? null) : tab);
 
@@ -606,7 +608,7 @@
   </div>
 
   <div class="columns">
-    <aside bind:this={aside} hidden={!workspace.showNavigator} style:width={`${layout.navWidth}px`} aria-label="Navigator">
+    <aside bind:this={aside} hidden={!navigatorShown} style:width={`${layout.navWidth}px`} aria-label="Navigator">
       <div class="side-body">
         <SchemaTree
           workspaceId={info.id}
@@ -645,7 +647,7 @@
       aria-label="Resize the navigator"
       aria-valuenow={layout.navWidth}
       tabindex="0"
-      hidden={!workspace.showNavigator}
+      hidden={!navigatorShown}
       onpointerdown={startNavResize}
       onkeydown={(e) => paneKey(e, 'nav')}
     ></div>
@@ -683,8 +685,7 @@
         </div>
       </div>
 
-      <div class="toolbar" role="toolbar" aria-label="Editor">
-        {#if !tab.design}
+      <div class="toolbar" role="toolbar" aria-label="Editor" hidden={!!tab.design}>
         <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open</button>
         <button onclick={() => saveScript(tab)} title="Save this script (Ctrl+S)">Save</button>
         <button onclick={() => saveScript(tab, true)} title="Save this script under another name (Ctrl+Shift+S)">Save As</button>
@@ -711,8 +712,6 @@
         <span class="divider"></span>
         <button onclick={reformat} title="Reformat the selection, or the whole script (Ctrl+B)">Reformat</button>
         <span class="divider"></span>
-        {/if}
-        <!-- Beside Reformat; on a designer tab they are all the row holds. -->
         <button
           class="pane-toggle"
           aria-pressed={workspace.showNavigator}
