@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use sqltool_core::chart::{self, ChartData, ChartRequest, ColumnSummary};
 use sqltool_core::edit::{self, EditTarget, RowEdit};
 use sqltool_core::export::{self, CellRange, CopyFormat, ExportFormat, RangeStats};
 use sqltool_core::guard::{self, Concern};
@@ -32,6 +33,8 @@ use tauri::{Manager, State};
 const MAX_CELL_BYTES: usize = 2 * 1024 * 1024;
 /// Largest script file the editor will open.
 const MAX_SCRIPT_BYTES: u64 = 20 * 1024 * 1024;
+/// Largest picture of a chart that will be written to a file.
+const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 /// A connection that has been quiet this long is checked before it is used
 /// again, and reopened if the server has dropped it meanwhile.
 const IDLE_CHECK: Duration = Duration::from_secs(30);
@@ -155,6 +158,9 @@ struct AppState {
     settings: RwLock<Settings>,
     workspaces: Mutex<HashMap<u64, Arc<Workspace>>>,
     results: Mutex<HashMap<u64, Arc<ResultStore>>>,
+    /// Results that have a chart open, with the columns read out of them for
+    /// it. Dropped with the result, or when the chart is closed.
+    charts: Mutex<HashMap<u64, Arc<chart::Dataset>>>,
     /// Script files the user picked in a native dialog, in this run or an
     /// earlier one. The UI can only save to one of these, never to a path of
     /// its own choosing. Remembered between runs so that a query tab
@@ -175,6 +181,7 @@ impl AppState {
             settings_store,
             workspaces: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
+            charts: Mutex::new(HashMap::new()),
             approved_files: ApprovedFiles::load(data_dir.join("scripts.json")),
             next_id: AtomicU64::new(1),
             #[cfg(feature = "devtools")]
@@ -206,6 +213,13 @@ impl AppState {
             .get(&id)
             .cloned()
             .ok_or_else(|| ui_error("no-result", "This result is no longer available."))
+    }
+
+    /// The chart data kept for a result, started on first use.
+    fn chart(&self, result_id: u64) -> Result<Arc<chart::Dataset>, UiError> {
+        let store = self.result(result_id)?;
+        let mut charts = self.charts.lock().unwrap();
+        Ok(charts.entry(result_id).or_insert_with(|| Arc::new(chart::Dataset::new(store))).clone())
     }
 }
 
@@ -838,8 +852,10 @@ fn get_cell(state: State<'_, AppState>, result_id: u64, row: u64, column: usize)
 #[tauri::command]
 fn close_results(state: State<'_, AppState>, result_ids: Vec<u64>) {
     let mut results = state.results.lock().unwrap();
+    let mut charts = state.charts.lock().unwrap();
     for id in result_ids {
         results.remove(&id);
+        charts.remove(&id);
     }
 }
 
@@ -1143,6 +1159,11 @@ struct Exported {
 
 /// Asks where to save an export. `None` if the user cancels.
 async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat) -> Option<PathBuf> {
+    pick_save_file(app, "result", format.extension()).await
+}
+
+/// Asks where to save a file called `name.extension`. `None` if the user cancels.
+async fn pick_save_file(app: &tauri::AppHandle, name: &str, extension: &str) -> Option<PathBuf> {
     use tauri_plugin_dialog::DialogExt;
     // The unattended self-test cannot answer a file dialog. In a build that
     // includes it, and only while it is running, exports go to the folder it
@@ -1150,14 +1171,14 @@ async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat) -> Optio
     #[cfg(feature = "devtools")]
     if std::env::var_os("SQLTOOL_SELFTEST_HOST").is_some() {
         if let Some(folder) = std::env::var_os("SQLTOOL_SELFTEST_EXPORT_DIR") {
-            return Some(PathBuf::from(folder).join(format!("result.{}", format.extension())));
+            return Some(PathBuf::from(folder).join(format!("{name}.{extension}")));
         }
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .add_filter(format.extension().to_uppercase(), &[format.extension()])
-        .set_file_name(format!("result.{}", format.extension()))
+        .add_filter(extension.to_uppercase(), &[extension])
+        .set_file_name(format!("{name}.{extension}"))
         .save_file(move |path| {
             let _ = tx.send(path);
         });
@@ -1270,6 +1291,51 @@ async fn export_result(
         truncated: status.truncated,
         filtered: status.rows < status.total_rows,
     }))
+}
+
+// ---------- charts ----------
+
+/// What a chart of a result shows: the bars, bins or points to draw, worked
+/// out here from every stored row. The rows themselves never go to the UI.
+#[tauri::command]
+async fn chart_data(state: State<'_, AppState>, result_id: u64, request: ChartRequest) -> Result<ChartData, UiError> {
+    let data = state.chart(result_id)?;
+    blocking(move || data.chart(&request)).await?.map_err(|e| ui_error("chart", e.to_string()))
+}
+
+/// What one column holds when read as numbers, times or categories, for a filter control.
+#[tauri::command]
+async fn chart_column(state: State<'_, AppState>, result_id: u64, column: usize, role: chart::Role) -> Result<ColumnSummary, UiError> {
+    let data = state.chart(result_id)?;
+    blocking(move || data.summary(column, role)).await?.map_err(|e| ui_error("chart", e.to_string()))
+}
+
+/// Lets go of what was kept for a result's chart. The result itself stays.
+#[tauri::command]
+fn chart_close(state: State<'_, AppState>, result_id: u64) {
+    state.charts.lock().unwrap().remove(&result_id);
+}
+
+/// Asks where to save, then writes a picture of a chart there. The request
+/// body is the PNG itself. Returns the path, or `None` if the user cancels.
+#[tauri::command]
+async fn chart_save_image(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<Option<String>, UiError> {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    let tauri::ipc::InvokeBody::Raw(image) = request.body() else {
+        return Err(ui_error("other", "The picture did not arrive as image data."));
+    };
+    if !image.starts_with(PNG) || image.len() > MAX_IMAGE_BYTES {
+        return Err(ui_error("other", "That is not a PNG picture this app can save."));
+    }
+    let image = image.clone();
+    let Some(path) = pick_save_file(&app, "chart", "png").await else {
+        return Ok(None);
+    };
+    let target = path.clone();
+    blocking(move || std::fs::write(&target, image))
+        .await?
+        .map_err(|e| ui_error("storage", format!("Could not write {}: {e}", path.display())))?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 // ---------- editing rows ----------
@@ -1694,6 +1760,10 @@ fn main() {
             range_stats,
             export_result,
             export_query,
+            chart_data,
+            chart_column,
+            chart_close,
+            chart_save_image,
             edit_target,
             preview_edits,
             apply_edits,

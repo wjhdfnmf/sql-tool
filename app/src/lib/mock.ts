@@ -4,6 +4,7 @@
 // without the desktop shell or a database.
 
 import type { Backend } from './backend';
+import { mockChartClose, mockChartColumn, mockChartData } from './mockChart';
 import type { ColumnInfo, HistoryEntry, Profile, RunMsg, ServerInfo, Settings, UiError, WorkspaceInfo } from './types';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -316,7 +317,10 @@ export const mockBackend: Backend = {
     return { text, bytes: text === null ? 0 : new TextEncoder().encode(text).length, truncated: false };
   },
   closeResults: async (ids) => {
-    for (const id of ids) results.delete(id);
+    for (const id of ids) {
+      results.delete(id);
+      mockChartClose(id);
+    }
   },
   schemaList: async () => {
     await wait(150);
@@ -494,6 +498,20 @@ export const mockBackend: Backend = {
     }
     return stats;
   },
+  chartData: async (resultId, request) => {
+    await wait(30);
+    const result = results.get(resultId);
+    if (!result) throw fail('no-result', 'This result is no longer available.');
+    return mockChartData(resultId, (row, column) => cellText(row, column % demoColumns.length), result.rows, request);
+  },
+  chartColumn: async (resultId, column, role) => {
+    await wait(30);
+    const result = results.get(resultId);
+    if (!result) throw fail('no-result', 'This result is no longer available.');
+    return mockChartColumn(resultId, (row, c) => cellText(row, c % demoColumns.length), result.rows, column, role);
+  },
+  chartClose: async (resultId) => mockChartClose(resultId),
+  chartSaveImage: async () => 'C:\\exports\\chart.png',
   editTarget: async (_workspaceId, resultId) => {
     await wait(120);
     const result = results.get(resultId);

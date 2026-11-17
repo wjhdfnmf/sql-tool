@@ -192,6 +192,19 @@ pub fn set_memory_budget(bytes: u64) {
 pub fn memory_in_use() -> u64 {
     MEMORY_IN_USE.load(Relaxed)
 }
+
+/// Counts memory held on a result's behalf outside its store (the columns a
+/// chart keeps as numbers) against the shared budget, so results that arrive
+/// later go to disk sooner instead of the total growing unchecked.
+pub(crate) fn charge_memory(bytes: u64) {
+    MEMORY_IN_USE.fetch_add(bytes, Relaxed);
+}
+
+/// Gives back memory counted with [`charge_memory`].
+pub(crate) fn release_memory(bytes: u64) {
+    MEMORY_IN_USE.fetch_sub(bytes, Relaxed);
+}
+
 const DEFAULT_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// Memory maps must start on a multiple of this (the strictest platform, Windows).
 const MAP_ALIGNMENT: u64 = 64 * 1024;
@@ -474,6 +487,16 @@ impl ResultStore {
             visit(Cells(inner.raw_row(row)))?;
         }
         Ok(visible)
+    }
+
+    /// Calls `visit` with the cells of every stored row, in the order they
+    /// arrived, whatever the grid is sorted or filtered by. Returns how many.
+    pub(crate) fn for_each_stored_row(&self, mut visit: impl FnMut(Cells<'_>)) -> usize {
+        let inner = self.inner.read().unwrap();
+        for row in 0..inner.rows.len() {
+            visit(Cells(inner.raw_row(row)));
+        }
+        inner.rows.len()
     }
 
     /// Calls `visit` with the cells of visible rows `first..=last`.
