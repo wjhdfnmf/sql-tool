@@ -80,6 +80,8 @@ export interface Backend {
   createTemplate(kind: ObjectKind, schema: string | null): Promise<string>;
   /** Shows the native open dialog. Null if the user cancels. */
   scriptOpen(workspaceId: number): Promise<ScriptFile | null>;
+  /** Where Open and Save As start for this connection: its script folder, if it has one that exists. */
+  scriptFolderOf(workspaceId: number): Promise<string | null>;
   /** Shows the native folder dialog, for a connection's script folder. Null if the user cancels. */
   folderPick(start: string | null): Promise<string | null>;
   /** Saves to `path`, or asks where if `path` is null. Null if the user cancels. */
@@ -164,6 +166,7 @@ const tauriBackend: Backend = {
   createTemplate: (kind, schema) => invoke('create_template', { kind, schema }),
   scriptOpen: (workspaceId) => invoke('script_open', { workspaceId }),
   folderPick: (start) => invoke('folder_pick', { start }),
+  scriptFolderOf: (workspaceId) => invoke('script_folder_of', { workspaceId }),
   scriptSave: (workspaceId, path, suggestedName, text) => invoke('script_save', { workspaceId, path, suggestedName, text }),
   reviewScript: (script, mode) => invoke('review_script', { script, mode }),
   resultView: (resultId, filter, sortColumn, descending) => invoke('result_view', { resultId, filter, sortColumn, descending }),

@@ -400,6 +400,7 @@ export const mockBackend: Backend = {
     text: '-- Monthly report\nselect status, count(*) as orders, sum(total) as revenue from sales.orders where placed_at >= \'2026-10-01\' group by status order by revenue desc;\n',
   }),
   folderPick: async () => 'C:\\scripts',
+  scriptFolderOf: async () => null,
   scriptSave: async (_workspaceId, path, suggestedName) => ({
     path: path ?? `C:\\scripts\\${suggestedName}`,
     name: path ? path.split('\\').pop()! : suggestedName,

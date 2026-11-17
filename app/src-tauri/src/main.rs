@@ -74,8 +74,9 @@ struct Workspace {
     name: String,
     /// Refuse anything that is not a read.
     read_only: bool,
-    /// Where Open and Save As start for this connection, if it names a folder.
-    script_folder: Option<PathBuf>,
+    /// The saved connection this is, to read its script folder from and to
+    /// record its default schema in. `None` for the demo server.
+    profile_id: Option<String>,
     /// The default schema of the connection as the user sees it: one for all
     /// its tabs, although each tab has a session of its own. A tab adopts it
     /// when its session is opened and again before each run.
@@ -299,9 +300,18 @@ async fn open_workspace(
     color: Option<String>,
     read_only: bool,
     production: bool,
-    script_folder: Option<PathBuf>,
 ) -> Result<WorkspaceDto, UiError> {
-    let mut session = Session::connect(&profile).await?;
+    let mut profile = profile;
+    let mut session = match Session::connect(&profile).await {
+        // The connection's default schema has been dropped or is no longer
+        // allowed. That must not keep the connection from opening: open it
+        // with no default schema, and the user can pick another.
+        Err(Error::Server { code: 1049, .. }) | Err(Error::AccessDenied { code: 1044, .. }) if profile.database.is_some() => {
+            profile.database = None;
+            Session::connect(&profile).await?
+        }
+        other => other?,
+    };
     if read_only {
         session.set_read_only().await?;
     }
@@ -315,7 +325,7 @@ async fn open_workspace(
     };
     let dto = WorkspaceDto {
         id: state.id(),
-        profile_id,
+        profile_id: profile_id.clone(),
         name: name.clone(),
         color,
         host: format!("{}:{}", profile.host, profile.port),
@@ -332,7 +342,7 @@ async fn open_workspace(
             profile,
             name,
             read_only,
-            script_folder,
+            profile_id,
             default_schema: Mutex::new(dto.database.clone()),
             utility: tokio::sync::Mutex::new(session),
             tabs: tokio::sync::Mutex::new(HashMap::new()),
@@ -390,7 +400,6 @@ async fn connect(
         saved.color.clone(),
         saved.read_only,
         saved.production,
-        saved.script_folder.clone(),
     )
     .await
 }
@@ -725,6 +734,7 @@ async fn run(
             if let Ok(name) = session.current_database().await {
                 // USE in a script changes the default for the whole connection.
                 workspace.set_default_schema(name.clone());
+                record_default_schema(&state, &workspace, name.as_deref());
                 let _ = on_event.send(RunMsg::Database { name });
             }
         }
@@ -748,8 +758,25 @@ async fn run(
 async fn set_default_schema(state: State<'_, AppState>, workspace_id: u64, schema: String) -> Result<(), UiError> {
     let workspace = state.workspace(workspace_id)?;
     workspace.utility().await?.use_database(&schema).await?;
+    record_default_schema(&state, &workspace, Some(&schema));
     workspace.set_default_schema(Some(schema));
     Ok(())
+}
+
+/// Writes the connection's default schema into its saved settings, so the
+/// Connections page, the connection's settings and the next connect all
+/// agree with what is selected now. Not being able to write it is not worth
+/// failing a statement over; the schema is still selected for this run.
+fn record_default_schema(state: &AppState, workspace: &Workspace, schema: Option<&str>) {
+    let Some(id) = workspace.profile_id.as_deref() else {
+        return;
+    };
+    if let Ok(Some(mut saved)) = state.profiles.get(id) {
+        if saved.database.as_deref() != schema {
+            saved.database = schema.map(str::to_string);
+            let _ = state.profiles.upsert(saved);
+        }
+    }
 }
 
 /// Interrupts whatever the tab is running.
@@ -965,9 +992,22 @@ async fn pick_file(app: &tauri::AppHandle, save_as: Option<&str>, start: Option<
 
 /// The folder a connection's file dialogs start in: its script folder, if it
 /// has one and the folder is there.
+///
+/// Read from the saved connection each time, not kept from when the
+/// connection was opened: a folder set or changed while the connection is
+/// open applies at once. (A connection with no folder to give leaves the
+/// dialog where it last was, which with two connections open is the other
+/// connection's folder.)
 fn script_folder(state: &AppState, workspace_id: Option<u64>) -> Option<PathBuf> {
     let workspace = state.workspace(workspace_id?).ok()?;
-    workspace.script_folder.clone().filter(|folder| folder.is_dir())
+    let saved = state.profiles.get(workspace.profile_id.as_deref()?).ok()??;
+    saved.script_folder.filter(|folder| folder.is_dir())
+}
+
+/// Where Open and Save As will start for this connection, if it has a script folder.
+#[tauri::command(async)]
+fn script_folder_of(state: State<'_, AppState>, workspace_id: u64) -> Option<String> {
+    script_folder(&state, Some(workspace_id)).map(|folder| folder.to_string_lossy().into_owned())
 }
 
 /// Lets the user choose a folder, for a connection's script folder. `None` if cancelled.
@@ -1526,7 +1566,7 @@ async fn connect_demo(state: State<'_, AppState>) -> Result<WorkspaceDto, UiErro
         profile.connect_timeout = state.settings().connect_timeout();
         profile.ca = Some(CaSource::Pem(demo.ca_pem.clone().into_bytes()));
         profile.allow_cleartext_auth = true;
-        open_workspace(&state, profile, None, "Demo server".into(), None, false, false, None).await
+        open_workspace(&state, profile, None, "Demo server".into(), None, false, false).await
     }
     #[cfg(not(feature = "devtools"))]
     {
@@ -1547,6 +1587,8 @@ struct SelfTest {
     big_query: String,
     /// A query returning a few million rows, to load in full and export.
     export_query: String,
+    /// Two folders that exist, to use as script folders.
+    script_folders: Vec<String>,
 }
 
 #[tauri::command]
@@ -1581,6 +1623,7 @@ fn selftest_config() -> Option<SelfTest> {
         table: var("TABLE").unwrap_or_else(|| "db".into()),
         big_query: var("BIG_QUERY").unwrap_or_else(|| "SELECT 1".into()),
         export_query: var("EXPORT_QUERY").unwrap_or_else(|| "SELECT 1".into()),
+        script_folders: ["SCRIPTS_A", "SCRIPTS_B"].iter().filter_map(|name| var(name)).collect(),
     })
 }
 
@@ -1642,6 +1685,7 @@ fn main() {
             alter_script,
             create_template,
             folder_pick,
+            script_folder_of,
             script_open,
             script_save,
             review_script,

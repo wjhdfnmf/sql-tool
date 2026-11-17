@@ -25,7 +25,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **History**: searchable. Statements that contain a password are not stored in full.
 - **Timeouts and dropped connections**: connecting gives up after 15 seconds (adjustable). A query runs until it finishes or is stopped, unless a query timeout is set, in which case it is interrupted on the server. A connection the server has closed for sitting idle is reopened before the next statement is sent, with a note in the output; an optional keep-alive prevents the closing.
 - **Settings and themes**: sixteen themes, soft to bold, light and dark, each checked for readable contrast in the editor and grid (`python tools/themes.py . --check`); size of text; editor indent and wrapping; default row limit; timeouts; whether history and open tabs are kept.
-- **Default schema**: one per connection, used by every query tab, and remembered for the next time the connection is opened.
+- **Default schema**: one per connection, used by every query tab. Choosing one writes it into the connection's settings, so the settings, the schema tree and the next connect all agree. If that schema has since been dropped, the connection still opens, with no default.
 
 ## Security defaults
 

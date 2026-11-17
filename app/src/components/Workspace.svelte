@@ -710,9 +710,9 @@
         </label>
         <span class="divider"></span>
         <button onclick={reformat} title="Reformat the selection, or the whole script (Ctrl+B)">Reformat</button>
+        <span class="divider"></span>
         {/if}
-        <!-- At the right end of the row, for a query tab and a designer tab alike. -->
-        <span class="spacer"></span>
+        <!-- Beside Reformat; on a designer tab they are all the row holds. -->
         <button
           class="pane-toggle"
           aria-pressed={workspace.showNavigator}
@@ -906,7 +906,7 @@
     padding: 2px 9px;
   }
 
-  /* Navigator and Output, at the right end of the editor's toolbar. */
+  /* Navigator and Output, in the editor's toolbar. */
   .toolbar .pane-toggle {
     color: var(--muted);
     border-color: transparent;

@@ -361,6 +361,8 @@ export interface SelfTestConfig {
   bigQuery: string;
   /** A query returning a few million rows, to load in full and export. */
   exportQuery: string;
+  /** Two folders that exist, to use as script folders. */
+  scriptFolders: string[];
 }
 
 /** What a failed backend call rejects with. */
