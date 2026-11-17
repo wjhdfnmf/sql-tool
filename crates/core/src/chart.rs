@@ -86,9 +86,50 @@ pub struct AxisRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChartKind {
+    /// A bar per value of X: a count of rows, or a statistic of Y.
     Bar,
+    /// The same numbers as a bar chart, joined by a line.
+    Line,
+    /// The share each value of X has of the whole.
+    Pie,
+    /// Bars from the largest down, for finding the few causes of most of the total.
+    Pareto,
+    /// How the values of one column are spread.
     Histogram,
+    /// The median, quartiles and outliers of Y, for each value of X.
+    Box,
+    /// A point for each row.
     Scatter,
+    /// Averages of Y in order, against limits worked out from its own variation.
+    Control,
+}
+
+/// The shape of a trend line. All are straight-line fits after a change of variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrendKind {
+    /// y = a + b·x
+    Linear,
+    /// y = c0 + c1·x + … up to the degree asked for
+    Polynomial,
+    /// y = a·e^(b·x); rows with y of zero or less are left out
+    Exponential,
+    /// y = a + b·ln(x); rows with x of zero or less are left out
+    Logarithmic,
+    /// y = a·x^b; rows with x or y of zero or less are left out
+    Power,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrendSpec {
+    pub kind: TrendKind,
+    /// For a polynomial: 2 to 6.
+    #[serde(default)]
+    pub degree: u32,
+    /// One line for each colour group instead of one for all rows.
+    #[serde(default)]
+    pub per_group: bool,
 }
 
 /// What a bar shows of the Y column.
@@ -189,6 +230,15 @@ pub struct ChartRequest {
     /// Bars shown for a discrete X before the smallest are merged into "Other".
     #[serde(default)]
     pub max_categories: Option<u32>,
+    /// A trend line through a scatter plot, fitted to every row drawn (not only the points sent).
+    #[serde(default)]
+    pub trend: Option<TrendSpec>,
+    /// Specification limits of the measured column (X of a histogram, Y of a
+    /// control chart): rows below and above them are counted.
+    #[serde(default)]
+    pub spec_low: Option<f64>,
+    #[serde(default)]
+    pub spec_high: Option<f64>,
 }
 
 impl ChartRequest {
@@ -208,6 +258,9 @@ impl ChartRequest {
             large: Large::default(),
             sort: BarSort::default(),
             max_categories: None,
+            trend: None,
+            spec_low: None,
+            spec_high: None,
         }
     }
 }
@@ -222,6 +275,9 @@ pub enum XAxis {
     Bins { edges: Vec<f64>, time: bool, bucket: Option<TimeBucket> },
     /// Points on a continuous scale.
     Continuous { time: bool },
+    /// Points numbered from 1 in the order of the result, each standing for `rows_per_point` rows.
+    #[serde(rename_all = "camelCase")]
+    Sequence { count: usize, rows_per_point: u64 },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -248,6 +304,76 @@ pub struct Density {
     pub max: u32,
 }
 
+/// The five numbers of a box plot, and what lies outside the whiskers.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoxStats {
+    pub rows: u64,
+    pub min: f64,
+    pub q1: f64,
+    pub median: f64,
+    pub q3: f64,
+    pub max: f64,
+    /// Where the whiskers end: the furthest values within 1.5 times the box's height of it.
+    pub low: f64,
+    pub high: f64,
+    pub mean: f64,
+    /// Values beyond the whiskers, thinned to at most 200 with the extremes kept.
+    pub outliers: Vec<f64>,
+    pub outlier_count: u64,
+}
+
+/// The centre line and limits of a control chart.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Control {
+    pub center: f64,
+    /// The short-term standard deviation the limits are built from: from the
+    /// spread within subgroups, or from point-to-point ranges when each
+    /// point is a single row.
+    pub sigma: f64,
+    /// Three sigma above and below the centre for each point's subgroup size. `None` where there is no point.
+    pub upper: Vec<Option<f64>>,
+    pub lower: Vec<Option<f64>>,
+    /// Points outside their limits.
+    pub beyond: u64,
+    /// Each point is one row.
+    pub individuals: bool,
+}
+
+/// What the measured column holds, among the rows drawn.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    pub rows: u64,
+    pub mean: f64,
+    /// The usual (n - 1) standard deviation of all the values.
+    pub std_dev: f64,
+    /// The short-term standard deviation: the average change from one row to
+    /// the next, divided by 1.128. Smaller than `std_dev` when the level drifts.
+    pub sigma_within: Option<f64>,
+    pub min: f64,
+    pub max: f64,
+    /// Rows under the lower and over the upper specification limit, when those were given.
+    pub below: Option<u64>,
+    pub above: Option<u64>,
+}
+
+/// A fitted trend line: `v = c0 + c1·t + c2·t² + …` where `t = (u - center) / scale`,
+/// `u` is x (or its logarithm) and `v` is y (or its logarithm), as the kind says.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fit {
+    /// The series the line belongs to, or `None` for one line through every row.
+    pub series: Option<usize>,
+    pub kind: TrendKind,
+    pub coefficients: Vec<f64>,
+    pub center: f64,
+    pub scale: f64,
+    pub rows: u64,
+    pub r_squared: f64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartData {
@@ -270,6 +396,14 @@ pub struct ChartData {
     pub y_time_only: bool,
     /// Things the reader should know about what was left out or merged.
     pub notes: Vec<String>,
+    /// For a box plot: one entry per category or bin, `None` where there are no values.
+    pub boxes: Vec<Option<BoxStats>>,
+    /// For a control chart.
+    pub control: Option<Control>,
+    /// For a histogram and a control chart: the measured column in figures.
+    pub stats: Option<Stats>,
+    /// Trend lines of a scatter plot.
+    pub fits: Vec<Fit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -751,6 +885,15 @@ impl Dataset {
             x_time_only: x.is_some_and(|c| c.time_only),
             y_time_only: y.is_some_and(|c| c.time_only),
             notes: Vec::new(),
+            boxes: Vec::new(),
+            control: None,
+            stats: None,
+            fits: Vec::new(),
+        };
+        // A slice, a Pareto bar, a box and a control point are told apart by their place, not by a colour column.
+        let color = match request.kind {
+            ChartKind::Pie | ChartKind::Pareto | ChartKind::Box | ChartKind::Control => None,
+            _ => color,
         };
         let groups = SeriesMap::new(color, &mask);
         if groups.merged {
@@ -760,41 +903,70 @@ impl Dataset {
             ));
         }
 
+        let time = request.x.is_some_and(|a| a.role == Role::Time);
         match request.kind {
             ChartKind::Scatter => {
                 let (Some(xv), Some(yv)) = (x_numbers, y.and_then(Column::numbers)) else {
                     return error("A scatter plot needs a number or time column on X and on Y.");
                 };
-                data.x = XAxis::Continuous { time: request.x.is_some_and(|a| a.role == Role::Time) };
-                scatter(&mut data, xv, yv, &mask, &groups, request.large);
+                data.x = XAxis::Continuous { time };
+                scatter(&mut data, xv, yv, &mask, &groups, request);
             }
             ChartKind::Histogram => {
                 let Some(xv) = x_numbers else {
                     return error("A histogram needs a number or time column on X.");
                 };
-                let time = request.x.is_some_and(|a| a.role == Role::Time);
                 binned(&mut data, xv, time, request, &mask, YValues::None, Statistic::Count, &groups);
+                data.stats = measure_stats(xv, &mask, request);
             }
-            ChartKind::Bar => {
-                let (yv, statistic) = match y.map(|c| &c.values) {
-                    None => (YValues::None, Statistic::Count),
-                    Some(Values::Numbers(values)) => (YValues::Numbers(values), request.statistic),
-                    // Categories cannot be added up; the bar counts the rows that have one.
-                    Some(Values::Codes { codes, .. }) => (YValues::Present(codes), Statistic::Count),
-                };
+            ChartKind::Bar | ChartKind::Line => {
+                let (yv, statistic) = bar_values(y, request.statistic);
                 match x.map(|c| &c.values) {
-                    Some(Values::Numbers(xv)) => {
-                        let time = request.x.is_some_and(|a| a.role == Role::Time);
-                        binned(&mut data, xv, time, request, &mask, yv, statistic, &groups);
-                    }
+                    Some(Values::Numbers(xv)) => binned(&mut data, xv, time, request, &mask, yv, statistic, &groups),
                     Some(Values::Codes { codes, labels, .. }) => {
                         by_category(&mut data, Some(codes), labels, request, &mask, yv, statistic, &groups);
                     }
                     None => by_category(&mut data, None, &[], request, &mask, yv, statistic, &groups),
                 }
             }
+            ChartKind::Pie | ChartKind::Pareto => {
+                let Some(Values::Codes { codes, labels, .. }) = x.map(|c| &c.values) else {
+                    return error(if request.kind == ChartKind::Pie {
+                        "A pie chart needs a column on X, read as categories."
+                    } else {
+                        "A Pareto chart needs a column on X, read as categories."
+                    });
+                };
+                let (yv, statistic) = bar_values(y, request.statistic);
+                // A Pareto chart is in order of size by definition; a pie reads best that way too.
+                let largest_first = ChartRequest { sort: BarSort::Value, ..request.clone() };
+                by_category(&mut data, Some(codes), labels, &largest_first, &mask, yv, statistic, &groups);
+            }
+            ChartKind::Box => {
+                let Some(yv) = y.and_then(Column::numbers) else {
+                    return error("A box plot needs a number or time column on Y.");
+                };
+                boxes(&mut data, x.map(|c| &c.values), time, request, &mask, yv)?;
+            }
+            ChartKind::Control => {
+                let Some(yv) = y.and_then(Column::numbers) else {
+                    return error("A control chart needs a number column on Y.");
+                };
+                control(&mut data, x.map(|c| &c.values), time, request, &mask, yv)?;
+                data.stats = measure_stats(yv, &mask, request);
+            }
         }
         Ok(data)
+    }
+}
+
+/// The Y column as a bar reads it, and the statistic that then makes sense.
+fn bar_values(y: Option<&Column>, statistic: Statistic) -> (YValues<'_>, Statistic) {
+    match y.map(|c| &c.values) {
+        None => (YValues::None, Statistic::Count),
+        Some(Values::Numbers(values)) => (YValues::Numbers(values), statistic),
+        // Categories cannot be added up; the bar counts the rows that have one.
+        Some(Values::Codes { codes, .. }) => (YValues::Present(codes), Statistic::Count),
     }
 }
 
@@ -1126,10 +1298,12 @@ fn nice_step(raw: f64) -> f64 {
 fn binning(lo: f64, hi: f64, time: bool, request: &ChartRequest, drawn: u64, notes: &mut Vec<String>) -> Binning {
     if time {
         let buckets = |unit: TimeBucket| unit.index(hi) - unit.index(lo) + 1;
+        // Points along a line stay readable in far greater number than bars do.
+        let readable = if matches!(request.kind, ChartKind::Line | ChartKind::Control) { 240 } else { 60 };
         let mut unit = match request.bucket {
             Some(unit) => unit,
-            // The finest unit that still gives a readable number of bars.
-            None => TimeBucket::ALL.into_iter().find(|unit| buckets(*unit) <= 60).unwrap_or(TimeBucket::Year),
+            // The finest unit that still gives a readable number of bars or points.
+            None => TimeBucket::ALL.into_iter().find(|unit| buckets(*unit) <= readable).unwrap_or(TimeBucket::Year),
         };
         let asked = unit;
         while unit != TimeBucket::Year && buckets(unit) > MAX_BUCKETS {
@@ -1213,7 +1387,8 @@ fn binned(
 
 // ---------- scatter ----------
 
-fn scatter(data: &mut ChartData, x: &[f64], y: &[f64], mask: &[bool], groups: &SeriesMap<'_>, large: Large) {
+fn scatter(data: &mut ChartData, x: &[f64], y: &[f64], mask: &[bool], groups: &SeriesMap<'_>, request: &ChartRequest) {
+    let large = request.large;
     let usable = |row: &usize| mask[*row] && !x[*row].is_nan() && !y[*row].is_nan();
     let (mut x_lo, mut x_hi, mut y_lo, mut y_hi, mut drawn) =
         (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY, 0usize);
@@ -1227,6 +1402,9 @@ fn scatter(data: &mut ChartData, x: &[f64], y: &[f64], mask: &[bool], groups: &S
     data.rows_drawn = drawn as u64;
     if drawn == 0 {
         return;
+    }
+    if let Some(spec) = &request.trend {
+        data.fits = fit_trend(spec, x, y, mask, groups, &mut data.notes);
     }
     if drawn > MAX_POINTS && large == Large::Density {
         let (x_span, y_span) = ((x_hi - x_lo).max(f64::MIN_POSITIVE), (y_hi - y_lo).max(f64::MIN_POSITIVE));
@@ -1270,6 +1448,430 @@ fn scatter(data: &mut ChartData, x: &[f64], y: &[f64], mask: &[bool], groups: &S
         ));
     }
     data.series = series;
+}
+
+// ---------- trend lines ----------
+
+const MAX_DEGREE: usize = 6;
+
+/// Sums for a least-squares polynomial through (t, w) pairs, where t is the
+/// (possibly transformed) x brought into -1..1 and w the (possibly
+/// transformed) y less its middle value. Keeping both small keeps the sums
+/// exact enough for times in milliseconds and for six million rows.
+#[derive(Clone)]
+struct FitSums {
+    rows: u64,
+    u: [f64; 2],
+    v: [f64; 2],
+    powers: [f64; 2 * MAX_DEGREE + 1],
+    products: [f64; MAX_DEGREE + 1],
+    w_sum: f64,
+    w_squares: f64,
+}
+
+impl FitSums {
+    const EMPTY: FitSums = FitSums {
+        rows: 0,
+        u: [f64::INFINITY, f64::NEG_INFINITY],
+        v: [f64::INFINITY, f64::NEG_INFINITY],
+        powers: [0.0; 2 * MAX_DEGREE + 1],
+        products: [0.0; MAX_DEGREE + 1],
+        w_sum: 0.0,
+        w_squares: 0.0,
+    };
+
+    fn center(&self) -> f64 {
+        (self.u[0] + self.u[1]) / 2.0
+    }
+
+    fn scale(&self) -> f64 {
+        let half = (self.u[1] - self.u[0]) / 2.0;
+        if half > 0.0 { half } else { 1.0 }
+    }
+
+    fn middle(&self) -> f64 {
+        (self.v[0] + self.v[1]) / 2.0
+    }
+}
+
+/// Solves `a·c = b` for a small symmetric system. `None` if the points do not pin the curve down.
+#[allow(clippy::needless_range_loop)]
+fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for column in 0..n {
+        let pivot = (column..n).max_by(|i, j| a[*i][column].abs().total_cmp(&a[*j][column].abs()))?;
+        if a[pivot][column].abs() < 1e-10 {
+            return None;
+        }
+        a.swap(column, pivot);
+        b.swap(column, pivot);
+        for row in column + 1..n {
+            let factor = a[row][column] / a[column][column];
+            for k in column..n {
+                a[row][k] -= factor * a[column][k];
+            }
+            b[row] -= factor * b[column];
+        }
+    }
+    let mut c = vec![0.0; n];
+    for row in (0..n).rev() {
+        let known: f64 = (row + 1..n).map(|k| a[row][k] * c[k]).sum();
+        c[row] = (b[row] - known) / a[row][row];
+    }
+    Some(c)
+}
+
+fn fit_trend(spec: &TrendSpec, x: &[f64], y: &[f64], mask: &[bool], groups: &SeriesMap<'_>, notes: &mut Vec<String>) -> Vec<Fit> {
+    let degree = if spec.kind == TrendKind::Polynomial { (spec.degree as usize).clamp(2, MAX_DEGREE) } else { 1 };
+    let log_x = matches!(spec.kind, TrendKind::Logarithmic | TrendKind::Power);
+    let log_y = matches!(spec.kind, TrendKind::Exponential | TrendKind::Power);
+    // The pair a row contributes, or nothing if it has no logarithm to take.
+    let pair = |row: usize| -> Option<(f64, f64)> {
+        let (px, py) = (x[row], y[row]);
+        if !mask[row] || px.is_nan() || py.is_nan() || (log_x && px <= 0.0) || (log_y && py <= 0.0) {
+            return None;
+        }
+        Some((if log_x { px.ln() } else { px }, if log_y { py.ln() } else { py }))
+    };
+    let lines = if spec.per_group { groups.len() } else { 1 };
+    let line_of = |row: usize| if spec.per_group { groups.of(row) } else { 0 };
+
+    let mut sums = vec![FitSums::EMPTY; lines];
+    let mut skipped = 0u64;
+    for row in 0..mask.len() {
+        match pair(row) {
+            Some((u, v)) => {
+                let line = &mut sums[line_of(row)];
+                line.rows += 1;
+                line.u = [line.u[0].min(u), line.u[1].max(u)];
+                line.v = [line.v[0].min(v), line.v[1].max(v)];
+            }
+            None if mask[row] && !x[row].is_nan() && !y[row].is_nan() => skipped += 1,
+            None => {}
+        }
+    }
+    for row in 0..mask.len() {
+        let Some((u, v)) = pair(row) else { continue };
+        let line = &mut sums[line_of(row)];
+        let (t, w) = ((u - line.center()) / line.scale(), v - line.middle());
+        let mut power = 1.0;
+        for k in 0..=2 * degree {
+            line.powers[k] += power;
+            if k <= degree {
+                line.products[k] += w * power;
+            }
+            power *= t;
+        }
+        line.w_sum += w;
+        line.w_squares += w * w;
+    }
+
+    let mut fits = Vec::new();
+    let mut unfitted = 0;
+    for (index, line) in sums.iter().enumerate() {
+        if line.rows == 0 {
+            continue;
+        }
+        let matrix: Vec<Vec<f64>> = (0..=degree).map(|i| (0..=degree).map(|j| line.powers[i + j]).collect()).collect();
+        let solved = if line.rows as usize > degree { solve(matrix, line.products[..=degree].to_vec()) } else { None };
+        let Some(mut coefficients) = solved else {
+            unfitted += 1;
+            continue;
+        };
+        let explained: f64 = coefficients.iter().zip(&line.products).map(|(c, p)| c * p).sum();
+        let total = line.w_squares - line.w_sum * line.w_sum / line.rows as f64;
+        let r_squared = if total > 0.0 { (1.0 - (line.w_squares - explained) / total).clamp(0.0, 1.0) } else { 1.0 };
+        coefficients[0] += line.middle();
+        fits.push(Fit {
+            series: spec.per_group.then_some(index),
+            kind: spec.kind,
+            coefficients,
+            center: line.center(),
+            scale: line.scale(),
+            rows: line.rows,
+            r_squared,
+        });
+    }
+    if skipped > 0 {
+        notes.push(format!(
+            "The trend line leaves out {} {} with a value of zero or less, which have no logarithm.",
+            grouped(skipped),
+            if skipped == 1 { "row" } else { "rows" }
+        ));
+    }
+    if unfitted > 0 {
+        notes.push("There are too few different points to fit that trend line.".to_string());
+    }
+    fits
+}
+
+// ---------- the measured column in figures ----------
+
+/// What the average range between two neighbours is, as a multiple of the standard deviation.
+const D2: f64 = 1.128;
+
+fn measure_stats(values: &[f64], mask: &[bool], request: &ChartRequest) -> Option<Stats> {
+    let usable = |row: &usize| mask[*row] && !values[*row].is_nan();
+    let (mut rows, mut sum, mut min, mut max) = (0u64, 0.0f64, f64::INFINITY, f64::NEG_INFINITY);
+    let (mut ranges, mut previous) = (0.0f64, f64::NAN);
+    let (mut below, mut above) = (0u64, 0u64);
+    for row in (0..mask.len()).filter(usable) {
+        let v = values[row];
+        rows += 1;
+        sum += v;
+        min = min.min(v);
+        max = max.max(v);
+        if !previous.is_nan() {
+            ranges += (v - previous).abs();
+        }
+        previous = v;
+        below += request.spec_low.is_some_and(|low| v < low) as u64;
+        above += request.spec_high.is_some_and(|high| v > high) as u64;
+    }
+    if rows == 0 {
+        return None;
+    }
+    let mean = sum / rows as f64;
+    // Around the mean, in a second pass: summing squares of the raw values loses the small differences.
+    let squares: f64 = (0..mask.len()).filter(usable).map(|row| (values[row] - mean).powi(2)).sum();
+    Some(Stats {
+        rows,
+        mean,
+        std_dev: if rows > 1 { (squares / (rows - 1) as f64).sqrt() } else { 0.0 },
+        sigma_within: (rows > 1).then(|| ranges / (rows - 1) as f64 / D2),
+        min,
+        max,
+        below: request.spec_low.map(|_| below),
+        above: request.spec_high.map(|_| above),
+    })
+}
+
+// ---------- box plots and control charts ----------
+
+/// Points on a control chart. More rows than this are averaged in runs.
+const MAX_CONTROL_POINTS: usize = 2_000;
+const MAX_OUTLIERS: usize = 200;
+const NO_GROUP: u32 = u32::MAX;
+
+/// Puts each usable row in a group: one of X's categories, one of its bins,
+/// or, for a control chart with nothing on X, a run of consecutive rows.
+/// Returns the group of each row (`NO_GROUP` for rows not drawn), how many
+/// groups there are, and the axis that names them.
+fn assign_groups(
+    x: Option<&Values>,
+    time: bool,
+    request: &ChartRequest,
+    mask: &[bool],
+    y: &[f64],
+    in_order: bool,
+    notes: &mut Vec<String>,
+) -> Result<(Vec<u32>, usize, XAxis), ChartError> {
+    let rows = mask.len();
+    let usable = |row: &usize| mask[*row] && !y[*row].is_nan();
+    let mut group = vec![NO_GROUP; rows];
+    match x {
+        None if in_order => {
+            let drawn = (0..rows).filter(usable).count();
+            let size = drawn.div_ceil(MAX_CONTROL_POINTS).max(1);
+            for (index, row) in (0..rows).filter(usable).enumerate() {
+                group[row] = (index / size) as u32;
+            }
+            if size > 1 {
+                notes.push(format!(
+                    "Each point is the average of {} rows in a row, in the order of the result.",
+                    grouped(size as u64)
+                ));
+            }
+            let count = drawn.div_ceil(size);
+            Ok((group, count, XAxis::Sequence { count, rows_per_point: size as u64 }))
+        }
+        None => {
+            for row in (0..rows).filter(usable) {
+                group[row] = 0;
+            }
+            Ok((group, 1, XAxis::Categories { labels: vec!["All rows".to_string()] }))
+        }
+        Some(Values::Codes { codes, labels, .. }) => {
+            let (null_at, rest_at) = (labels.len(), labels.len() + 1);
+            let category = |row: usize| match codes[row] {
+                MISSING => null_at,
+                OTHER => rest_at,
+                code => code as usize,
+            };
+            let mut counts = vec![0u64; labels.len() + 2];
+            for row in (0..rows).filter(usable) {
+                counts[category(row)] += 1;
+            }
+            let name = |c: usize| if c == null_at { NULL_LABEL } else { labels[c].as_str() };
+            let mut shown: Vec<usize> = (0..=null_at).filter(|c| counts[*c] > 0).collect();
+            let mut merged = counts[rest_at] > 0;
+            let limit = if in_order {
+                MAX_CONTROL_POINTS
+            } else {
+                (request.max_categories.unwrap_or(DEFAULT_CATEGORIES as u32) as usize).clamp(1, MAX_CATEGORIES)
+            };
+            if shown.len() > limit || (in_order && merged) {
+                if in_order {
+                    return error(format!(
+                        "The X column has more than {} different values, too many to be the points of a control chart. \
+                         Put a time column on X, or leave X empty to chart the rows in order.",
+                        grouped(MAX_CONTROL_POINTS as u64)
+                    ));
+                }
+                notes.push(format!(
+                    "{} categories: the {} with the most rows are shown and the rest are under {OTHER_LABEL}.",
+                    grouped(shown.len() as u64),
+                    grouped(limit as u64)
+                ));
+                shown.sort_by(|a, b| counts[*b].cmp(&counts[*a]).then(a.cmp(b)));
+                shown.truncate(limit);
+                merged = true;
+            }
+            let by_name = |a: &usize, b: &usize| match (*a == null_at, *b == null_at) {
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                _ => natural(Some(name(*a)), Some(name(*b))),
+            };
+            // A process is charted in the order things happened, which is the order the values first appear.
+            match if in_order { BarSort::Seen } else { request.sort } {
+                BarSort::Value => shown.sort_by(|a, b| counts[*b].cmp(&counts[*a]).then_with(|| by_name(a, b))),
+                BarSort::Label => shown.sort_by(by_name),
+                BarSort::Seen => shown.sort(),
+            }
+            let mut of_category = vec![shown.len() as u32; labels.len() + 2];
+            for (index, c) in shown.iter().enumerate() {
+                of_category[*c] = index as u32;
+            }
+            for row in (0..rows).filter(usable) {
+                group[row] = of_category[category(row)];
+            }
+            let mut names: Vec<String> = shown.iter().map(|c| name(*c).to_string()).collect();
+            if merged {
+                names.push(OTHER_LABEL.to_string());
+            }
+            Ok((group, names.len(), XAxis::Categories { labels: names }))
+        }
+        Some(Values::Numbers(xv)) => {
+            let placed = |row: &usize| usable(row) && !xv[*row].is_nan();
+            let (mut lo, mut hi, mut drawn) = (f64::INFINITY, f64::NEG_INFINITY, 0u64);
+            for row in (0..rows).filter(placed) {
+                lo = lo.min(xv[row]);
+                hi = hi.max(xv[row]);
+                drawn += 1;
+            }
+            if drawn == 0 {
+                return Ok((group, 0, XAxis::Bins { edges: Vec::new(), time, bucket: None }));
+            }
+            let bins = binning(lo, hi, time, request, drawn, notes);
+            for row in (0..rows).filter(placed) {
+                group[row] = bins.index(xv[row]) as u32;
+            }
+            let bucket = match bins {
+                Binning::Calendar { unit, .. } => Some(unit),
+                Binning::Width { .. } => None,
+            };
+            Ok((group, bins.count(), XAxis::Bins { edges: bins.edges(), time, bucket }))
+        }
+    }
+}
+
+fn boxes(data: &mut ChartData, x: Option<&Values>, time: bool, request: &ChartRequest, mask: &[bool], y: &[f64]) -> Result<(), ChartError> {
+    let (group, count, axis) = assign_groups(x, time, request, mask, y, false, &mut data.notes)?;
+    let mut values: Vec<Vec<f64>> = vec![Vec::new(); count];
+    for (row, g) in group.iter().enumerate() {
+        if *g != NO_GROUP {
+            values[*g as usize].push(y[row]);
+        }
+    }
+    data.rows_drawn = values.iter().map(|v| v.len() as u64).sum();
+    data.boxes = values.into_iter().map(box_stats).collect();
+    data.x = axis;
+    Ok(())
+}
+
+fn box_stats(mut values: Vec<f64>) -> Option<BoxStats> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable_by(f64::total_cmp);
+    let last = values.len() - 1;
+    // Between the two nearest values, in proportion: the usual definition (R's type 7, Excel's QUARTILE.INC).
+    let quantile = |share: f64| {
+        let at = last as f64 * share;
+        let below = at.floor() as usize;
+        values[below] + (at - below as f64) * (values[(below + 1).min(last)] - values[below])
+    };
+    let (q1, median, q3) = (quantile(0.25), quantile(0.5), quantile(0.75));
+    let reach = 1.5 * (q3 - q1);
+    let first_within = values.partition_point(|v| *v < q1 - reach);
+    let after_within = values.partition_point(|v| *v <= q3 + reach);
+    let outside: Vec<f64> = values[..first_within].iter().chain(&values[after_within..]).copied().collect();
+    // Thinned evenly through the sorted list, so the extremes at both ends stay.
+    let outliers = if outside.len() <= MAX_OUTLIERS {
+        outside.clone()
+    } else {
+        (0..MAX_OUTLIERS).map(|i| outside[i * (outside.len() - 1) / (MAX_OUTLIERS - 1)]).collect()
+    };
+    Some(BoxStats {
+        rows: values.len() as u64,
+        min: values[0],
+        q1,
+        median,
+        q3,
+        max: values[last],
+        low: values[first_within],
+        high: values[after_within - 1],
+        mean: values.iter().sum::<f64>() / values.len() as f64,
+        outliers,
+        outlier_count: outside.len() as u64,
+    })
+}
+
+fn control(data: &mut ChartData, x: Option<&Values>, time: bool, request: &ChartRequest, mask: &[bool], y: &[f64]) -> Result<(), ChartError> {
+    let (group, count, axis) = assign_groups(x, time, request, mask, y, true, &mut data.notes)?;
+    let mut size = vec![0u64; count];
+    let mut sum = vec![0f64; count];
+    for (row, g) in group.iter().enumerate() {
+        if *g != NO_GROUP {
+            size[*g as usize] += 1;
+            sum[*g as usize] += y[row];
+        }
+    }
+    let mean: Vec<Option<f64>> = size.iter().zip(&sum).map(|(n, total)| (*n > 0).then(|| total / *n as f64)).collect();
+    let rows: u64 = size.iter().sum();
+    data.rows_drawn = rows;
+    data.x = axis;
+    if rows == 0 {
+        return Ok(());
+    }
+    let center = sum.iter().sum::<f64>() / rows as f64;
+    let individuals = size.iter().all(|n| *n <= 1);
+    let sigma = if individuals {
+        // One row a point: the spread is judged from how far each point is from the one before.
+        let points: Vec<f64> = mean.iter().flatten().copied().collect();
+        if points.len() < 2 {
+            0.0
+        } else {
+            points.windows(2).map(|pair| (pair[1] - pair[0]).abs()).sum::<f64>() / (points.len() - 1) as f64 / D2
+        }
+    } else {
+        // Several rows a point: the spread within the points, pooled over all of them.
+        let mut within = 0f64;
+        for (row, g) in group.iter().enumerate() {
+            if let Some(m) = mean.get(*g as usize).copied().flatten() {
+                within += (y[row] - m).powi(2);
+            }
+        }
+        let freedom: u64 = size.iter().filter(|n| **n >= 2).map(|n| n - 1).sum();
+        if freedom == 0 { 0.0 } else { (within / freedom as f64).sqrt() }
+    };
+    let limit = |n: u64, sign: f64| (n > 0).then(|| center + sign * 3.0 * sigma / (n as f64).sqrt());
+    let upper: Vec<Option<f64>> = size.iter().map(|n| limit(*n, 1.0)).collect();
+    let lower: Vec<Option<f64>> = size.iter().map(|n| limit(*n, -1.0)).collect();
+    let beyond = (0..count).filter(|i| matches!((mean[*i], upper[*i], lower[*i]), (Some(m), Some(u), Some(l)) if m > u || m < l)).count();
+    data.series = vec![Series { name: None, values: mean, points: Vec::new() }];
+    data.control = Some(Control { center, sigma, upper, lower, beyond: beyond as u64, individuals });
+    Ok(())
 }
 
 // ---------- small helpers ----------
@@ -1561,6 +2163,11 @@ mod tests {
         // 5 January to 30 April is 116 days: too many bars by day, 17 by week.
         let (unit, bars, _) = chart(None);
         assert_eq!((unit, bars), (TimeBucket::Week, 17));
+        // A line of points stays readable at one a day; so does a control chart.
+        for kind in [ChartKind::Line, ChartKind::Control] {
+            let by_day = orders().chart(&ChartRequest { x: axis(2, Role::Time), y: axis(1, Role::Continuous), ..request(kind) }).unwrap();
+            assert!(matches!(by_day.x, XAxis::Bins { bucket: Some(TimeBucket::Day), .. }), "{kind:?}: {:?}", by_day.x);
+        }
         // By second it would be ten million bars; the unit is made coarser and the chart says so.
         let (unit, bars, notes) = chart(Some(TimeBucket::Second));
         assert_eq!(unit, TimeBucket::Day);
@@ -1785,6 +2392,295 @@ mod tests {
         store.set_columns(vec![ColumnInfo::plain("n", ColumnKind::Number)]);
         let data = Dataset::new(Arc::new(store));
         assert!(data.summary(0, Role::Continuous).unwrap_err().to_string().contains("still loading"));
+    }
+
+    fn column_of<'a>(name: &str, values: impl IntoIterator<Item = &'a str>) -> Dataset {
+        dataset(&[name], values.into_iter().map(|v| vec![Some(v)]))
+    }
+
+    #[test]
+    fn a_pie_and_a_pareto_chart_count_each_value_largest_first_and_ignore_colour() {
+        for kind in [ChartKind::Pie, ChartKind::Pareto] {
+            let data = orders()
+                .chart(&ChartRequest { x: axis(3, Role::Discrete), color: Some(0), sort: BarSort::Label, ..request(kind) })
+                .unwrap();
+            assert_eq!(labels(&data), ["paid", "open", NULL_LABEL], "{kind:?}");
+            assert_eq!(data.series.len(), 1);
+            assert_eq!(data.series[0].values, [Some(4.0), Some(2.0), Some(1.0)]);
+            // With a number column on Y the slices are its sum.
+            let summed = orders()
+                .chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), statistic: Statistic::Sum, ..request(kind) })
+                .unwrap();
+            assert_eq!(labels(&summed), ["east", "north", "south", NULL_LABEL]);
+            assert_eq!(summed.series[0].values, [Some(100.0), Some(40.0), Some(20.5), Some(7.0)]);
+            assert!(orders().chart(&ChartRequest { x: axis(1, Role::Continuous), ..request(kind) }).is_err(), "numbers are not slices");
+        }
+    }
+
+    #[test]
+    fn a_line_chart_has_the_numbers_of_a_bar_chart() {
+        let ask = |kind| {
+            orders()
+                .chart(&ChartRequest {
+                    x: axis(2, Role::Time),
+                    y: axis(1, Role::Continuous),
+                    statistic: Statistic::Mean,
+                    bucket: Some(TimeBucket::Month),
+                    color: Some(3),
+                    ..request(kind)
+                })
+                .unwrap()
+        };
+        assert_eq!(ask(ChartKind::Line), ask(ChartKind::Bar));
+    }
+
+    #[test]
+    fn a_box_plot_gives_quartiles_whiskers_and_outliers() {
+        // 1 to 9 and a far value: quartiles by the usual in-between rule.
+        let data = column_of("n", ["1", "2", "3", "4", "5", "6", "7", "8", "9", "40"]);
+        let chart = data.chart(&ChartRequest { y: axis(0, Role::Continuous), ..request(ChartKind::Box) }).unwrap();
+        assert_eq!(labels(&chart), ["All rows"]);
+        let stats = chart.boxes[0].clone().unwrap();
+        assert_eq!((stats.rows, stats.min, stats.max), (10, 1.0, 40.0));
+        assert_eq!((stats.q1, stats.median, stats.q3), (3.25, 5.5, 7.75));
+        // The box is 4.5 tall, so the whiskers reach to -3.5 and 14.5: 40 is outside.
+        assert_eq!((stats.low, stats.high), (1.0, 9.0));
+        assert_eq!((stats.outliers.as_slice(), stats.outlier_count), (&[40.0][..], 1));
+        assert_eq!(stats.mean, 8.5);
+        assert!(data.chart(&request(ChartKind::Box)).is_err(), "nothing on Y");
+    }
+
+    #[test]
+    fn boxes_are_made_for_each_category_or_bin_of_x() {
+        let by_region = orders()
+            .chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), sort: BarSort::Label, ..request(ChartKind::Box) })
+            .unwrap();
+        assert_eq!(labels(&by_region), ["east", "north", "south", NULL_LABEL]);
+        let medians: Vec<f64> = by_region.boxes.iter().map(|b| b.as_ref().unwrap().median).collect();
+        assert_eq!(medians, [100.0, 20.0, 10.25, 7.0]);
+        assert_eq!(by_region.rows_drawn, 6);
+
+        // Over time, by month: March has no rows, so it has no box.
+        let by_month = orders()
+            .chart(&ChartRequest { x: axis(2, Role::Time), y: axis(1, Role::Continuous), bucket: Some(TimeBucket::Month), ..request(ChartKind::Box) })
+            .unwrap();
+        assert_eq!(edges(&by_month).len(), 5);
+        let rows: Vec<Option<u64>> = by_month.boxes.iter().map(|b| b.as_ref().map(|b| b.rows)).collect();
+        assert_eq!(rows, [Some(2), Some(2), None, Some(1)]);
+    }
+
+    #[test]
+    fn many_outliers_are_thinned_but_counted_and_keep_their_extremes() {
+        let mut values: Vec<String> = (0..3000).map(|_| "10".to_string()).collect();
+        values.extend((0..500).map(|i| (1000 + i).to_string()));
+        let data = column_of("n", values.iter().map(String::as_str));
+        let stats = data.chart(&ChartRequest { y: axis(0, Role::Continuous), ..request(ChartKind::Box) }).unwrap().boxes[0].clone().unwrap();
+        // Six in seven of the values are 10, so the box has no height and everything else is outside it.
+        assert_eq!((stats.q1, stats.q3, stats.low, stats.high), (10.0, 10.0, 10.0, 10.0));
+        assert_eq!(stats.outlier_count, 500);
+        assert_eq!(stats.outliers.len(), MAX_OUTLIERS);
+        assert_eq!((stats.outliers[0], stats.outliers[MAX_OUTLIERS - 1]), (1000.0, 1499.0));
+    }
+
+    #[test]
+    fn a_control_chart_of_single_rows_takes_its_limits_from_point_to_point_ranges() {
+        // Ranges between neighbours: 2, 1, 3, 2, so their average is 2.
+        let data = column_of("n", ["10", "12", "11", "14", "12"]);
+        let chart = data.chart(&ChartRequest { y: axis(0, Role::Continuous), ..request(ChartKind::Control) }).unwrap();
+        assert_eq!(chart.x, XAxis::Sequence { count: 5, rows_per_point: 1 });
+        assert_eq!(chart.series[0].values, [Some(10.0), Some(12.0), Some(11.0), Some(14.0), Some(12.0)]);
+        let control = chart.control.unwrap();
+        assert!(control.individuals);
+        assert_eq!(control.center, 11.8);
+        assert!((control.sigma - 2.0 / 1.128).abs() < 1e-12);
+        assert!((control.upper[0].unwrap() - (11.8 + 6.0 / 1.128)).abs() < 1e-12);
+        assert!((control.lower[4].unwrap() - (11.8 - 6.0 / 1.128)).abs() < 1e-12);
+        assert_eq!(control.beyond, 0);
+        // The same figures describe the column.
+        let stats = chart.stats.unwrap();
+        assert_eq!((stats.rows, stats.mean, stats.min, stats.max), (5, 11.8, 10.0, 14.0));
+        assert!((stats.sigma_within.unwrap() - 2.0 / 1.128).abs() < 1e-12);
+        assert!((stats.std_dev - 2.2f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_control_chart_with_subgroups_pools_the_spread_within_them_and_flags_a_point_outside() {
+        // Lots a, b and c vary by one unit within themselves; lot d sits far above.
+        let rows = [("a", "9"), ("a", "10"), ("a", "11"), ("b", "10"), ("b", "11"), ("b", "12"), ("c", "9"), ("c", "10"), ("c", "11"), ("d", "19"), ("d", "20"), ("d", "21")];
+        let data = dataset(&["lot", "n"], rows.iter().map(|(lot, n)| vec![Some(*lot), Some(*n)]));
+        let chart = data.chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), sort: BarSort::Value, ..request(ChartKind::Control) }).unwrap();
+        // In the order the lots first appear, whatever order was asked for.
+        assert_eq!(labels(&chart), ["a", "b", "c", "d"]);
+        assert_eq!(chart.series[0].values, [Some(10.0), Some(11.0), Some(10.0), Some(20.0)]);
+        let control = chart.control.unwrap();
+        assert!(!control.individuals);
+        assert_eq!(control.center, 12.75);
+        // Each lot's squared distances from its own mean add up to 2, with 2 degrees of freedom: variance 1.
+        assert!((control.sigma - 1.0).abs() < 1e-12);
+        let reach = 3.0 / 3f64.sqrt();
+        assert!((control.upper[0].unwrap() - (12.75 + reach)).abs() < 1e-12);
+        assert!((control.lower[0].unwrap() - (12.75 - reach)).abs() < 1e-12);
+        assert_eq!(control.beyond, 4, "against a centre pulled up by lot d, every lot is outside");
+    }
+
+    #[test]
+    fn a_control_chart_over_time_uses_calendar_subgroups_and_skips_empty_ones() {
+        let chart = orders()
+            .chart(&ChartRequest { x: axis(2, Role::Time), y: axis(1, Role::Continuous), bucket: Some(TimeBucket::Month), ..request(ChartKind::Control) })
+            .unwrap();
+        assert_eq!(chart.series[0].values, [Some(20.0), Some(10.25), None, Some(100.0)]);
+        let control = chart.control.unwrap();
+        assert_eq!(control.upper[2], None);
+        assert!(control.upper[3].unwrap() > control.upper[0].unwrap(), "a subgroup of one row has wider limits than one of two");
+    }
+
+    #[test]
+    fn a_control_chart_of_many_rows_averages_them_in_runs() {
+        let values: Vec<String> = (0..MAX_CONTROL_POINTS * 3 + 10).map(|i| (i % 7).to_string()).collect();
+        let chart = column_of("n", values.iter().map(String::as_str))
+            .chart(&ChartRequest { y: axis(0, Role::Continuous), ..request(ChartKind::Control) })
+            .unwrap();
+        // 6,010 rows at four to a point.
+        assert_eq!(chart.x, XAxis::Sequence { count: 1503, rows_per_point: 4 });
+        assert_eq!(chart.series[0].values.len(), 1503);
+        assert!(!chart.control.unwrap().individuals);
+        assert!(chart.notes[0].contains("average of 4 rows"), "{:?}", chart.notes);
+        // Too many different values on X cannot be the points.
+        let ids: Vec<String> = (0..MAX_CONTROL_POINTS + 1).map(|i| i.to_string()).collect();
+        let wide = dataset(&["id", "n"], ids.iter().map(|id| vec![Some(id.as_str()), Some("1")]));
+        let refused = wide.chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), ..request(ChartKind::Control) });
+        assert!(refused.unwrap_err().to_string().contains("too many"));
+    }
+
+    #[test]
+    fn a_histogram_reports_the_column_in_figures_and_counts_rows_outside_the_limits() {
+        let data = column_of("n", ["2", "4", "4", "4", "5", "5", "7", "9"]);
+        let plain = data.chart(&ChartRequest { x: axis(0, Role::Continuous), ..request(ChartKind::Histogram) }).unwrap().stats.unwrap();
+        assert_eq!((plain.rows, plain.mean, plain.min, plain.max), (8, 5.0, 2.0, 9.0));
+        assert!((plain.std_dev - (32.0f64 / 7.0).sqrt()).abs() < 1e-12);
+        // Neighbour ranges 2, 0, 0, 1, 0, 2, 2 average 1.
+        assert!((plain.sigma_within.unwrap() - 1.0 / 1.128).abs() < 1e-12);
+        assert_eq!((plain.below, plain.above), (None, None));
+        let limited = data
+            .chart(&ChartRequest { x: axis(0, Role::Continuous), spec_low: Some(4.0), spec_high: Some(6.5), ..request(ChartKind::Histogram) })
+            .unwrap()
+            .stats
+            .unwrap();
+        assert_eq!((limited.below, limited.above), (Some(1), Some(2)), "on a limit is within it");
+        // Large values close together: the spread must not be lost in the size of the numbers.
+        let big = column_of("n", ["1000000000001", "1000000000002", "1000000000003"]);
+        let stats = big.chart(&ChartRequest { x: axis(0, Role::Continuous), ..request(ChartKind::Histogram) }).unwrap().stats.unwrap();
+        assert!((stats.std_dev - 1.0).abs() < 1e-9, "{}", stats.std_dev);
+    }
+
+    /// The value a fitted line gives at x, the way the user interface works it out.
+    fn value_at(fit: &Fit, x: f64) -> f64 {
+        let u = if matches!(fit.kind, TrendKind::Logarithmic | TrendKind::Power) { x.ln() } else { x };
+        let t = (u - fit.center) / fit.scale;
+        let v: f64 = fit.coefficients.iter().rev().fold(0.0, |sum, c| sum * t + c);
+        if matches!(fit.kind, TrendKind::Exponential | TrendKind::Power) { v.exp() } else { v }
+    }
+
+    fn fitted(points: &[(f64, f64)], kind: TrendKind, degree: u32) -> ChartData {
+        let rows: Vec<(String, String)> = points.iter().map(|(x, y)| (x.to_string(), y.to_string())).collect();
+        dataset(&["x", "y"], rows.iter().map(|(x, y)| vec![Some(x.as_str()), Some(y.as_str())]))
+            .chart(&ChartRequest {
+                x: axis(0, Role::Continuous),
+                y: axis(1, Role::Continuous),
+                trend: Some(TrendSpec { kind, degree, per_group: false }),
+                ..request(ChartKind::Scatter)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn trend_lines_recover_the_curve_the_points_lie_on() {
+        let xs = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0];
+        let curves: [(TrendKind, u32, fn(f64) -> f64); 5] = [
+            (TrendKind::Linear, 0, |x| 3.0 + 2.0 * x),
+            (TrendKind::Polynomial, 2, |x| 1.0 - 4.0 * x + 0.5 * x * x),
+            (TrendKind::Exponential, 0, |x| 2.0 * (0.3 * x).exp()),
+            (TrendKind::Logarithmic, 0, |x| 5.0 + 3.0 * x.ln()),
+            (TrendKind::Power, 0, |x| 4.0 * x.powf(1.5)),
+        ];
+        for (kind, degree, curve) in curves {
+            let points: Vec<(f64, f64)> = xs.iter().map(|x| (*x, curve(*x))).collect();
+            let data = fitted(&points, kind, degree);
+            let fit = &data.fits[0];
+            assert_eq!((fit.series, fit.rows), (None, 6), "{kind:?}");
+            assert!(fit.r_squared > 0.999_999, "{kind:?}: R² {}", fit.r_squared);
+            for x in [1.5, 4.0, 10.0] {
+                let (got, want) = (value_at(fit, x), curve(x));
+                assert!((got - want).abs() < 1e-6 * want.abs().max(1.0), "{kind:?} at {x}: {got} against {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_trend_line_through_scattered_points_is_the_least_squares_line() {
+        // The textbook example: slope 0.6, intercept 2.2, R² 0.6.
+        let data = fitted(&[(1.0, 2.0), (2.0, 4.0), (3.0, 5.0), (4.0, 4.0), (5.0, 5.0)], TrendKind::Linear, 0);
+        let fit = &data.fits[0];
+        assert!((value_at(fit, 0.0) - 2.2).abs() < 1e-12);
+        assert!((value_at(fit, 1.0) - value_at(fit, 0.0) - 0.6).abs() < 1e-12);
+        assert!((fit.r_squared - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn trend_lines_work_on_times_and_for_each_colour_group_and_say_what_they_cannot_fit() {
+        // Amount against the time of the order: times are around 1.8e12 milliseconds.
+        let over_time = orders()
+            .chart(&ChartRequest {
+                x: axis(2, Role::Time),
+                y: axis(1, Role::Continuous),
+                trend: Some(TrendSpec { kind: TrendKind::Linear, degree: 0, per_group: false }),
+                ..request(ChartKind::Scatter)
+            })
+            .unwrap();
+        let fit = &over_time.fits[0];
+        assert_eq!(fit.rows, 5);
+        let residuals: f64 = [("2026-01-05 09:00:00", 10.0), ("2026-01-20 10:30:00", 30.0), ("2026-02-01 00:00:00", 5.0), ("2026-02-14 23:59:59", 15.5), ("2026-04-02 12:00:00", 100.0)]
+            .iter()
+            .map(|(when, amount)| amount - value_at(fit, date(when)))
+            .sum();
+        assert!(residuals.abs() < 1e-6, "a least-squares line leaves residuals that cancel: {residuals}");
+
+        // One line per group; a group of one point has none, and the chart says so.
+        let by_group = orders()
+            .chart(&ChartRequest {
+                x: axis(2, Role::Time),
+                y: axis(1, Role::Continuous),
+                color: Some(0),
+                trend: Some(TrendSpec { kind: TrendKind::Linear, degree: 0, per_group: true }),
+                ..request(ChartKind::Scatter)
+            })
+            .unwrap();
+        let lines: Vec<(Option<&str>, u64)> =
+            by_group.fits.iter().map(|f| (by_group.series[f.series.unwrap()].name.as_deref(), f.rows)).collect();
+        assert_eq!(lines, [(Some("north"), 2), (Some("south"), 2)]);
+        assert!(by_group.notes.iter().any(|n| n.contains("too few")), "{:?}", by_group.notes);
+
+        // Zero has no logarithm: the row is left out and counted.
+        let with_zero = fitted(&[(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (4.0, 4.0)], TrendKind::Logarithmic, 0);
+        assert_eq!(with_zero.fits[0].rows, 3);
+        assert!(with_zero.notes.iter().any(|n| n.contains("leaves out 1 row")), "{:?}", with_zero.notes);
+    }
+
+    #[test]
+    fn a_trend_line_is_fitted_to_every_row_even_when_the_points_are_shaded() {
+        let count = MAX_POINTS + 5_000;
+        let rows: Vec<(String, String)> = (0..count).map(|i| (i.to_string(), (2 * i + 7).to_string())).collect();
+        let data = dataset(&["x", "y"], rows.iter().map(|(x, y)| vec![Some(x.as_str()), Some(y.as_str())]))
+            .chart(&ChartRequest {
+                x: axis(0, Role::Continuous),
+                y: axis(1, Role::Continuous),
+                trend: Some(TrendSpec { kind: TrendKind::Linear, degree: 0, per_group: false }),
+                ..request(ChartKind::Scatter)
+            })
+            .unwrap();
+        assert!(data.density.is_some());
+        assert_eq!(data.fits[0].rows as usize, count);
+        assert!((value_at(&data.fits[0], 100.0) - 207.0).abs() < 1e-6);
     }
 
     #[test]

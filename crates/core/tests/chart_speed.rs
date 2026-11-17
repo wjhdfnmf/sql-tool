@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use sqltool_core::chart::{AxisRef, ChartKind, ChartRequest, Dataset, Filter, Large, Role, Statistic, TimeBucket, XAxis};
+use sqltool_core::chart::{AxisRef, ChartKind, ChartRequest, Dataset, Filter, Large, Role, Statistic, TimeBucket, TrendKind, TrendSpec, XAxis};
 use sqltool_core::store::memory_in_use;
 use sqltool_core::{ColumnInfo, ColumnKind, ResultStore, RowBatch};
 
@@ -132,6 +132,26 @@ fn charting_six_million_rows() {
     let chart = timed("scatter zoomed to one hour", || data.chart(&zoomed).unwrap());
     assert!(chart.density.is_none() && !chart.sampled);
     assert_eq!(chart.rows_drawn, 610, "ten rows a minute, for the 61 minutes from 00:00 to 01:00");
+
+    // A trend line is fitted to every row, shaded or not.
+    let trend = ChartRequest { trend: Some(TrendSpec { kind: TrendKind::Polynomial, degree: 3, per_group: false }), ..scatter.clone() };
+    let chart = timed("scatter with a cubic trend line", || data.chart(&trend).unwrap());
+    assert_eq!(chart.fits[0].rows as usize, ROWS);
+
+    // A box for each region: every value is sorted.
+    let boxes = ChartRequest { x: axis(1, Role::Discrete), y: axis(2, Role::Continuous), ..ChartRequest::new(ChartKind::Box) };
+    let chart = timed("box plot by region", || data.chart(&boxes).unwrap());
+    assert_eq!(chart.boxes.len(), REGIONS.len());
+    assert_eq!(chart.boxes.iter().flatten().map(|b| b.rows as usize).sum::<usize>(), ROWS);
+
+    // A control chart by day, and one of the rows in order.
+    let by_day = ChartRequest { x: axis(3, Role::Time), y: axis(2, Role::Continuous), bucket: Some(TimeBucket::Day), ..ChartRequest::new(ChartKind::Control) };
+    let chart = timed("control chart by day", || data.chart(&by_day).unwrap());
+    assert_eq!(chart.series[0].values.len(), 417);
+    assert_eq!(chart.stats.as_ref().unwrap().rows as usize, ROWS);
+    let in_order = ChartRequest { y: axis(2, Role::Continuous), ..ChartRequest::new(ChartKind::Control) };
+    let chart = timed("control chart of the rows in order", || data.chart(&in_order).unwrap());
+    assert_eq!(chart.x, XAxis::Sequence { count: 2_000, rows_per_point: 3_000 });
 
     // The id column as categories: six million different values.
     let summary = timed("summary of a column with 6M different values", || data.summary(0, Role::Discrete).unwrap());

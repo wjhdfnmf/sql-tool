@@ -1,10 +1,25 @@
+<script lang="ts" module>
+  /** Where on the chart a right-click landed, and what was under it. */
+  export interface ChartSpot {
+    clientX: number;
+    clientY: number;
+    /** In the plot, on the strip under it (the X axis), on the strip to its left (the Y axis), or elsewhere. */
+    area: 'plot' | 'x' | 'y' | 'outside';
+    /** The values under the pointer, where the axis is a scale. */
+    x: number | null;
+    y: number | null;
+    /** The id of the line the user drew that is under the pointer, if any. */
+    line: number | null;
+  }
+</script>
+
 <script lang="ts">
   // Draws one chart. The chart library is loaded the first time this is shown.
 
   import { onMount } from 'svelte';
   import { luminance } from '../lib/chart';
   import type { ChartData } from '../lib/chart';
-  import { buildOption, type ChartLook, type ChartView } from '../lib/chartOption';
+  import { buildOption, xIsScale, type ChartLook, type ChartView } from '../lib/chartOption';
   import type { Chart } from '../lib/echarts';
   import { APPEARANCE_EVENT } from '../lib/settings.svelte';
 
@@ -19,9 +34,11 @@
     onzoom: (x: [number, number], y: [number, number] | null) => void;
     /** Double-click: back to everything. */
     onreset: () => void;
+    /** Right-click, or the menu key. */
+    oncontext: (spot: ChartSpot) => void;
   }
 
-  let { data, view, label, zoom, onzoom, onreset }: Props = $props();
+  let { data, view, label, zoom, onzoom, onreset, oncontext }: Props = $props();
 
   let host: HTMLDivElement;
   let chart = $state.raw<Chart | null>(null);
@@ -40,12 +57,16 @@
 
   function look(): ChartLook {
     const css = getComputedStyle(document.documentElement);
-    const bg = hex(css.getPropertyValue('--bg'), '#ffffff');
+    const color = (name: string, fallback: string) => hex(css.getPropertyValue(name), fallback);
+    const bg = color('--bg', '#ffffff');
     return {
-      text: hex(css.getPropertyValue('--text'), '#1c2026'),
-      muted: hex(css.getPropertyValue('--muted'), '#626b78'),
-      border: hex(css.getPropertyValue('--border'), '#d5d9df'),
-      panel: hex(css.getPropertyValue('--panel'), '#f4f5f7'),
+      text: color('--text', '#1c2026'),
+      muted: color('--muted', '#626b78'),
+      border: color('--border', '#d5d9df'),
+      panel: color('--panel', '#f4f5f7'),
+      accent: color('--accent', '#1f5fbf'),
+      danger: color('--danger', '#b3261e'),
+      ok: color('--ok', '#1e7d3c'),
       bg,
       dark: luminance(bg) < 0.3,
       font: getComputedStyle(document.body).fontFamily,
@@ -94,6 +115,52 @@
     return bytes;
   }
 
+  /** The rectangle the plot is drawn in, in pixels within the chart. Null for a chart without axes (a pie). */
+  function plotBox(): { x: number; y: number; width: number; height: number } | null {
+    try {
+      // The library has no public way to ask where the plot is; this is its own record of it.
+      const model = (chart as unknown as { getModel(): { getComponent(type: string, index: number): { coordinateSystem?: { getRect(): { x: number; y: number; width: number; height: number } } } | undefined } }).getModel();
+      return model.getComponent('grid', 0)?.coordinateSystem?.getRect() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function spotAt(clientX: number, clientY: number): ChartSpot {
+    const spot: ChartSpot = { clientX, clientY, area: 'outside', x: null, y: null, line: null };
+    const plot = chart && view.kind !== 'pie' ? plotBox() : null;
+    if (!chart || !plot) return spot;
+    const box = host.getBoundingClientRect();
+    const [px, py] = [clientX - box.left, clientY - box.top];
+    const [inX, inY] = [px >= plot.x && px <= plot.x + plot.width, py >= plot.y && py <= plot.y + plot.height];
+    spot.area = inX && inY ? 'plot' : inX && py > plot.y + plot.height ? 'x' : inY && px < plot.x ? 'y' : 'outside';
+    // The values at the nearest place in the plot, so that a click on an axis gives the value beside it.
+    const near = [Math.min(plot.x + plot.width, Math.max(plot.x, px)), Math.min(plot.y + plot.height, Math.max(plot.y, py))];
+    const at = chart.convertFromPixel({ gridIndex: 0 }, near) as number[] | undefined;
+    if (at && Number.isFinite(at[1])) spot.y = at[1];
+    const scaleX = xIsScale(data, view.kind);
+    if (at && scaleX && Number.isFinite(at[0])) spot.x = at[0];
+    // A line the user drew, within a few pixels.
+    for (const line of view.lines) {
+      if (line.axis === 'x' && !scaleX) continue;
+      const pixel = chart.convertToPixel(line.axis === 'x' ? { xAxisIndex: 0 } : { yAxisIndex: 0 }, line.value);
+      if (typeof pixel !== 'number' || Math.abs(pixel - (line.axis === 'x' ? px : py)) > 6) continue;
+      if (line.axis === 'x' ? py >= plot.y - 6 && py <= plot.y + plot.height + 20 : px >= plot.x - 40 && px <= plot.x + plot.width + 6) spot.line = line.id;
+    }
+    return spot;
+  }
+
+  function context(e: MouseEvent) {
+    e.preventDefault();
+    // The menu key gives no position: use the middle of the chart.
+    if (e.clientX === 0 && e.clientY === 0) {
+      const box = host.getBoundingClientRect();
+      oncontext(spotAt(box.left + box.width / 2, box.top + box.height / 2));
+    } else {
+      oncontext(spotAt(e.clientX, e.clientY));
+    }
+  }
+
   function startBand(e: PointerEvent) {
     if (!zoom || !chart || e.button !== 0) return;
     const box = host.getBoundingClientRect();
@@ -134,7 +201,15 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div class="chart" class:zoomable={zoom !== null} role="img" aria-label={label} onpointerdown={startBand} ondblclick={() => zoom && onreset()}>
+<div
+  class="chart"
+  class:zoomable={zoom !== null}
+  role="img"
+  aria-label={label}
+  onpointerdown={startBand}
+  ondblclick={() => zoom && onreset()}
+  oncontextmenu={context}
+>
   <div class="canvas" bind:this={host}></div>
   {#if band}
     <div class="band" style:left={`${band.left}px`} style:top={`${band.top}px`} style:width={`${band.width}px`} style:height={`${band.height}px`}></div>

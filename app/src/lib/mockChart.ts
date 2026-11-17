@@ -3,17 +3,20 @@
 // same request and the same shape of answer, worked out here from the mock's
 // synthetic rows. It reads at most ROW_CAP rows; the real backend reads all.
 
-import { NULL_LABEL, OTHER_LABEL, parseTime } from './chart';
-import type { ChartData, ChartRequest, ChartRole, ChartSeries, ColumnSummary, TimeBucket } from './chart';
+import { NULL_LABEL, OTHER_LABEL, fitPoints, parseTime } from './chart';
+import type { BoxStats, ChartData, ChartRequest, ChartRole, ChartSeries, ColumnSummary, Stats, TimeBucket, XAxis } from './chart';
 
 const ROW_CAP = 200_000;
 const MAX_POINTS = 50_000;
 const MAX_SERIES = 8;
+const MAX_CONTROL_POINTS = 2_000;
 
 type Cell = (row: number, column: number) => string | null;
 type Column = { numbers: Float64Array; codes: null; labels: null } | { numbers: null; codes: Int32Array; labels: string[] };
 
 const kept = new Map<string, Column>();
+const fail = (message: string) => ({ kind: 'chart', message });
+const count = (n: number) => n.toLocaleString('en-US');
 
 /** Forgets what was read out of a result. */
 export function mockChartClose(resultId: number): void {
@@ -164,12 +167,99 @@ function niceStep(raw: number): number {
   return ([1, 2, 2.5, 5].find((n) => fraction <= n + 1e-9) ?? 10) * power;
 }
 
+/** Bins of round numbers, or of calendar units, covering lo to hi. */
+function binning(lo: number, hi: number, time: boolean, request: ChartRequest, drawn: number) {
+  if (time) {
+    const spans = (unit: TimeBucket) => bucketIndex(unit, hi) - bucketIndex(unit, lo) + 1;
+    const readable = request.kind === 'line' || request.kind === 'control' ? 240 : 60;
+    let unit = request.bucket ?? UNITS.find((u) => spans(u) <= readable) ?? 'year';
+    while (unit !== 'year' && spans(unit) > 1000) unit = UNITS[UNITS.indexOf(unit) + 1];
+    const first = bucketIndex(unit, lo);
+    const final = unit;
+    return {
+      edges: Array.from({ length: spans(unit) + 1 }, (_, i) => bucketStart(final, first + i)),
+      binOf: (v: number) => bucketIndex(final, v) - first,
+      bucket: unit as TimeBucket | null,
+    };
+  }
+  const target = request.bins ?? Math.min(60, Math.max(10, (Math.ceil(Math.log2(drawn)) + 1) * 2));
+  const step = hi > lo ? niceStep((hi - lo) / target) : 1;
+  const start = Math.floor(lo / step) * step;
+  const bins = Math.floor((hi - start) / step) + 1;
+  return {
+    edges: Array.from({ length: bins + 1 }, (_, i) => start + i * step),
+    binOf: (v: number) => Math.min(bins - 1, Math.max(0, Math.floor((v - start) / step))),
+    bucket: null as TimeBucket | null,
+  };
+}
+
+function statsOf(values: Float64Array, mask: Uint8Array, request: ChartRequest): Stats | null {
+  let [rows, sum, min, max, ranges, previous, below, above] = [0, 0, Infinity, -Infinity, 0, NaN, 0, 0];
+  for (let row = 0; row < values.length; row++) {
+    const v = values[row];
+    if (!mask[row] || Number.isNaN(v)) continue;
+    rows++;
+    sum += v;
+    min = Math.min(min, v);
+    max = Math.max(max, v);
+    if (!Number.isNaN(previous)) ranges += Math.abs(v - previous);
+    previous = v;
+    if (request.specLow !== null && v < request.specLow) below++;
+    if (request.specHigh !== null && v > request.specHigh) above++;
+  }
+  if (rows === 0) return null;
+  const mean = sum / rows;
+  let squares = 0;
+  for (let row = 0; row < values.length; row++) if (mask[row] && !Number.isNaN(values[row])) squares += (values[row] - mean) ** 2;
+  return {
+    rows,
+    mean,
+    stdDev: rows > 1 ? Math.sqrt(squares / (rows - 1)) : 0,
+    sigmaWithin: rows > 1 ? ranges / (rows - 1) / 1.128 : null,
+    min,
+    max,
+    below: request.specLow === null ? null : below,
+    above: request.specHigh === null ? null : above,
+  };
+}
+
+function boxOf(values: number[]): BoxStats | null {
+  if (values.length === 0) return null;
+  values.sort((a, b) => a - b);
+  const last = values.length - 1;
+  const quantile = (share: number) => {
+    const at = last * share;
+    const below = Math.floor(at);
+    return values[below] + (at - below) * (values[Math.min(last, below + 1)] - values[below]);
+  };
+  const [q1, median, q3] = [quantile(0.25), quantile(0.5), quantile(0.75)];
+  const reach = 1.5 * (q3 - q1);
+  const inside = values.filter((v) => v >= q1 - reach && v <= q3 + reach);
+  const outside = values.filter((v) => v < q1 - reach || v > q3 + reach);
+  const outliers = outside.length <= 200 ? outside : Array.from({ length: 200 }, (_, i) => outside[Math.floor((i * (outside.length - 1)) / 199)]);
+  return {
+    rows: values.length,
+    min: values[0],
+    q1,
+    median,
+    q3,
+    max: values[last],
+    low: inside[0],
+    high: inside[inside.length - 1],
+    mean: values.reduce((a, b) => a + b, 0) / values.length,
+    outliers,
+    outlierCount: outside.length,
+  };
+}
+
 export function mockChartData(resultId: number, cell: Cell, total: number, request: ChartRequest): ChartData {
   const rows = Math.min(total, ROW_CAP);
   const column = (ref: { column: number; role: ChartRole } | null) => (ref ? load(resultId, cell, rows, ref.column, ref.role) : null);
   const x = column(request.x);
   const y = column(request.y);
-  const color = request.color === null ? null : load(resultId, cell, rows, request.color, 'discrete');
+  const coloured = !['pie', 'pareto', 'box', 'control'].includes(request.kind);
+  const color = request.color === null || !coloured ? null : load(resultId, cell, rows, request.color, 'discrete');
+  const time = request.x?.role === 'time';
 
   const mask = new Uint8Array(rows).fill(1);
   const within = (values: Float64Array, min: number, max: number) => {
@@ -208,7 +298,11 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
     xExtent,
     xTimeOnly: false,
     yTimeOnly: false,
-    notes: total > ROW_CAP ? [`The mock backend reads only the first ${ROW_CAP.toLocaleString('en-US')} rows.`] : [],
+    notes: total > ROW_CAP ? [`The mock backend reads only the first ${count(ROW_CAP)} rows.`] : [],
+    boxes: [],
+    control: null,
+    stats: null,
+    fits: [],
   };
 
   // Colour groups: at most MAX_SERIES, the last being Other.
@@ -234,8 +328,8 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
   const series = names.length;
 
   if (request.kind === 'scatter') {
-    if (!x?.numbers || !y?.numbers) throw { kind: 'chart', message: 'A scatter plot needs a number or time column on X and on Y.' };
-    data.x = { type: 'continuous', time: request.x?.role === 'time' };
+    if (!x?.numbers || !y?.numbers) throw fail('A scatter plot needs a number or time column on X and on Y.');
+    data.x = { type: 'continuous', time };
     const usable: number[] = [];
     let [x0, x1, y0, y1] = [Infinity, -Infinity, Infinity, -Infinity];
     for (let row = 0; row < rows; row++) {
@@ -247,6 +341,21 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
       y1 = Math.max(y1, y.numbers[row]);
     }
     data.rowsDrawn = usable.length;
+    if (request.trend && usable.length > 0) {
+      const lines = request.trend.perGroup ? series : 1;
+      for (let line = 0; line < lines; line++) {
+        const members = request.trend.perGroup ? usable.filter((row) => seriesOf(row) === line) : usable;
+        const fit = fitPoints(
+          members.map((row) => x.numbers[row]),
+          members.map((row) => y.numbers[row]),
+          request.trend.kind,
+          request.trend.degree,
+          request.trend.perGroup ? line : null,
+        );
+        if (fit) data.fits.push(fit);
+        else if (members.length > 0) data.notes.push('There are too few different points to fit that trend line.');
+      }
+    }
     if (usable.length > MAX_POINTS && request.large === 'density') {
       const [cols, lines] = [160, 100];
       const counts = new Array<number>(cols * lines).fill(0);
@@ -256,7 +365,7 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
         counts[line * cols + col]++;
       }
       data.density = { cols, rows: lines, x: [x0, x1], y: [y0, y1], counts, max: counts.reduce((a, b) => Math.max(a, b), 0) };
-      data.notes.push(`${usable.length.toLocaleString('en-US')} points are too many to draw one by one. The shading shows how many fall in each cell; zoom in, or filter, to see the points.`);
+      data.notes.push(`${count(usable.length)} points are too many to draw one by one. The shading shows how many fall in each cell; zoom in, or filter, to see the points.`);
       return data;
     }
     const keep = usable.length > MAX_POINTS ? MAX_POINTS / usable.length : 1;
@@ -268,11 +377,119 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
       data.series[seriesOf(row)].points.push(x.numbers[row], y.numbers[row]);
       shown++;
     }
-    if (data.sampled) data.notes.push(`A random sample of ${shown.toLocaleString('en-US')} of ${usable.length.toLocaleString('en-US')} points is drawn.`);
+    if (data.sampled) data.notes.push(`A random sample of ${count(shown)} of ${count(usable.length)} points is drawn.`);
     return data;
   }
 
-  if (request.kind === 'histogram' && !x?.numbers) throw { kind: 'chart', message: 'A histogram needs a number or time column on X.' };
+  if (request.kind === 'box' || request.kind === 'control') {
+    const inOrder = request.kind === 'control';
+    if (!y?.numbers) throw fail(inOrder ? 'A control chart needs a number column on Y.' : 'A box plot needs a number or time column on Y.');
+    const yv = y.numbers;
+    const usable = (row: number) => mask[row] === 1 && !Number.isNaN(yv[row]);
+    const group = new Int32Array(rows).fill(-1);
+    let groups = 0;
+    let axis: XAxis;
+    if (!x) {
+      if (inOrder) {
+        let drawn = 0;
+        for (let row = 0; row < rows; row++) if (usable(row)) drawn++;
+        const size = Math.max(1, Math.ceil(drawn / MAX_CONTROL_POINTS));
+        let index = 0;
+        for (let row = 0; row < rows; row++) if (usable(row)) group[row] = Math.floor(index++ / size);
+        groups = Math.ceil(drawn / size);
+        if (size > 1) data.notes.push(`Each point is the average of ${count(size)} rows in a row, in the order of the result.`);
+        axis = { type: 'sequence', count: groups, rowsPerPoint: size };
+      } else {
+        for (let row = 0; row < rows; row++) if (usable(row)) group[row] = 0;
+        groups = 1;
+        axis = { type: 'categories', labels: ['All rows'] };
+      }
+    } else if (x.codes) {
+      const counts = new Map<number, number>();
+      for (let row = 0; row < rows; row++) if (usable(row)) counts.set(x.codes[row], (counts.get(x.codes[row]) ?? 0) + 1);
+      const name = (code: number) => (code < 0 ? NULL_LABEL : x.labels[code]);
+      let shown = [...counts.keys()];
+      const limit = inOrder ? MAX_CONTROL_POINTS : Math.min(500, Math.max(1, request.maxCategories ?? 40));
+      let merged = false;
+      if (shown.length > limit) {
+        if (inOrder) throw fail(`The X column has more than ${count(MAX_CONTROL_POINTS)} different values, too many to be the points of a control chart. Put a time column on X, or leave X empty to chart the rows in order.`);
+        data.notes.push(`${count(shown.length)} categories: the ${limit} with the most rows are shown and the rest are under ${OTHER_LABEL}.`);
+        shown = shown.sort((a, b) => counts.get(b)! - counts.get(a)!).slice(0, limit);
+        merged = true;
+      }
+      const byName = (a: number, b: number) => (a < 0 ? 1 : b < 0 ? -1 : natural(name(a), name(b)));
+      const sort = inOrder ? 'seen' : request.sort;
+      if (sort === 'value') shown.sort((a, b) => counts.get(b)! - counts.get(a)! || byName(a, b));
+      else if (sort === 'label') shown.sort(byName);
+      else shown.sort((a, b) => (a < 0 ? 1 : b < 0 ? -1 : a - b));
+      const place = new Map(shown.map((code, i) => [code, i]));
+      for (let row = 0; row < rows; row++) if (usable(row)) group[row] = place.get(x.codes[row]) ?? shown.length;
+      const labels = shown.map(name);
+      if (merged) labels.push(OTHER_LABEL);
+      groups = labels.length;
+      axis = { type: 'categories', labels };
+    } else {
+      let [lo, hi, drawn] = [Infinity, -Infinity, 0];
+      for (let row = 0; row < rows; row++) {
+        if (!usable(row) || Number.isNaN(x.numbers[row])) continue;
+        lo = Math.min(lo, x.numbers[row]);
+        hi = Math.max(hi, x.numbers[row]);
+        drawn++;
+      }
+      if (drawn === 0) {
+        data.x = { type: 'bins', edges: [], time, bucket: null };
+        return data;
+      }
+      const bins = binning(lo, hi, time, request, drawn);
+      for (let row = 0; row < rows; row++) if (usable(row) && !Number.isNaN(x.numbers[row])) group[row] = bins.binOf(x.numbers[row]);
+      groups = bins.edges.length - 1;
+      axis = { type: 'bins', edges: bins.edges, time, bucket: bins.bucket };
+    }
+    data.x = axis;
+    const members: number[][] = Array.from({ length: groups }, () => []);
+    for (let row = 0; row < rows; row++) if (group[row] >= 0) members[group[row]].push(yv[row]);
+    data.rowsDrawn = members.reduce((n, m) => n + m.length, 0);
+    if (!inOrder) {
+      data.boxes = members.map(boxOf);
+      return data;
+    }
+    data.stats = statsOf(yv, mask, request);
+    if (data.rowsDrawn === 0) return data;
+    const means = members.map((m) => (m.length ? m.reduce((a, b) => a + b, 0) / m.length : null));
+    const center = members.reduce((sum, m) => sum + m.reduce((a, b) => a + b, 0), 0) / data.rowsDrawn;
+    const individuals = members.every((m) => m.length <= 1);
+    let sigma = 0;
+    if (individuals) {
+      const points = means.filter((m): m is number => m !== null);
+      for (let i = 1; i < points.length; i++) sigma += Math.abs(points[i] - points[i - 1]);
+      sigma = points.length > 1 ? sigma / (points.length - 1) / 1.128 : 0;
+    } else {
+      let [inside, freedom] = [0, 0];
+      members.forEach((m, i) => {
+        for (const v of m) inside += (v - (means[i] as number)) ** 2;
+        if (m.length >= 2) freedom += m.length - 1;
+      });
+      sigma = freedom > 0 ? Math.sqrt(inside / freedom) : 0;
+    }
+    const limit = (n: number, sign: number) => (n > 0 ? center + (sign * 3 * sigma) / Math.sqrt(n) : null);
+    const upper = members.map((m) => limit(m.length, 1));
+    const lower = members.map((m) => limit(m.length, -1));
+    data.series = [{ name: null, values: means, points: [] }];
+    data.control = {
+      center,
+      sigma,
+      upper,
+      lower,
+      beyond: means.filter((m, i) => m !== null && (m > (upper[i] as number) || m < (lower[i] as number))).length,
+      individuals,
+    };
+    return data;
+  }
+
+  if (request.kind === 'histogram' && !x?.numbers) throw fail('A histogram needs a number or time column on X.');
+  if ((request.kind === 'pie' || request.kind === 'pareto') && !x?.codes) {
+    throw fail(`A ${request.kind === 'pie' ? 'pie' : 'Pareto'} chart needs a column on X, read as categories.`);
+  }
   const statistic = request.kind === 'histogram' || !y?.numbers ? 'count' : request.statistic;
   const yAt = (row: number): number | null => {
     if (request.kind === 'histogram' || !y) return 1;
@@ -281,7 +498,7 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
   };
 
   if (x?.numbers) {
-    const time = request.x?.role === 'time';
+    if (request.kind === 'histogram') data.stats = statsOf(x.numbers, mask, request);
     let [lo, hi, drawn] = [Infinity, -Infinity, 0];
     for (let row = 0; row < rows; row++) {
       if (!mask[row] || Number.isNaN(x.numbers[row]) || yAt(row) === null) continue;
@@ -294,26 +511,7 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
       data.x = { type: 'bins', edges: [], time, bucket: null };
       return data;
     }
-    let edges: number[];
-    let binOf: (v: number) => number;
-    let bucket: TimeBucket | null = null;
-    if (time) {
-      const count = (unit: TimeBucket) => bucketIndex(unit, hi) - bucketIndex(unit, lo) + 1;
-      let unit = request.bucket ?? UNITS.find((u) => count(u) <= 60) ?? 'year';
-      while (unit !== 'year' && count(unit) > 1000) unit = UNITS[UNITS.indexOf(unit) + 1];
-      const first = bucketIndex(unit, lo);
-      const final = unit;
-      edges = Array.from({ length: count(unit) + 1 }, (_, i) => bucketStart(final, first + i));
-      binOf = (v) => bucketIndex(final, v) - first;
-      bucket = unit;
-    } else {
-      const target = request.bins ?? Math.min(60, Math.max(10, (Math.ceil(Math.log2(drawn)) + 1) * 2));
-      const step = hi > lo ? niceStep((hi - lo) / target) : 1;
-      const start = Math.floor(lo / step) * step;
-      const count = Math.floor((hi - start) / step) + 1;
-      edges = Array.from({ length: count + 1 }, (_, i) => start + i * step);
-      binOf = (v) => Math.min(count - 1, Math.max(0, Math.floor((v - start) / step)));
-    }
+    const { edges, binOf, bucket } = binning(lo, hi, time, request, drawn);
     const bins = edges.length - 1;
     const tallies = Array.from({ length: bins * series }, empty);
     for (let row = 0; row < rows; row++) {
@@ -326,7 +524,7 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
     return data;
   }
 
-  // Bars over categories, or one bar for everything.
+  // Bars, slices or points over categories, or one bar for everything.
   const labels = x?.codes ? x.labels : ['All rows'];
   const nullAt = labels.length;
   const tallies = Array.from({ length: (labels.length + 1) * series }, empty);
@@ -349,13 +547,14 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
   const limit = Math.min(500, Math.max(1, request.maxCategories ?? 40));
   let rest: number[] = [];
   if (shown.length > limit) {
-    data.notes.push(`${shown.length.toLocaleString('en-US')} categories: the ${limit} largest are shown and the rest are under ${OTHER_LABEL}.`);
+    data.notes.push(`${count(shown.length)} categories: the ${limit} largest are shown and the rest are under ${OTHER_LABEL}.`);
     shown.sort(byValue);
     rest = shown.slice(limit).map((entry) => entry.c);
     shown = shown.slice(0, limit);
   }
-  if (request.sort === 'value') shown.sort(byValue);
-  else if (request.sort === 'label') shown.sort((a, b) => (a.c === nullAt ? 1 : b.c === nullAt ? -1 : natural(name(a.c), name(b.c))));
+  const sort = request.kind === 'pie' || request.kind === 'pareto' ? 'value' : request.sort;
+  if (sort === 'value') shown.sort(byValue);
+  else if (sort === 'label') shown.sort((a, b) => (a.c === nullAt ? 1 : b.c === nullAt ? -1 : natural(name(a.c), name(b.c))));
   else shown.sort((a, b) => a.c - b.c);
   data.x = { type: 'categories', labels: [...shown.map((entry) => name(entry.c)), ...(rest.length ? [OTHER_LABEL] : [])] };
   data.series = names.map((seriesName, s) => {
