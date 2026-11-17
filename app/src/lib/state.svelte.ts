@@ -78,23 +78,18 @@ function loadSavedTabs(profileId: string | null): SavedTab[] {
   }
 }
 
-/** The default schema last chosen for each saved connection, selected again when it is next opened. */
+// The default schema chosen for a connection is kept in the connection's
+// own settings (by the backend), so there is one record of it. Versions
+// 0.1.4 and 0.1.5 kept it here instead; that copy is read once, moved into
+// the settings, and removed.
 const SCHEMA_KEY = 'sqltool.schema.';
 
-function rememberSchema(profileId: string | null, schema: string | null): void {
-  if (!profileId) return;
-  try {
-    if (schema) localStorage.setItem(SCHEMA_KEY + profileId, schema);
-    else localStorage.removeItem(SCHEMA_KEY + profileId);
-  } catch {
-    // Remembering it is a convenience.
-  }
-}
-
-function rememberedSchema(profileId: string | null): string | null {
+function takeOldRememberedSchema(profileId: string | null): string | null {
   if (!profileId) return null;
   try {
-    return localStorage.getItem(SCHEMA_KEY + profileId);
+    const schema = localStorage.getItem(SCHEMA_KEY + profileId);
+    localStorage.removeItem(SCHEMA_KEY + profileId);
+    return schema;
   } catch {
     return null;
   }
@@ -188,11 +183,11 @@ export class WorkspaceState {
     if (saved.length === 0) this.addTab();
     else this.activeTabId = this.tabs[0].id;
     if (info.database) void this.loadCatalog(info.database);
-    // The default schema chosen last time, if the connection does not name one itself.
-    const schema = rememberedSchema(info.profileId);
-    if (schema && schema !== info.database) {
+    // A default schema remembered by an earlier version, if the connection has none of its own.
+    const old = takeOldRememberedSchema(info.profileId);
+    if (old && !info.database) {
       // It may have been dropped since; then there is simply no default.
-      this.setDefaultSchema(schema).catch(() => rememberSchema(info.profileId, null));
+      this.setDefaultSchema(old).catch(() => {});
     }
   }
 
@@ -204,8 +199,9 @@ export class WorkspaceState {
   async setDefaultSchema(schema: string): Promise<void> {
     await backend.setDefaultSchema(this.info.id, schema);
     this.database = schema;
-    rememberSchema(this.info.profileId, schema);
     void this.loadCatalog(schema);
+    // The backend has written it into the connection's settings; show that on the Connections page too.
+    void app.refreshProfiles().catch(() => {});
   }
 
   /** Writes the open tabs' text to local storage, for the next time this connection is opened. */
@@ -440,7 +436,8 @@ export class WorkspaceState {
         break;
       case 'database':
         this.database = m.name;
-        rememberSchema(this.info.profileId, m.name);
+        // USE in a script changes the connection's default; its settings were updated to match.
+        void app.refreshProfiles().catch(() => {});
         if (m.name) void this.loadCatalog(m.name);
         break;
       case 'finished':

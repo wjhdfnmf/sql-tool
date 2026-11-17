@@ -565,6 +565,45 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { inNewTab, inOldTab, back };
   });
 
+  await step('the default schema is written into the connection, and its script folder is read live', async () => {
+    expect(workspace && profile, 'not connected');
+    const saved = async () => (await backend.profilesList()).find((p) => p.id === profile!.id);
+    await backend.setDefaultSchema(workspace.id, 'information_schema');
+    const chosen = (await saved())?.database;
+    await backend.setDefaultSchema(workspace.id, config.schema);
+    const restored = (await saved())?.database;
+    expect(chosen === 'information_schema', `after choosing a schema the connection's settings said ${chosen}`);
+    expect(restored === config.schema, `after choosing it back they said ${restored}`);
+
+    // A script folder set while the connection is open applies at once, and
+    // each connection has its own.
+    const before = await backend.scriptFolderOf(workspace.id);
+    const current = await saved();
+    expect(current, 'the profile is gone');
+    await backend.profileSave({ ...current, scriptFolder: config.scriptFolders[0] }, null);
+    const first = await backend.scriptFolderOf(workspace.id);
+    const other = await backend.profileSave({ ...current, id: '', name: 'Self-test second', scriptFolder: config.scriptFolders[1] }, config.password);
+    try {
+      const second = await backend.connect(other.id, null);
+      try {
+        const [a, b] = [await backend.scriptFolderOf(workspace.id), await backend.scriptFolderOf(second.id)];
+        expect(a === config.scriptFolders[0] && b === config.scriptFolders[1], `two connections gave folders ${a} and ${b}`);
+        // Changed while both are open.
+        await backend.profileSave({ ...other, scriptFolder: config.scriptFolders[0] }, null);
+        const changed = await backend.scriptFolderOf(second.id);
+        expect(changed === config.scriptFolders[0], `after changing it the second connection gave ${changed}`);
+      } finally {
+        await backend.disconnect(second.id);
+      }
+    } finally {
+      await backend.profileDelete(other.id);
+      await backend.profileSave({ ...current, scriptFolder: null }, null);
+    }
+    expect(before === null && first === config.scriptFolders[0], `the folder went from ${before} to ${first}`);
+    expect((await backend.scriptFolderOf(workspace.id)) === null, 'the folder was not cleared');
+    return { chosen, restored, first };
+  });
+
   await step('default schema follows USE', async () => {
     const messages = await run(`USE \`${config.schema}\``, { kind: 'all' }, null);
     const changed = ofType(messages, 'database')[0];

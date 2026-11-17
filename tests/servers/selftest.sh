@@ -51,6 +51,11 @@ case "$TARGET" in
     ;;
 esac
 
+# Two folders to stand for two connections' script folders.
+mkdir -p "$OUT/scripts-a" "$OUT/scripts-b"
+export SQLTOOL_SELFTEST_SCRIPTS_A="$(native "$OUT/scripts-a")"
+export SQLTOOL_SELFTEST_SCRIPTS_B="$(native "$OUT/scripts-b")"
+
 # Exports made by the self-test go here instead of through a file dialog.
 mkdir -p "$OUT/export"
 export SQLTOOL_SELFTEST_EXPORT_DIR="$(native "$OUT/export")"
