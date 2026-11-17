@@ -17,6 +17,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **Row limit**: 1,000 to 100,000 rows per result, or none. At the limit the query is interrupted on the server.
 - **Working with results**: sort and filter without re-running, export as CSV, TSV, JSON or SQL INSERT, and edit rows in place with changes reviewed as SQL and applied in one transaction.
 - **Exporting everything**: a result that stopped at the row limit holds only the rows up to it. Export then asks whether to write every row the query returns: the query is run again and each row goes straight to the file, so millions of rows export without being held in memory, with a running count and a Stop button.
+- **Graphs**: the Graph button beside the menu button switches from the query to a graph of the result in front, once it has finished. Columns go on the X axis, the Y axis or the colour, by dragging or from a list. Bar charts (a count, sum, average, smallest or largest per value), histograms and scatter plots; time on X is cut into seconds up to years; numbers are binned at round values. Filters keep rows by a range or by ticked values, and dragging across a chart zooms in to a range of X, or of time. The chart is worked out from every row of the result, however many: a scatter plot of more than 50,000 points is drawn as shading by count, or as a sample. A picture of the chart can be copied or saved as a PNG.
 - **Table designer**: create and alter tables in a tab of their own, next to the query tabs. Columns, indexes and foreign keys each have a section; index and key columns are picked from the table's columns. The SQL that will run is always in view, and nothing runs until Apply is clicked.
 - **Safety**: read-only connections, and confirmation of risky statements on connections marked as production.
 - **Schema browser**: schemas with their tables, views, stored procedures and functions, loaded on demand; every group has a + to add one. Filter by table, or by `schema.table`. Clicking a table shows its columns and indexes in the object info pane below, which can be dragged taller or shorter; the whole navigator can be dragged wider or narrower. Right-click for everything else.
@@ -40,6 +41,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - Query history and remembered query tabs are kept on this computer without encryption. Statements that contain a password are left out of both.
 - `sha256_password` accounts are not supported.
 - A result keeps about 512 MB in memory and spills the rest to a temporary file, which is private and removed when the result closes, but not encrypted.
+- A graph is of one result as it was loaded: it does not run the query again, and a result that stopped at the row limit is charted up to the limit. A graph's setup is kept while its tab is open, not between runs of the app. Graphs do not yet split into a grid of small charts by a column.
 - No commit/rollback controls yet. When a dropped connection is reopened, session variables, temporary tables and an open transaction are not carried over; the output says so.
 - Installers are not code-signed, so Windows and macOS show a warning.
 
@@ -79,6 +81,12 @@ cargo test --workspace
 
 This runs the unit tests and the login, TLS and query tests against a fake MySQL server that ships in this repository. No database is needed.
 
+How long charting six million rows takes (no database needed; it also checks the answers):
+
+```bash
+cargo test -p sqltool-core --release --test chart_speed -- --ignored --nocapture
+```
+
 Tests against real servers, and the app's end-to-end run, use local test servers set up by the scripts in [tests/servers](tests/servers) (Linux or WSL):
 
 ```bash
@@ -104,4 +112,4 @@ bash tests/servers/selftest.sh mariadb
 
 ## Licence
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE). The libraries the app is built with, and their licences, are listed in [THIRD-PARTY.md](THIRD-PARTY.md).

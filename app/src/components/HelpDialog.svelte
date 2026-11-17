@@ -44,6 +44,16 @@
       ],
     },
     {
+      title: 'Graphs',
+      rows: [
+        ['Draw a graph of the result in front', 'Graph, beside the menu button'],
+        ['Put a column on an axis, or colour by it', 'Drag it there, or click it'],
+        ['Zoom in to a range', 'Drag across the chart'],
+        ['Show the whole range again', 'Double-click the chart, or All'],
+        ['Back to the query', 'Esc'],
+      ],
+    },
+    {
       title: 'Schemas',
       rows: [
         ['See a table\'s columns and indexes', 'Click it'],

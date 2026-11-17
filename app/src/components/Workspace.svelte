@@ -66,7 +66,10 @@
     return result && result.done && result.rows > 0 && result.columns.some((c) => defaultRole(c.kind) !== null) ? result : null;
   });
   /** The graph builder is what the window shows. */
-  const graphShown = $derived(workspace.graphOpen && tab.graph !== null);
+  const graphShown = $derived(
+    // Only while the result it charts is still there: a tab whose query has been run again shows the query.
+    workspace.graphOpen && tab.graph !== null && tab.results.some((r) => r.id === tab.graph?.resultId),
+  );
 
   function toggleGraph() {
     if (graphShown) {

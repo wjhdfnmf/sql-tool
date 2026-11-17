@@ -6,6 +6,7 @@
 // the things unit tests cannot: argument and field naming across the
 // JavaScript/Rust boundary, the binary row transport, and the keychain.
 
+import type { AxisRef, ChartRequest } from './chart';
 import { backend } from './backend';
 import { app } from './state.svelte';
 import { decodeCells } from './rows';
@@ -296,8 +297,46 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     const visible = await backend.resultView(done.resultId, '77', 0, true);
     const filtered = await backend.exportResult(done.resultId, 'tsv', '');
     expect(filtered && filtered.rows === visible && filtered.filtered, `filtered export wrote ${filtered?.rows} of ${visible} visible rows`);
+
+    // A chart is worked out from every row held, whatever the grid is filtered to (it still is, here).
+    const chart: Omit<ChartRequest, 'kind' | 'x' | 'y' | 'color'> = { statistic: 'count', bins: null, bucket: null, filters: [], xRange: null, yRange: null, large: 'density', sort: 'value', maxCategories: null };
+    const number: AxisRef = { column: 0, role: 'continuous' };
+    let clock = performance.now();
+    const lap = () => {
+      const ms = Math.round(performance.now() - clock);
+      clock = performance.now();
+      return ms;
+    };
+    const summary = await backend.chartColumn(done.resultId, 0, 'continuous');
+    const readMs = lap();
+    expect(summary.rows === done.rows && summary.missing === 0, `the chart read ${summary.rows} rows of ${done.rows}, ${summary.missing} of them unreadable`);
+    expect(summary.min === 1 && summary.max === done.rows, `the first column ran from ${summary.min} to ${summary.max}`);
+    const histogram = await backend.chartData(done.resultId, { ...chart, kind: 'histogram', x: number, y: null, color: null, bins: 10 });
+    const histogramMs = lap();
+    const counted = histogram.series[0].values.reduce((sum: number, v) => sum + (v ?? 0), 0);
+    expect(histogram.rowsTotal === done.rows && counted === done.rows, `the histogram counted ${counted} of ${done.rows} rows`);
+    const scatter = await backend.chartData(done.resultId, { ...chart, kind: 'scatter', x: number, y: number, color: null });
+    const scatterMs = lap();
+    const shaded = scatter.density?.counts.reduce((sum, n) => sum + n, 0);
+    expect(shaded === done.rows && scatter.series.length === 0, `the scatter plot shaded ${shaded} of ${done.rows} points`);
+    // Zoomed in to a thousand rows, the points themselves come back.
+    const zoomed = await backend.chartData(done.resultId, { ...chart, kind: 'scatter', x: number, y: number, color: null, xRange: [1, 1000] });
+    expect(!zoomed.density && zoomed.series[0].points.length === 2000, `zoomed in, the plot had ${zoomed.series[0]?.points.length} numbers`);
+    // The third column is the same text in every row: one bar holding them all, in one colour group.
+    const bars = await backend.chartData(done.resultId, { ...chart, kind: 'bar', x: { column: 2, role: 'discrete' }, y: number, color: 2, statistic: 'max' });
+    const barsMs = lap();
+    expect(bars.x.type === 'categories' && bars.x.labels.length === 1, `the bar chart had ${JSON.stringify(bars.x).slice(0, 120)}`);
+    expect(bars.series.length === 1 && bars.series[0].values[0] === done.rows, `the largest value was ${bars.series[0]?.values[0]}`);
+    try {
+      await backend.chartData(done.resultId, { ...chart, kind: 'scatter', x: { column: 2, role: 'discrete' }, y: number, color: null });
+      throw new Error('a scatter plot over categories was accepted');
+    } catch (e) {
+      expect(asUiError(e).kind === 'chart', `unexpected: ${asUiError(e).kind}: ${asUiError(e).message}`);
+    }
+    await backend.chartClose(done.resultId);
+
     await backend.closeResults([done.resultId]);
-    return { rows: done.rows, loadedMs, exported, filteredRows: visible };
+    return { rows: done.rows, loadedMs, exported, filteredRows: visible, chartMs: { read: readMs, histogram: histogramMs, scatter: scatterMs, bars: barsMs } };
   });
 
   await step('edit rows through a result, in one transaction', async () => {
@@ -690,10 +729,66 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     expect(schemaHeading.includes(config.schema), `the schema editor showed "${schemaHeading}"`);
     state.closeTab(schemaTab);
 
+    // The graph builder takes over from the query, draws a chart and saves a picture of it.
+    const graphButton = document.querySelector<HTMLButtonElement>('.row-tools .graph-button');
+    expect(graphButton, 'there is no Graph button');
+    state.activeTabId = tab.id;
+    await state.run(
+      tab,
+      "SELECT 'north' AS region, 10 AS amount, TIMESTAMP('2026-01-05 09:00:00') AS placed UNION ALL SELECT 'north', 30, TIMESTAMP('2026-01-20 10:00:00') " +
+        "UNION ALL SELECT 'south', 5, TIMESTAMP('2026-02-01 00:00:00') UNION ALL SELECT 'east', 100, TIMESTAMP('2026-04-02 12:00:00')",
+      { kind: 'all' },
+    );
+    await sleep(500);
+    expect(tab.results.length === 1 && tab.results[0].done, `the query for the graph gave: ${tab.messages.map((m) => m.text).join(' | ')}`);
+    expect(!graphButton.disabled, 'the Graph button is not enabled for a finished result');
+    graphButton.click();
+    await sleep(400);
+    const graph = document.querySelector<HTMLElement>('.graph');
+    expect(graph && tab.graph, 'the graph builder did not open');
+    expect(document.querySelector<HTMLElement>('.workspace > .columns')?.hidden, 'the query is still showing behind the graph');
+    const choose = (label: string, value: string) => {
+      const select = graph.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
+      expect(select, `no list for "${label}"`);
+      select.value = value;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    choose('Column for X axis', '0');
+    choose('Column for Y axis', '1');
+    choose('Column for Colour by', '0');
+    // The chart library is fetched the first time a chart is drawn.
+    let chartCanvas: HTMLCanvasElement | null = null;
+    for (let i = 0; i < 40 && !chartCanvas; i++) {
+      await sleep(250);
+      chartCanvas = graph.querySelector<HTMLCanvasElement>('.chart canvas');
+    }
+    expect(chartCanvas && chartCanvas.width > 100, `the chart did not draw: ${graph.querySelector('.stage')?.textContent?.trim().slice(0, 200)}`);
+    await sleep(400);
+    const foot = () => graph.querySelector('.foot')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    expect(/4 of 4 rows/.test(foot()), `the graph reported: ${foot()}`);
+    const [bar, save] = ['Bar', 'Save image'].map((label) =>
+      [...graph.querySelectorAll<HTMLButtonElement>('.top button')].find((b) => b.textContent?.trim() === label),
+    );
+    expect(bar?.getAttribute('aria-pressed') === 'true' && save && !save.disabled, 'the graph toolbar is not as expected');
+    save.click();
+    for (let i = 0; i < 20 && !/Saved /.test(foot()); i++) await sleep(250);
+    expect(/Saved .*chart\.png/.test(foot()), `saving the picture reported: ${foot()}`);
+    const graphNote = foot();
+    // Time on X, cut into months, with a filter and a range: nothing here should upset the page.
+    choose('Column for X axis', '2');
+    await sleep(700);
+    expect(graph.querySelector('.x-range'), `a time column on X showed no time range: ${foot()}`);
+    choose('Add a filter', '1');
+    await sleep(700);
+    expect(graph.querySelector('.filter .range'), 'the number filter has no slider');
+    [...graph.querySelectorAll<HTMLButtonElement>('.top button')].find((b) => b.textContent?.includes('Back to query'))?.click();
+    await sleep(300);
+    expect(!document.querySelector('.graph') && !document.querySelector<HTMLElement>('.workspace > .columns')?.hidden, 'Back to query did not bring the query back');
+
     expect(violations.length === 0, `the content security policy blocked something: ${violations.join('; ')}`);
     await backend.closeResults(tab.results.map((r) => r.id));
     await backend.closeTab(workspace.id, tab.id);
-    return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes, designedColumns };
+    return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes, designedColumns, graph: graphNote.slice(0, 160) };
   });
 
   await step('disconnect and remove the profile', async () => {
