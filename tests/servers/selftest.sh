@@ -92,6 +92,16 @@ else
   STATUS=1
 fi
 
+# The picture of the chart the self-test saved: a PNG, and not an empty one.
+PNG="$OUT/export/chart.png"
+PNG_BYTES=$(wc -c < "$PNG" 2>/dev/null || echo 0)
+if [ "$PNG_BYTES" -gt 4000 ] && [ "$(head -c 4 "$PNG" | tail -c 3)" = "PNG" ]; then
+  echo "  [ ok ] the chart was saved as a PNG picture ($PNG_BYTES bytes): $(native "$PNG")"
+else
+  echo "  [FAIL] the saved chart is not a PNG picture ($PNG_BYTES bytes)"
+  STATUS=1
+fi
+
 # The password must never reach the settings or history files.
 if grep -rqF "$SQLTOOL_SELFTEST_PASSWORD" "$OUT/data" 2>/dev/null; then
   echo "  [FAIL] the password was written to a file under $OUT/data"

@@ -4,6 +4,7 @@
 // without the desktop shell or a database.
 
 import type { Backend } from './backend';
+import { mockChartClose, mockChartColumn, mockChartData } from './mockChart';
 import type { ColumnInfo, HistoryEntry, Profile, RunMsg, ServerInfo, Settings, UiError, WorkspaceInfo } from './types';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -126,7 +127,8 @@ const mockDefaults: Settings = {
 };
 
 let nextId = 100;
-const results = new Map<number, { columns: ColumnInfo[]; rows: number }>();
+type CellOf = (row: number, column: number) => string | null;
+const results = new Map<number, { columns: ColumnInfo[]; rows: number; cell: CellOf }>();
 const cancelled = new Set<string>();
 
 const demoColumns: ColumnInfo[] = [
@@ -153,7 +155,49 @@ function cellText(row: number, col: number): string | null {
   }
 }
 
-function encodeRows(columns: number, offset: number, count: number, total: number): Uint8Array {
+// A second sample, for the graph builder: measurements from a production
+// line, with the lot, the machine, a defect and the time of each. Any query
+// that mentions "process" returns it. The thickness is roughly normal around
+// 10, drifts slowly, differs a little by machine, and has a stray value now
+// and then; the temperature goes up with it.
+const processColumns: ColumnInfo[] = ['id', 'lot', 'machine', 'thickness', 'defect', 'measured_at', 'temperature'].map((name) => ({
+  name,
+  kind: name === 'id' || name === 'thickness' || name === 'temperature' ? 'number' : name === 'measured_at' ? 'date' : 'text',
+  source: { schema: 'plant', table: 'process', column: name },
+  primaryKey: name === 'id',
+}));
+
+/** A repeatable number from 0 to 1 for a row; `salt` gives independent ones. */
+const chance = (row: number, salt: number) => (Math.imul(row * 31 + salt * 7919 + 1, 2654435761) >>> 0) / 4294967296;
+/** Roughly normal, mean 0 and standard deviation 1. */
+const bell = (row: number, salt: number) => (chance(row, salt) + chance(row, salt + 1) + chance(row, salt + 2) + chance(row, salt + 3) - 2) * Math.sqrt(3);
+const MACHINES = ['M1', 'M1', 'M1', 'M2', 'M2', 'M3', 'M3', 'M4'];
+const DEFECTS: [string | null, number][] = [[null, 0.7], ['scratch', 0.82], ['dent', 0.9], ['discolour', 0.95], ['burr', 0.98], ['crack', 1]];
+
+function processThickness(row: number): number {
+  const machine = MACHINES[Math.floor(chance(row, 20) * MACHINES.length)];
+  const offset = { M1: 0, M2: 0.04, M3: -0.05, M4: 0.12 }[machine] ?? 0;
+  const drift = 0.08 * Math.sin(row / 400);
+  const stray = chance(row, 30) > 0.995 ? (chance(row, 31) > 0.5 ? 0.9 : -0.8) : 0;
+  return 10 + offset + drift + 0.15 * bell(row, 40) + stray;
+}
+
+function processText(row: number, col: number): string | null {
+  switch (col) {
+    case 0: return String(row + 1);
+    case 1: return `L${String(Math.floor(row / 25) + 1).padStart(4, '0')}`;
+    case 2: return MACHINES[Math.floor(chance(row, 20) * MACHINES.length)];
+    case 3: return row % 211 === 0 ? null : processThickness(row).toFixed(3);
+    case 4: return DEFECTS.find(([, upTo]) => chance(row, 50) < upTo)?.[0] ?? null;
+    case 5: {
+      const at = new Date(Date.UTC(2026, 2, 1) + row * 90_000);
+      return at.toISOString().slice(0, 19).replace('T', ' ');
+    }
+    default: return (180 + 22 * (processThickness(row) - 10) + 1.5 * bell(row, 60)).toFixed(1);
+  }
+}
+
+function encodeRows(cell: CellOf, columns: number, offset: number, count: number, total: number): Uint8Array {
   const encoder = new TextEncoder();
   const last = Math.min(total, offset + count);
   const chunks: number[] = [];
@@ -161,7 +205,7 @@ function encodeRows(columns: number, offset: number, count: number, total: numbe
   chunks.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
   for (let r = offset; r < last; r++) {
     for (let c = 0; c < columns; c++) {
-      const text = cellText(r, c % demoColumns.length);
+      const text = cell(r, c);
       if (text === null) {
         chunks.push(0xfb);
         continue;
@@ -279,9 +323,14 @@ export const mockBackend: Backend = {
       if (/^(select|show|with|explain|describe|call)\b/.test(lower)) {
         const wanted = lower.includes('big') ? 1_000_000 : Number(/limit\s+(\d+)/.exec(lower)?.[1] ?? 2500);
         const total = maxRows === null ? wanted : Math.min(wanted, maxRows);
-        const columns = lower.includes('wide') ? Array.from({ length: 40 }, (_, i) => ({ ...demoColumns[i % 8], name: `${demoColumns[i % 8].name}_${i}` })) : demoColumns;
+        const process = lower.includes('process');
+        const columns = process
+          ? processColumns
+          : lower.includes('wide')
+            ? Array.from({ length: 40 }, (_, i) => ({ ...demoColumns[i % 8], name: `${demoColumns[i % 8].name}_${i}` }))
+            : demoColumns;
         const resultId = nextId++;
-        results.set(resultId, { columns, rows: 0 });
+        results.set(resultId, { columns, rows: 0, cell: process ? processText : (row, column) => cellText(row, column % demoColumns.length) });
         onEvent({ type: 'resultSet', index, resultId, columns, sql });
         for (let rows = Math.min(256, total); ; rows = Math.min(total, rows + 40_000)) {
           await wait(30);
@@ -309,14 +358,17 @@ export const mockBackend: Backend = {
     await wait(4);
     const result = results.get(resultId);
     if (!result) throw fail('no-result', 'This result is no longer available.');
-    return encodeRows(result.columns.length, offset, count, result.rows);
+    return encodeRows(result.cell, result.columns.length, offset, count, result.rows);
   },
-  getCell: async (_resultId, row, column) => {
-    const text = cellText(row, column % demoColumns.length);
+  getCell: async (resultId, row, column) => {
+    const text = results.get(resultId)?.cell(row, column) ?? null;
     return { text, bytes: text === null ? 0 : new TextEncoder().encode(text).length, truncated: false };
   },
   closeResults: async (ids) => {
-    for (const id of ids) results.delete(id);
+    for (const id of ids) {
+      results.delete(id);
+      mockChartClose(id);
+    }
   },
   schemaList: async () => {
     await wait(150);
@@ -445,7 +497,7 @@ export const mockBackend: Backend = {
     const lastCol = Math.min(range.colEnd, result.columns.length - 1);
     const cols: number[] = [];
     for (let c = range.colStart; c <= lastCol; c++) cols.push(c);
-    const value = (row: number, c: number) => cellText(row, c % demoColumns.length);
+    const value = (row: number, c: number) => result.cell(row, c);
     const literal = (row: number, c: number) => {
       const text = value(row, c);
       if (text === null) return 'NULL';
@@ -479,7 +531,7 @@ export const mockBackend: Backend = {
     // The mock adds up only the first rows; the real backend reads them all.
     for (let row = range.rowStart; row <= Math.min(lastRow, range.rowStart + 4999); row++) {
       for (let c = range.colStart; c <= lastCol; c++) {
-        const text = cellText(row, c % demoColumns.length);
+        const text = result.cell(row, c);
         const n = text === null || text.trim() === '' ? NaN : Number(text);
         if (!Number.isFinite(n)) continue;
         stats.numbers++;
@@ -494,6 +546,20 @@ export const mockBackend: Backend = {
     }
     return stats;
   },
+  chartData: async (resultId, request) => {
+    await wait(30);
+    const result = results.get(resultId);
+    if (!result) throw fail('no-result', 'This result is no longer available.');
+    return mockChartData(resultId, result.cell, result.rows, request);
+  },
+  chartColumn: async (resultId, column, role) => {
+    await wait(30);
+    const result = results.get(resultId);
+    if (!result) throw fail('no-result', 'This result is no longer available.');
+    return mockChartColumn(resultId, result.cell, result.rows, column, role);
+  },
+  chartClose: async (resultId) => mockChartClose(resultId),
+  chartSaveImage: async () => 'C:\\exports\\chart.png',
   editTarget: async (_workspaceId, resultId) => {
     await wait(120);
     const result = results.get(resultId);

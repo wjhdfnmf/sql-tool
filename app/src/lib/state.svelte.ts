@@ -2,6 +2,7 @@
 // else talks to the backend about connections, tabs or running statements.
 
 import { backend } from './backend';
+import type { GraphState } from './graph.svelte';
 import { settings } from './settings.svelte';
 import {
   asUiError,
@@ -125,6 +126,8 @@ export class EditorTab {
   design = $state<TabDesign | null>(null);
   /** The designer has changes that have not been applied. */
   designDirty = $state(false);
+  /** The graph set up from one of this tab's results, kept so that leaving it and coming back finds it as it was. */
+  graph = $state<GraphState | null>(null);
 
   constructor(title: string, text = '') {
     this.title = title;
@@ -151,6 +154,8 @@ export class WorkspaceState {
   maxRows = $state<number | null>(settings.current.defaultRowLimit);
   showNavigator = $state(true);
   showOutput = $state(true);
+  /** The graph builder is in front, in place of the query, for tabs that have a graph. */
+  graphOpen = $state(false);
   /** The place in the bottom row where the result in front shows its row count, state and notices. */
   statusHost = $state<HTMLElement | undefined>();
   /** What is selected in the schema tree, shown in the information pane. */

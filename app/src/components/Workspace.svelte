@@ -2,12 +2,15 @@
   import { format } from 'sql-formatter';
   import { adminQueries } from '../lib/admin';
   import { backend } from '../lib/backend';
+  import { defaultRole } from '../lib/chart';
+  import { GraphState } from '../lib/graph.svelte';
   import { layout, saveLayout } from '../lib/layout.svelte';
   import { separator, type MenuItem } from '../lib/menu';
   import { placeIn } from '../lib/place';
   import { app, type EditorTab, type WorkspaceState } from '../lib/state.svelte';
   import {
     asUiError,
+    formatCount,
     formatDuration,
     quoteIdentifier,
     serverLabel,
@@ -18,6 +21,7 @@
   } from '../lib/types';
   import ConfirmSqlDialog from './ConfirmSqlDialog.svelte';
   import Editor from './Editor.svelte';
+  import GraphView from './GraphView.svelte';
   import HistoryPanel from './HistoryPanel.svelte';
   import InfoPane from './InfoPane.svelte';
   import Menu from './Menu.svelte';
@@ -52,6 +56,40 @@
   const tab = $derived(workspace.activeTab);
   /** The navigator shows when it is switched on, and always beside a designer. */
   const navigatorShown = $derived(workspace.showNavigator || !!tab.design);
+  /**
+   * The result a graph can be made from: the one in front in a query tab,
+   * once it has finished, if it has rows and a column that can be charted.
+   */
+  const graphResult = $derived.by(() => {
+    if (tab.design || tab.activeResult === 'messages') return null;
+    const result = tab.results.find((r) => r.id === tab.activeResult);
+    return result && result.done && result.rows > 0 && result.columns.some((c) => defaultRole(c.kind) !== null) ? result : null;
+  });
+  /** The graph builder is what the window shows. */
+  const graphShown = $derived(
+    // Only while the result it charts is still there: a tab whose query has been run again shows the query.
+    workspace.graphOpen && tab.graph !== null && tab.results.some((r) => r.id === tab.graph?.resultId),
+  );
+
+  function toggleGraph() {
+    if (graphShown) {
+      closeGraph();
+      return;
+    }
+    const result = graphResult;
+    if (!result) return;
+    // The same query run again keeps its graph; different columns start a new one.
+    if (!tab.graph || !tab.graph.fits(result.columns)) tab.graph = new GraphState(result.id, result.columns);
+    else if (tab.graph.resultId !== result.id) tab.graph.follow(result.id, result.columns);
+    workspace.graphOpen = true;
+  }
+
+  function closeGraph() {
+    workspace.graphOpen = false;
+    // The columns the backend read out for the chart are let go; the setup stays on the tab.
+    if (tab.graph) void backend.chartClose(tab.graph.resultId).catch(() => {});
+  }
+
   /** The tab that queries run in: the active one, unless that is a designer. */
   const queryTab = $derived(tab.design ? (workspace.tabs.find((t) => !t.design) ?? null) : tab);
 
@@ -507,6 +545,8 @@
 
   function onWindowKey(e: KeyboardEvent) {
     if (app.active !== info.id || !(e.ctrlKey || e.metaKey) || document.querySelector('dialog[open]')) return;
+    // The editor's shortcuts are for the editor; with the graph in front they would act on something out of sight.
+    if (graphShown) return;
     const key = e.key.toLowerCase();
     if (key === 't' && !e.shiftKey && !e.altKey) workspace.addTab();
     else if (key === 'o' && !e.shiftKey && !e.altKey) void openScript();
@@ -604,10 +644,30 @@
 <div class="workspace">
   <!-- Shown at the end of the row of connection tabs while this connection is in front. -->
   <div class="row-tools" use:placeIn={app.toolsHost} hidden={app.active !== info.id}>
+    <button
+      class="quiet graph-button"
+      aria-pressed={graphShown}
+      disabled={!graphShown && !graphResult}
+      title={graphShown
+        ? 'Back to the query and its results'
+        : graphResult
+          ? 'Draw a graph from the result in front'
+          : 'A graph is drawn from a finished result: run a query that returns rows first'}
+      onclick={toggleGraph}>Graph</button
+    >
     <button class="quiet menu-button" aria-label="Menu" aria-haspopup="menu" title="History, connection info, create, server information, settings, help" onclick={showMainMenu}>&#9776;</button>
   </div>
 
-  <div class="columns">
+  {#if graphShown && tab.graph}
+    {@const charted = tab.results.find((r) => r.id === tab.graph?.resultId)}
+    <GraphView
+      graph={tab.graph}
+      title={`${tab.title}${charted ? ` \u00b7 ${charted.title} \u00b7 ${formatCount(charted.rows)} rows` : ''}`}
+      onclose={closeGraph}
+    />
+  {/if}
+
+  <div class="columns" hidden={graphShown}>
     <aside bind:this={aside} hidden={!navigatorShown} style:width={`${layout.navWidth}px`} aria-label="Navigator">
       <div class="side-body">
         <SchemaTree
@@ -916,6 +976,11 @@
     background: var(--panel-2);
     border-color: var(--border);
     color: var(--text);
+  }
+
+  .row-tools .graph-button[aria-pressed='true'] {
+    background: var(--panel-2);
+    border-color: var(--border);
   }
 
   .row-tools .menu-button {

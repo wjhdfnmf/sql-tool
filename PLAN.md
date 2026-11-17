@@ -2,6 +2,40 @@
 
 Status: Phases 0 to 2 done; Phase 3 partly done (see "Phase 3 status"); 0.1.0 released 2026-11-16, followed by a pass over everyday use and a code review (see "Everyday-use pass"). Project name is still to be chosen.
 
+## Graph builder (after 0.1.6)
+
+Asked for: a graphing tool in the manner of JMP's Graph Builder, reached from a button beside the menu button, that takes over the window from the query; columns placed on axes; bar charts, histograms and scatter plots; time, discrete and continuous X; filters, a legend and time range selection.
+
+**How it works.** The interface holds none of a result's rows, so a chart cannot be drawn from rows. `crates/core/src/chart.rs` reads the columns in use out of the result store once (as `f64`, or as category codes with up to 5,000 names) and keeps them while the graph is open; every change of axis, filter or range is then a pass over those arrays. It returns only what is drawn: a value per bar and series, a count per bin, the points of a scatter plot up to 50,000, and past that a 160 by 100 grid of counts or a sample chosen by row number. Kept columns are counted against the shared result memory budget and released when the graph is closed.
+
+**Measured** on six million rows, 490 MB, most of it spilled to disk (`cargo test -p sqltool-core --release --test chart_speed -- --ignored --nocapture`, and the same through the desktop app's self-test against MariaDB): first use of a column 0.13 to 0.6 s depending on its width and kind; each chart after that 20 to 130 ms.
+
+**Choices.**
+- *Chart library:* Apache ECharts 6.1, Apache-2.0 like this project. Only the series and parts in use (bar, line, pie, scatter, box plot and custom series; grid, legend, title, tooltip, mark lines; the canvas renderer): 608 KB (205 KB compressed) in a file of its own, fetched when a graph is first opened. It runs under the existing content security policy unchanged: the self-test in the desktop webview draws a chart and reports no violation.
+- *Tooltips* are elements built with `textContent`, not the library's HTML strings, so a value from the database is never read as markup.
+- *Binned bars* (histograms, time on X) are drawn by a custom series on a real number or time axis, so bins sit where their edges are; category bars use the library's bar series.
+- *Time* is milliseconds since 1970 with no time zone, parsed from MySQL's text by hand (zero dates are missing values; `TIME` values are durations) and shown through the UTC accessors, so what is drawn is what the server sent.
+- *Colours:* eight series colours in a fixed order, one set for light backgrounds and one for dark, chosen for separation under colour-vision deficiency; a group keeps its colour as filters change; a ninth group goes to "Other" in grey. `tools/themes.py --check` checks them against every theme.
+- *Dragging columns* uses pointer events, not HTML drag and drop, which Tauri's window intercepts on Windows. Every zone is also a list, so nothing needs dragging.
+- *The graph's filters are its own.* The grid's sort and filter do not affect it.
+
+**Second pass: charts for process work.** Asked for: a pie chart of counts, lines on an axis from a right-click popup (value, style, optional name), a box plot "and other common statistical visualizations", a trend line from a right-click popup, renaming axes and a title, and the tools a process engineer in manufacturing expects.
+
+- *Kinds added:* line, pie, Pareto, box plot and control chart, beside bar, histogram and scatter.
+- *Box plot:* quartiles by the in-between rule (R's type 7, Excel's `QUARTILE.INC`), whiskers to the furthest value within 1.5 box-heights, outliers thinned to 200 a box with the extremes kept and the true count reported. Every value is sorted in the core; six million take under 0.1 s.
+- *Control chart:* with nothing on X the rows are charted in order as individuals, sigma from the average moving range over 1.128; with a lot, batch or time on X the points are subgroup averages, sigma pooled from the spread within subgroups, limits at three sigma over the square root of each subgroup's size. More than 2,000 rows in order are averaged in consecutive runs. Points outside their limits are marked and counted. The run rules (Western Electric, Nelson) are not applied.
+- *Capability:* the core reports the measured column's count, mean, overall and short-term standard deviation, and the rows below and above the limits it is given. Cp and Cpk use the short-term figure, Pp and Ppk the overall one; with one limit only the one-sided index is given.
+- *Lines:* a line is filed under what it measures (a column's values, its sum, or a count of rows), not under an axis, so a specification limit drawn on a histogram of a column appears on that column's control chart and on a scatter plot with it on either axis, and not on a chart of something else. Axes widen to keep a line in view.
+- *Trend lines:* least squares on x and y, or their logarithms, with x brought into -1..1 and y centred first, so times in milliseconds and millions of rows keep their precision; checked against curves with known answers. A scatter plot's is fitted in the core from every row, including when the points are shaded or sampled; charts with few points are fitted in the interface by the same method.
+- *Pareto:* the left axis ends at the total and the right axis at 100%, so the running-total line reads correctly on both: one scale with two sets of labels, not two scales.
+- *Right-click:* the chart reports where a click landed (plot, X axis, Y axis, or on a drawn line) and the values under it; the menu and the popups are the app's own. Everything a right-click offers is also on a button beside the chart, for the keyboard.
+
+**Measured** on six million rows through the desktop app against MariaDB: box plot 53 ms, control chart 56 ms, trend line 80 ms, once the column has been read.
+
+**Not done:** small multiples (JMP's Group X, Group Y, Wrap); remembering a graph between runs of the app; clicking a bar to filter the grid; exporting the numbers behind a chart; control chart run rules, range and standard-deviation charts, attribute charts (p, np, c, u); normal quantile plots; confidence bands on trend lines.
+
+**Not verified by hand:** copying a picture to the clipboard (Save image is exercised by the self-test); the graph builder on Linux and macOS.
+
 ## Reliability pass, settings and themes (after 0.1.2)
 
 ### How a query "timing out" is handled

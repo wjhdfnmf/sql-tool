@@ -3,6 +3,7 @@
 // against the mock backend during development.
 
 import { Channel, invoke } from '@tauri-apps/api/core';
+import type { ChartData, ChartRequest, ChartRole, ColumnSummary } from './chart';
 import { mockBackend } from './mock';
 import type {
   AppInfo,
@@ -109,6 +110,17 @@ export interface Backend {
   copyRange(resultId: number, range: CellRange, format: CopyFormat, headers: boolean, table: string): Promise<string>;
   /** Count, sum, average, smallest and largest of a selection. */
   rangeStats(resultId: number, range: CellRange): Promise<RangeStats>;
+  /**
+   * What a chart of a finished result shows, worked out by the backend from every row of it.
+   * Rejects with kind `chart` and the reason if the columns chosen cannot make that chart.
+   */
+  chartData(resultId: number, request: ChartRequest): Promise<ChartData>;
+  /** What one column holds when read in `role`: its range, or its most frequent values. */
+  chartColumn(resultId: number, column: number, role: ChartRole): Promise<ColumnSummary>;
+  /** Lets go of what the backend kept for a result's chart. */
+  chartClose(resultId: number): Promise<void>;
+  /** Asks where to save, then writes a PNG picture of a chart. Resolves to the path, or null if cancelled. */
+  chartSaveImage(png: Uint8Array): Promise<string | null>;
   /** Rejects with kind `not-editable` and the reason if the result cannot be edited. */
   editTarget(workspaceId: number, resultId: number): Promise<EditTarget>;
   previewEdits(resultId: number, edits: RowEdit[]): Promise<string[]>;
@@ -178,6 +190,11 @@ const tauriBackend: Backend = {
   },
   copyRange: (resultId, range, format, headers, table) => invoke('copy_range', { resultId, range, format, headers, table }),
   rangeStats: (resultId, range) => invoke('range_stats', { resultId, range }),
+  chartData: (resultId, request) => invoke('chart_data', { resultId, request }),
+  chartColumn: (resultId, column, role) => invoke('chart_column', { resultId, column, role }),
+  chartClose: (resultId) => invoke('chart_close', { resultId }),
+  // The picture goes as the raw body of the call, not as JSON.
+  chartSaveImage: (png) => invoke('chart_save_image', png),
   editTarget: (workspaceId, resultId) => invoke('edit_target', { workspaceId, resultId }),
   previewEdits: (resultId, edits) => invoke('preview_edits', { resultId, edits }),
   applyEdits: (workspaceId, tabId, resultId, edits) => invoke('apply_edits', { workspaceId, tabId, resultId, edits }),

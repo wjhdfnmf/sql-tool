@@ -8,6 +8,10 @@ contrast): text on every background, each syntax colour on the background, on
 a selection and on the editor's current line, selections, pending edits,
 buttons and warnings. A new theme that fails is not written.
 
+It also checks the colours charts are drawn in (app/src/lib/chart.ts) against
+every theme's background: the light set on light themes, the dark set on dark
+ones.
+
 To add a theme: add it to NEW and LABELS here, to THEMES in
 crates/core/src/settings.rs, and to the list in app/src/lib/settings.svelte.ts.
 """
@@ -143,6 +147,44 @@ def problems(name, colours):
     return found
 
 
+def chart_problems(themes):
+    """The series colours of charts against each theme's background.
+
+    A chart picks its set by how light the background is, the same way
+    app/src/components/ChartCanvas.svelte does. On dark backgrounds every
+    colour must reach 3:1. On light ones the palette's yellow, pink and aqua
+    cannot (no yellow can), so the floor there is lower; a chart never relies
+    on colour alone, since it has a legend and a tooltip on every mark.
+    """
+    source = open(os.path.join(root, 'app/src/lib/chart.ts'), encoding='utf-8').read()
+
+    def colours(name):
+        listed = re.search(name + r" = \[(.*?)\]", source, re.S)
+        assert listed, f'{name} not found in chart.ts'
+        found = re.findall(r"'(#[0-9a-fA-F]{6})'", listed.group(1))
+        assert found, f'{name} is empty'
+        return found
+
+    light, dark, ramp = colours('SERIES_LIGHT'), colours('SERIES_DARK'), colours('SEQUENTIAL')
+    assert len(light) == len(dark) == 8, 'eight series colours in each set'
+    found = []
+    for name, theme in themes.items():
+        is_dark = luminance(theme['bg']) < 0.3
+        series, least = (dark, 3.0) if is_dark else (light, 1.75)
+        for index, colour in enumerate(series, start=1):
+            ratio = contrast(colour, theme['bg'])
+            if ratio < least:
+                found.append(f'{name}: chart colour {index} ({colour}) on the background is {ratio:.2f}, needs {least}')
+        # "Other" is drawn in the secondary text colour.
+        if contrast(theme['muted'], theme['bg']) < 3.0:
+            found.append(f'{name}: the Other series (muted) hardly shows on the background')
+        # The deep end of the shading is the one that must stand out: the last step on light, the first on dark.
+        deep = ramp[0] if is_dark else ramp[-1]
+        if contrast(deep, theme['bg']) < 3.0:
+            found.append(f'{name}: the densest shading ({deep}) is {contrast(deep, theme["bg"]):.2f} on the background, needs 3.0')
+    return found
+
+
 def existing(css):
     """The themes already in app.css, as name -> colours."""
     out = {}
@@ -180,6 +222,7 @@ every = existing(new_css)
 issues = []
 for name, colours in every.items():
     issues += problems(name, colours)
+issues += chart_problems(every)
 print(f'{len(every)} themes checked')
 for line in issues:
     print('  ' + line)

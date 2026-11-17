@@ -3,6 +3,7 @@
 //! Nothing in this crate knows about the user interface.
 
 pub mod approved;
+pub mod chart;
 pub mod ddl;
 pub mod edit;
 pub mod error;

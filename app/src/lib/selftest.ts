@@ -6,6 +6,7 @@
 // the things unit tests cannot: argument and field naming across the
 // JavaScript/Rust boundary, the binary row transport, and the keychain.
 
+import { evalFit, type AxisRef, type ChartRequest } from './chart';
 import { backend } from './backend';
 import { app } from './state.svelte';
 import { decodeCells } from './rows';
@@ -296,8 +297,72 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     const visible = await backend.resultView(done.resultId, '77', 0, true);
     const filtered = await backend.exportResult(done.resultId, 'tsv', '');
     expect(filtered && filtered.rows === visible && filtered.filtered, `filtered export wrote ${filtered?.rows} of ${visible} visible rows`);
+
+    // A chart is worked out from every row held, whatever the grid is filtered to (it still is, here).
+    const chart: Omit<ChartRequest, 'kind' | 'x' | 'y' | 'color'> = { statistic: 'count', bins: null, bucket: null, filters: [], xRange: null, yRange: null, large: 'density', sort: 'value', maxCategories: null, trend: null, specLow: null, specHigh: null };
+    const number: AxisRef = { column: 0, role: 'continuous' };
+    let clock = performance.now();
+    const lap = () => {
+      const ms = Math.round(performance.now() - clock);
+      clock = performance.now();
+      return ms;
+    };
+    const summary = await backend.chartColumn(done.resultId, 0, 'continuous');
+    const readMs = lap();
+    expect(summary.rows === done.rows && summary.missing === 0, `the chart read ${summary.rows} rows of ${done.rows}, ${summary.missing} of them unreadable`);
+    expect(summary.min === 1 && summary.max === done.rows, `the first column ran from ${summary.min} to ${summary.max}`);
+    const histogram = await backend.chartData(done.resultId, { ...chart, kind: 'histogram', x: number, y: null, color: null, bins: 10 });
+    const histogramMs = lap();
+    const counted = histogram.series[0].values.reduce((sum: number, v) => sum + (v ?? 0), 0);
+    expect(histogram.rowsTotal === done.rows && counted === done.rows, `the histogram counted ${counted} of ${done.rows} rows`);
+    const scatter = await backend.chartData(done.resultId, { ...chart, kind: 'scatter', x: number, y: number, color: null });
+    const scatterMs = lap();
+    const shaded = scatter.density?.counts.reduce((sum, n) => sum + n, 0);
+    expect(shaded === done.rows && scatter.series.length === 0, `the scatter plot shaded ${shaded} of ${done.rows} points`);
+    // Zoomed in to a thousand rows, the points themselves come back.
+    const zoomed = await backend.chartData(done.resultId, { ...chart, kind: 'scatter', x: number, y: number, color: null, xRange: [1, 1000] });
+    expect(!zoomed.density && zoomed.series[0].points.length === 2000, `zoomed in, the plot had ${zoomed.series[0]?.points.length} numbers`);
+    // The third column is the same text in every row: one bar holding them all, in one colour group.
+    const bars = await backend.chartData(done.resultId, { ...chart, kind: 'bar', x: { column: 2, role: 'discrete' }, y: number, color: 2, statistic: 'max' });
+    const barsMs = lap();
+    expect(bars.x.type === 'categories' && bars.x.labels.length === 1, `the bar chart had ${JSON.stringify(bars.x).slice(0, 120)}`);
+    expect(bars.series.length === 1 && bars.series[0].values[0] === done.rows, `the largest value was ${bars.series[0]?.values[0]}`);
+    try {
+      await backend.chartData(done.resultId, { ...chart, kind: 'scatter', x: { column: 2, role: 'discrete' }, y: number, color: null });
+      throw new Error('a scatter plot over categories was accepted');
+    } catch (e) {
+      expect(asUiError(e).kind === 'chart', `unexpected: ${asUiError(e).kind}: ${asUiError(e).message}`);
+    }
+    // The first column runs 1, 2, 3 and so on, so what each of the statistical charts should say is known.
+    const middle = (done.rows + 1) / 2;
+    const box = (await backend.chartData(done.resultId, { ...chart, kind: 'box', x: null, y: number, color: null })).boxes[0];
+    const boxMs = lap();
+    expect(
+      box && box.rows === done.rows && box.min === 1 && box.max === done.rows && box.median === middle && box.outlierCount === 0,
+      `the box plot of 1 to ${done.rows} gave ${JSON.stringify(box).slice(0, 200)}`,
+    );
+    const ordered = await backend.chartData(done.resultId, { ...chart, kind: 'control', x: null, y: number, color: null });
+    const controlMs = lap();
+    expect(
+      ordered.x.type === 'sequence' && ordered.x.count <= 2000 && ordered.x.count * ordered.x.rowsPerPoint >= done.rows,
+      `the control chart's points were ${JSON.stringify(ordered.x)}`,
+    );
+    expect(
+      ordered.control && Math.abs(ordered.control.center - middle) < 1e-6 && !ordered.control.individuals,
+      `the control chart was centred on ${ordered.control?.center}`,
+    );
+    const trend = await backend.chartData(done.resultId, { ...chart, kind: 'scatter', x: number, y: number, color: null, trend: { kind: 'linear', degree: 1, perGroup: false } });
+    const trendMs = lap();
+    const fit = trend.fits[0];
+    expect(fit && fit.rows === done.rows && fit.rSquared > 0.999999 && Math.abs(evalFit(fit, 1000) - 1000) < 1e-3, `the trend line through y = x was ${JSON.stringify(fit)}`);
+    const pie = await backend.chartData(done.resultId, { ...chart, kind: 'pie', x: { column: 2, role: 'discrete' }, y: null, color: null });
+    expect(pie.x.type === 'categories' && pie.x.labels.length === 1 && pie.series[0].values[0] === done.rows, `the pie had ${JSON.stringify(pie.x).slice(0, 120)}`);
+    const limited = await backend.chartData(done.resultId, { ...chart, kind: 'histogram', x: number, y: null, color: null, specLow: 10.5, specHigh: done.rows - 20 });
+    expect(limited.stats?.below === 10 && limited.stats?.above === 20 && limited.stats.mean === middle, `the figures were ${JSON.stringify(limited.stats)}`);
+    await backend.chartClose(done.resultId);
+
     await backend.closeResults([done.resultId]);
-    return { rows: done.rows, loadedMs, exported, filteredRows: visible };
+    return { rows: done.rows, loadedMs, exported, filteredRows: visible, chartMs: { read: readMs, histogram: histogramMs, scatter: scatterMs, bars: barsMs, box: boxMs, control: controlMs, trend: trendMs } };
   });
 
   await step('edit rows through a result, in one transaction', async () => {
@@ -690,10 +755,108 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     expect(schemaHeading.includes(config.schema), `the schema editor showed "${schemaHeading}"`);
     state.closeTab(schemaTab);
 
+    // The graph builder takes over from the query, draws a chart and saves a picture of it.
+    const graphButton = document.querySelector<HTMLButtonElement>('.row-tools .graph-button');
+    expect(graphButton, 'there is no Graph button');
+    state.activeTabId = tab.id;
+    await state.run(
+      tab,
+      "SELECT 'north' AS region, 10 AS amount, TIMESTAMP('2026-01-05 09:00:00') AS placed UNION ALL SELECT 'north', 30, TIMESTAMP('2026-01-20 10:00:00') " +
+        "UNION ALL SELECT 'south', 5, TIMESTAMP('2026-02-01 00:00:00') UNION ALL SELECT 'east', 100, TIMESTAMP('2026-04-02 12:00:00')",
+      { kind: 'all' },
+    );
+    await sleep(500);
+    expect(tab.results.length === 1 && tab.results[0].done, `the query for the graph gave: ${tab.messages.map((m) => m.text).join(' | ')}`);
+    expect(!graphButton.disabled, 'the Graph button is not enabled for a finished result');
+    graphButton.click();
+    await sleep(400);
+    const graph = document.querySelector<HTMLElement>('.graph');
+    expect(graph && tab.graph, 'the graph builder did not open');
+    expect(document.querySelector<HTMLElement>('.workspace > .columns')?.hidden, 'the query is still showing behind the graph');
+    const choose = (label: string, value: string) => {
+      const select = graph.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
+      expect(select, `no list for "${label}"`);
+      select.value = value;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    choose('Column for X axis', '0');
+    choose('Column for Y axis', '1');
+    choose('Column for Colour by', '0');
+    // The chart library is fetched the first time a chart is drawn.
+    let chartCanvas: HTMLCanvasElement | null = null;
+    for (let i = 0; i < 40 && !chartCanvas; i++) {
+      await sleep(250);
+      chartCanvas = graph.querySelector<HTMLCanvasElement>('.chart canvas');
+    }
+    expect(chartCanvas && chartCanvas.width > 100, `the chart did not draw: ${graph.querySelector('.stage')?.textContent?.trim().slice(0, 200)}`);
+    await sleep(400);
+    const foot = () => graph.querySelector('.foot')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    expect(/4 of 4 rows/.test(foot()), `the graph reported: ${foot()}`);
+    const [bar, save] = ['Bar', 'Save image'].map((label) =>
+      [...graph.querySelectorAll<HTMLButtonElement>('.top button')].find((b) => b.textContent?.trim() === label),
+    );
+    expect(bar?.getAttribute('aria-pressed') === 'true' && save && !save.disabled, 'the graph toolbar is not as expected');
+    save.click();
+    for (let i = 0; i < 20 && !/Saved /.test(foot()); i++) await sleep(250);
+    expect(/Saved .*chart\.png/.test(foot()), `saving the picture reported: ${foot()}`);
+    const graphNote = foot();
+    // Time on X, cut into months, with a filter and a range: nothing here should upset the page.
+    choose('Column for X axis', '2');
+    await sleep(700);
+    expect(graph.querySelector('.x-range'), `a time column on X showed no time range: ${foot()}`);
+    choose('Add a filter', '1');
+    await sleep(700);
+    expect(graph.querySelector('.filter .range'), 'the number filter has no slider');
+    // The other kinds of chart, a line added through its popup, and the chart's right-click menu.
+    const kindOf = (name: string) => [...graph.querySelectorAll<HTMLButtonElement>('.kinds button')].find((b) => b.textContent?.trim() === name);
+    kindOf('Pie')?.click();
+    choose('Column for X axis', '0');
+    await sleep(700);
+    expect(kindOf('Pie')?.getAttribute('aria-pressed') === 'true' && graph.querySelector('.chart canvas'), `the pie chart did not draw: ${foot()}`);
+    kindOf('Control')?.click();
+    choose('Column for X axis', '');
+    await sleep(700);
+    const figures = () => graph.querySelector('.figures')?.textContent?.replace(/\s+/g, ' ') ?? '';
+    expect(/Centre line/.test(figures()), `the control chart showed no figures: ${foot()} ${graph.querySelector('.stage')?.textContent?.trim().slice(0, 120)}`);
+    graph.querySelector<HTMLButtonElement>('.mark-actions button')?.click();
+    await sleep(400);
+    const popup = document.querySelector<HTMLDialogElement>('dialog[open]');
+    expect(popup && /line across the chart/i.test(popup.textContent ?? ''), 'the popup for a line did not open');
+    const type = (field: HTMLInputElement, value: string) => {
+      field.value = value;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const fields = popup.querySelectorAll<HTMLInputElement>('input[type="text"]');
+    type(fields[0], '50');
+    type(fields[1], 'USL');
+    const meaning = [...popup.querySelectorAll<HTMLSelectElement>('select')].at(-1);
+    expect(meaning && [...meaning.options].some((o) => o.value === 'usl'), 'the popup does not offer specification limits on a control chart');
+    meaning.value = 'usl';
+    meaning.dispatchEvent(new Event('change', { bubbles: true }));
+    popup.querySelector<HTMLButtonElement>('button[type="submit"]')?.click();
+    await sleep(900);
+    expect(!document.querySelector('dialog[open]') && tab.graph.lines.length === 1 && tab.graph.lines[0].value === 50, `the line was not added: ${JSON.stringify(tab.graph.lines)}`);
+    expect(/USL 50/.test(figures()) && /Cpk/.test(figures()), `a specification limit gave no capability figures: ${figures()}`);
+    const chartBox = graph.querySelector('.chart')?.getBoundingClientRect();
+    expect(chartBox, 'the chart is gone');
+    graph.querySelector('.chart')?.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: chartBox.left + chartBox.width / 2, clientY: chartBox.top + chartBox.height / 2 }),
+    );
+    await sleep(300);
+    const chartMenu = document.querySelector<HTMLElement>('[role="menu"]');
+    expect(chartMenu && /Trend line/.test(chartMenu.textContent ?? '') && /Add a line across/.test(chartMenu.textContent ?? ''), `right-clicking the chart showed: ${chartMenu?.textContent?.slice(0, 200)}`);
+    chartMenu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await sleep(200);
+    const figuresNote = figures().slice(0, 200);
+
+    [...graph.querySelectorAll<HTMLButtonElement>('.top button')].find((b) => b.textContent?.includes('Back to query'))?.click();
+    await sleep(300);
+    expect(!document.querySelector('.graph') && !document.querySelector<HTMLElement>('.workspace > .columns')?.hidden, 'Back to query did not bring the query back');
+
     expect(violations.length === 0, `the content security policy blocked something: ${violations.join('; ')}`);
     await backend.closeResults(tab.results.map((r) => r.id));
     await backend.closeTab(workspace.id, tab.id);
-    return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes, designedColumns };
+    return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes, designedColumns, graph: graphNote.slice(0, 160), figures: figuresNote };
   });
 
   await step('disconnect and remove the profile', async () => {
