@@ -4,7 +4,9 @@ What changed in each release, newest first. The [releases page](https://github.c
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- **A new icon**: a query prompt, in place of the three bars that read as a menu button.
 
 ## 0.3.1 - 2026-11-20
 
