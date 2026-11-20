@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { loadLicences } from '../lib/licences';
+  import { keys } from '../lib/platform';
   import { app } from '../lib/state.svelte';
 
   interface Props {
@@ -12,34 +14,51 @@
 
   onMount(() => dialog.showModal());
 
+  // The licences are long, so they are loaded when asked for.
+  let licences = $state<string | null>(null);
+  let loadingLicences = $state(false);
+  let licenceError = $state<string | null>(null);
+
+  async function showLicences() {
+    loadingLicences = true;
+    licenceError = null;
+    try {
+      licences = await loadLicences();
+    } catch {
+      licenceError = 'The licences could not be loaded. They are also listed in THIRD-PARTY.md with the source.';
+    } finally {
+      loadingLicences = false;
+    }
+  }
+
   const groups: { title: string; rows: [string, string][] }[] = [
     {
       title: 'Running queries',
       rows: [
-        ['Execute the statement under the cursor', 'Ctrl+Enter'],
-        ['Execute the selection, or everything', 'Ctrl+Shift+Enter'],
-        ['Explain the statement under the cursor', 'Ctrl+Alt+X'],
+        ['Execute the statement under the cursor', keys('Mod+Enter')],
+        ['Execute the selection, or everything', keys('Mod+Shift+Enter')],
+        ['Explain the statement under the cursor', keys('Mod+Alt+X')],
         ['Run a long query as many short ones', 'In Slices, with {start} and {end} in the query'],
       ],
     },
     {
       title: 'Editor',
       rows: [
-        ['New query tab', 'Ctrl+T'],
-        ['Close tab', 'Ctrl+W'],
-        ['Open script', 'Ctrl+O'],
-        ['Save script, Save as', 'Ctrl+S, Ctrl+Shift+S'],
-        ['Find and replace', 'Ctrl+F'],
-        ['Comment or uncomment lines', 'Ctrl+/'],
-        ['Reformat query', 'Ctrl+B'],
+        ['New query tab', keys('Mod+T')],
+        ['Close tab', keys('Mod+W')],
+        ['Open script', keys('Mod+O')],
+        ['Save script, Save as', keys('Mod+S, Mod+Shift+S')],
+        ['Find and replace', keys('Mod+F')],
+        ['Comment or uncomment lines', keys('Mod+/')],
+        ['Reformat query', keys('Mod+B')],
       ],
     },
     {
       title: 'Results',
       rows: [
         ['Select cells', 'Drag, Shift+Click, Shift+Arrows'],
-        ['Select rows, columns, everything', 'Shift+Space, Ctrl+Space, Ctrl+A'],
-        ['Copy, copy with column names', 'Ctrl+C, Ctrl+Shift+C'],
+        ['Select rows, columns, everything', keys('Shift+Space, Ctrl+Space, Mod+A')],
+        ['Copy, copy with column names', keys('Mod+C, Mod+Shift+C')],
         ['Fit a column to its contents', "Double-click the header's edge"],
         ['More ways to copy, filter and sort', 'Right-click'],
       ],
@@ -72,7 +91,7 @@
   ];
 </script>
 
-<dialog bind:this={dialog} onclose={onclose} aria-labelledby="help-title">
+<dialog bind:this={dialog} onclose={onclose} aria-labelledby="help-title" class:wide={licences !== null}>
   <div class="help">
     <h2 id="help-title">SQL Tool {app.info?.version ?? ''}</h2>
     <p class="muted">A free, open-source SQL client for MySQL and MariaDB. Early alpha.</p>
@@ -94,6 +113,27 @@
         <strong>Navigator</strong> and <strong>Output</strong> beside it show and hide the side panes. Settings and Help are also on
         the Connections page.
       </p>
+      <h3>About</h3>
+      <p>
+        SQL Tool is free software under the Apache License 2.0. Its source, new versions and the place to report a problem:
+        <span class="where">github.com/wjhdfnmf/sql-tool</span>
+      </p>
+      {#if app.info?.dataDir}
+        <p>
+          Settings, connections and history are kept in <span class="where">{app.info.dataDir}</span>. If the app closes by itself or
+          reports that something went wrong, a note of it is in <code>crash.log</code> there.
+        </p>
+      {/if}
+      <p>
+        It is built with other open-source software, each piece under its own licence.
+        {#if licences === null}
+          <button onclick={showLicences} disabled={loadingLicences}>{loadingLicences ? 'Loading…' : 'Show the licences'}</button>
+        {/if}
+      </p>
+      {#if licenceError}<p class="error-text" role="alert">{licenceError}</p>{/if}
+      {#if licences !== null}
+        <pre class="licences">{licences}</pre>
+      {/if}
     </div>
     <div class="buttons">
       <button class="primary" onclick={() => dialog.close()}>Close</button>
@@ -102,6 +142,36 @@
 </dialog>
 
 <style>
+  /* The licences are written 80 characters wide. */
+  dialog.wide {
+    max-width: min(760px, calc(100vw - 32px));
+  }
+
+  dialog.wide .help {
+    width: 720px;
+  }
+
+  .where {
+    font-family: var(--mono);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    user-select: all;
+  }
+
+  .licences {
+    margin: 4px 0 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+
   .help {
     display: flex;
     flex-direction: column;

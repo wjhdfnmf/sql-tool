@@ -29,7 +29,7 @@ use sqltool_core::{
     ResultStore, RunEvent, SavedProfile, ServerInfo, Session, Settings, SettingsStore, TlsMode,
 };
 use tauri::ipc::{Channel, Response};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 /// Largest cell value sent to the UI in one piece by `get_cell`.
 const MAX_CELL_BYTES: usize = 2 * 1024 * 1024;
@@ -169,6 +169,14 @@ struct AppState {
     /// restored after a restart can be saved back to its file.
     approved_files: ApprovedFiles,
     next_id: AtomicU64,
+    /// The interface has said that closing now would lose something.
+    close_guard: AtomicBool,
+    /// The interface has been asked whether to close, and has not answered.
+    close_asked: AtomicBool,
+    /// Faults the interface has reported in this run.
+    faults: AtomicUsize,
+    /// Where settings, connections, history and `crash.log` are kept.
+    data_dir: PathBuf,
     #[cfg(feature = "devtools")]
     demo: tokio::sync::OnceCell<Demo>,
 }
@@ -186,6 +194,10 @@ impl AppState {
             charts: Mutex::new(HashMap::new()),
             approved_files: ApprovedFiles::load(data_dir.join("scripts.json")),
             next_id: AtomicU64::new(1),
+            close_guard: AtomicBool::new(false),
+            close_asked: AtomicBool::new(false),
+            faults: AtomicUsize::new(0),
+            data_dir,
             #[cfg(feature = "devtools")]
             demo: tokio::sync::OnceCell::new(),
         }
@@ -234,12 +246,34 @@ struct ProfileDto {
     profile: SavedProfile,
     /// Whether the keychain holds a password for this profile.
     has_password: bool,
+    /// Set by a save that went through although the keychain could not be
+    /// used: what happened to the password, to tell the user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keychain_note: Option<String>,
 }
 
 fn profile_dto(profile: SavedProfile) -> ProfileDto {
     let has_password =
         profile.save_password && matches!(sqltool_secrets::load(&profile.id), Ok(Some(_)));
-    ProfileDto { profile, has_password }
+    ProfileDto {
+        profile,
+        has_password,
+        keychain_note: None,
+    }
+}
+
+/// Removes a connection's password from the keychain. A keychain that cannot
+/// be reached (a Linux desktop with no secret service, say) holds nothing to
+/// remove, so that is not a failure; one that still holds the password
+/// afterwards is.
+fn forget_password(profile_id: &str) -> Result<(), String> {
+    match sqltool_secrets::delete(profile_id) {
+        Ok(()) => Ok(()),
+        Err(e) => match sqltool_secrets::load(profile_id) {
+            Ok(Some(_)) => Err(e),
+            _ => Ok(()),
+        },
+    }
 }
 
 #[tauri::command(async)]
@@ -256,15 +290,27 @@ fn profile_save(
     password: Option<String>,
 ) -> Result<ProfileDto, UiError> {
     let saved = state.profiles.upsert(profile)?;
+    // The connection is saved by now. A keychain that cannot be used must
+    // not turn that into a failure: reported as one, a second Save would
+    // store the connection twice. The password is asked for when connecting.
+    let mut note = None;
     if saved.save_password {
         if let Some(password) = password {
-            sqltool_secrets::save(&saved.id, &SecretString::from(password))
-                .map_err(|e| ui_error("keychain", format!("Could not store the password in the keychain: {e}")))?;
+            if let Err(e) = sqltool_secrets::save(&saved.id, &SecretString::from(password)) {
+                note = Some(format!(
+                    "The connection was saved, but its password could not be stored in the keychain, \
+                     so it will be asked for when you connect. ({e})"
+                ));
+            }
         }
-    } else {
-        sqltool_secrets::delete(&saved.id).map_err(|e| ui_error("keychain", e))?;
+    } else if let Err(e) = forget_password(&saved.id) {
+        note = Some(format!(
+            "The connection was saved, but the password stored for it could not be removed from the keychain. ({e})"
+        ));
     }
-    Ok(profile_dto(saved))
+    let mut dto = profile_dto(saved);
+    dto.keychain_note = note;
+    Ok(dto)
 }
 
 #[derive(Deserialize)]
@@ -285,7 +331,12 @@ fn profiles_arrange(state: State<'_, AppState>, arrangement: Vec<Arranged>) -> R
 #[tauri::command(async)]
 fn profile_delete(state: State<'_, AppState>, id: String) -> Result<(), UiError> {
     state.profiles.delete(&id)?;
-    sqltool_secrets::delete(&id).map_err(|e| ui_error("keychain", e))
+    forget_password(&id).map_err(|e| {
+        ui_error(
+            "keychain",
+            format!("The connection was removed, but its password could not be removed from the keychain: {e}"),
+        )
+    })
 }
 
 /// The password to use: the one just typed, else the one in the keychain.
@@ -294,8 +345,18 @@ fn resolve_password(profile: &SavedProfile, given: Option<String>) -> Result<Sec
         return Ok(password.into());
     }
     if !profile.id.is_empty() && profile.save_password {
-        if let Some(stored) = sqltool_secrets::load(&profile.id).map_err(|e| ui_error("keychain", e))? {
-            return Ok(stored);
+        match sqltool_secrets::load(&profile.id) {
+            Ok(Some(stored)) => return Ok(stored),
+            Ok(None) => {}
+            // A keychain that cannot be read is no reason to refuse to
+            // connect. The interface asks for the password, as it does when
+            // none is stored, and says why.
+            Err(e) => {
+                return Err(ui_error(
+                    "keychain-unreadable",
+                    format!("The stored password could not be read from the keychain. Enter it to connect. ({e})"),
+                ))
+            }
         }
     }
     Err(ui_error("password-required", "A password is needed for this connection."))
@@ -1315,8 +1376,8 @@ async fn script_open(
     if std::fs::metadata(&path).map_err(storage)?.len() > MAX_SCRIPT_BYTES {
         return Err(ui_error("storage", "That file is larger than 20 MB, which is more than the editor opens."));
     }
-    let text = String::from_utf8(std::fs::read(&path).map_err(storage)?).map_err(|_| {
-        ui_error("storage", "That file is not UTF-8 text. Convert it to UTF-8 to open it here.")
+    let text = sqltool_core::decode_text(&std::fs::read(&path).map_err(storage)?).ok_or_else(|| {
+        ui_error("storage", "That file is not text in UTF-8 or UTF-16. Convert it to UTF-8 to open it here.")
     })?;
     // The file is open either way; not being able to remember it only means
     // Save will ask where after a restart.
@@ -1486,7 +1547,7 @@ async fn pick_save_file(app: &tauri::AppHandle, name: &str, extension: &str) -> 
     // includes it, and only while it is running, exports go to the folder it
     // names, so the real export commands can be exercised end to end.
     #[cfg(feature = "devtools")]
-    if std::env::var_os("SQLTOOL_SELFTEST_HOST").is_some() {
+    if unattended() {
         if let Some(folder) = std::env::var_os("SQLTOOL_SELFTEST_EXPORT_DIR") {
             return Some(PathBuf::from(folder).join(format!("{name}.{extension}")));
         }
@@ -1593,15 +1654,31 @@ async fn export_result(
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
-    let target = path.clone();
-    let (rows, status) = blocking(move || -> std::io::Result<_> {
-        let mut writer = std::io::BufWriter::new(std::fs::File::create(&target)?);
+    // Opened here, so that what is removed after a failure is a file this
+    // export made, never one it was refused.
+    let file = std::fs::File::create(&path).map_err(storage)?;
+    let written = blocking(move || -> std::io::Result<_> {
+        let mut writer = std::io::BufWriter::new(file);
         let rows = export::write(&store, format, &table, &mut writer)?;
         std::io::Write::flush(&mut writer)?;
         Ok((rows, store.status()))
     })
-    .await?
-    .map_err(storage)?;
+    .await;
+    let (rows, status) = match written {
+        Ok(Ok(written)) => written,
+        failed => {
+            // An incomplete file would pass for the whole result. Remove it.
+            let _ = std::fs::remove_file(&path);
+            return Err(match failed {
+                Ok(Err(e)) => ui_error(
+                    "storage",
+                    format!("Could not write {}: {e}. The incomplete file was removed.", path.display()),
+                ),
+                Err(e) => ui_error(&e.kind, format!("{} The incomplete file was removed.", e.message)),
+                Ok(Ok(_)) => unreachable!("handled above"),
+            });
+        }
+    };
     Ok(Some(Exported {
         path: path.to_string_lossy().into_owned(),
         rows,
@@ -1887,20 +1964,185 @@ async fn keep_alive_loop(app: tauri::AppHandle) {
     }
 }
 
-/// Records a crash in `crash.log` in the data folder, so that "it just
-/// closed" can be looked into afterwards. Only the panic message and where
-/// it happened are written, never queries or data.
-fn log_panics(dir: PathBuf) {
+/// Where `crash.log` goes: the data folder. A guess until the app has
+/// started and can say where that is.
+static CRASH_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+fn set_crash_dir(dir: PathBuf) {
+    *CRASH_DIR.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(dir);
+}
+
+/// Adds a line to `crash.log`, so that "it just closed" and "nothing
+/// happened" can be looked into afterwards.
+fn record_crash(what: &str) {
+    use std::io::Write;
+    let Some(dir) = CRASH_DIR.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+        let _ = writeln!(file, "{} sqltool {}: {what}", now_ms(), env!("CARGO_PKG_VERSION"));
+    }
+}
+
+/// Records a crash in `crash.log`. Only the panic message and where it
+/// happened are written, never queries or data.
+fn log_panics() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
-            let _ = writeln!(file, "{} sqltool {}: {info}", now_ms(), env!("CARGO_PKG_VERSION"));
-        }
+        record_crash(&info.to_string());
         previous(info);
     }));
 }
+
+/// Where the data folder is expected to be, before the app has started and
+/// can be asked: the place Tauri derives from the app's identifier.
+fn expected_data_dir(identifier: &str) -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("SQLTOOL_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
+    let base = if cfg!(windows) {
+        var("APPDATA")?
+    } else if cfg!(target_os = "macos") {
+        var("HOME")?.join("Library").join("Application Support")
+    } else {
+        var("XDG_DATA_HOME").or_else(|| var("HOME").map(|home| home.join(".local").join("share")))?
+    };
+    Some(base.join(identifier))
+}
+
+/// The app could not start, so there is no window to say so in: the reason
+/// goes to `crash.log`, to the terminal if there is one, and into a message
+/// box.
+fn fatal(reason: &str) {
+    let hint = if cfg!(windows) {
+        " On Windows the app needs the Microsoft Edge WebView2 runtime."
+    } else if cfg!(target_os = "linux") {
+        " On Linux the app needs WebKitGTK 4.1 and a graphical session."
+    } else {
+        ""
+    };
+    let message = format!("SQL Tool could not start: {reason}.{hint}");
+    record_crash(&message);
+    eprintln!("{message}");
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("SQL Tool")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// Notes a fault the interface caught and nothing handled, in `crash.log`.
+/// The interface sends the kind of error and where in its code it happened,
+/// not what a server said, so no query or data comes this way; it is cut
+/// short and limited to a few a run all the same.
+#[tauri::command]
+fn ui_fault(state: State<'_, AppState>, message: String) {
+    if state.faults.fetch_add(1, Ordering::Relaxed) >= 20 {
+        return;
+    }
+    let line: String = message.chars().take(600).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    record_crash(&format!("interface: {line}"));
+}
+
+// ---------- closing ----------
+
+/// Closes the app, unless the interface has said that something would be
+/// lost: then the interface is asked, once. Asked again while the question
+/// is up, the app closes, so that an interface that has stopped answering
+/// cannot keep the window open.
+fn may_close(app: &tauri::AppHandle) -> bool {
+    let Some(state) = app.try_state::<AppState>() else {
+        return true;
+    };
+    if state.close_guard.load(Ordering::Relaxed) && !state.close_asked.swap(true, Ordering::Relaxed) {
+        // If nothing is there to ask, the next request closes.
+        let _ = app.emit("close-requested", ());
+        return false;
+    }
+    true
+}
+
+/// The interface says whether closing the window now would lose something:
+/// a statement still running, changes not applied, a script not saved.
+#[tauri::command]
+fn close_guard(state: State<'_, AppState>, on: bool) {
+    state.close_guard.store(on, Ordering::Relaxed);
+    if !on {
+        state.close_asked.store(false, Ordering::Relaxed);
+    }
+}
+
+/// The user's answer to "close anyway?".
+#[tauri::command]
+fn close_answer(app: tauri::AppHandle, state: State<'_, AppState>, close: bool) {
+    if close {
+        app.exit(0);
+    } else {
+        state.close_asked.store(false, Ordering::Relaxed);
+    }
+}
+
+/// The menu bar on macOS. What the system gives an app by default, without
+/// "Close Window": its shortcut, Cmd+W, closes the query tab in front here,
+/// as Ctrl+W does elsewhere, and closing the only window is quitting. Quit
+/// is the app's own item so that it asks before losing anything.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn mac_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let about = AboutMetadata {
+        name: Some(app.package_info().name.clone()),
+        version: Some(app.package_info().version.to_string()),
+        ..Default::default()
+    };
+    Menu::with_items(
+        app,
+        &[
+            &Submenu::with_items(
+                app,
+                app.package_info().name.clone(),
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, Some(about))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::show_all(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, QUIT_ITEM, "Quit SQL Tool", true, Some("CmdOrCtrl+Q"))?,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::select_all(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?,
+            &Submenu::with_items(
+                app,
+                "Window",
+                true,
+                &[&PredefinedMenuItem::minimize(app, None)?, &PredefinedMenuItem::maximize(app, None)?],
+            )?,
+        ],
+    )
+}
+
+/// The id of Quit in the macOS menu bar.
+const QUIT_ITEM: &str = "quit";
 
 // ---------- app info and development tools ----------
 
@@ -1910,14 +2152,28 @@ struct AppInfo {
     version: &'static str,
     /// Whether the demo server and self-test are compiled in.
     devtools: bool,
+    /// Started to check that the app runs at all: against the demo server,
+    /// with no one at the keyboard. See `tests/smoke.sh`.
+    smoke: bool,
+    /// Where settings, connections, history and `crash.log` are kept, for Help to say.
+    data_dir: String,
 }
 
 #[tauri::command]
-fn app_info() -> AppInfo {
+fn app_info(state: State<'_, AppState>) -> AppInfo {
     AppInfo {
+        data_dir: state.data_dir.to_string_lossy().into_owned(),
         version: env!("CARGO_PKG_VERSION"),
         devtools: cfg!(feature = "devtools"),
+        smoke: cfg!(feature = "devtools") && std::env::var_os("SQLTOOL_SMOKE").is_some(),
     }
+}
+
+/// The app is being driven by one of its own tests, not by a person. Only
+/// ever true in a development build.
+fn unattended() -> bool {
+    cfg!(feature = "devtools")
+        && (std::env::var_os("SQLTOOL_SELFTEST_HOST").is_some() || std::env::var_os("SQLTOOL_SMOKE").is_some())
 }
 
 /// Opens a connection to a fake MySQL Enterprise server running inside the
@@ -2013,19 +2269,74 @@ fn selftest_config() -> Option<SelfTest> {
 /// Writes the self-test report next to the data directory and quits.
 #[tauri::command]
 fn selftest_report(app: tauri::AppHandle, report: String) -> Result<(), UiError> {
-    if !cfg!(feature = "devtools") || std::env::var("SQLTOOL_SELFTEST_HOST").is_err() {
+    if !unattended() {
         return Err(ui_error("unavailable", "Not in self-test mode."));
     }
-    let dir = std::env::temp_dir().join("sqltool-selftest");
-    std::fs::create_dir_all(&dir).map_err(|e| ui_error("storage", e.to_string()))?;
-    std::fs::write(dir.join("report.json"), report).map_err(|e| ui_error("storage", e.to_string()))?;
+    // Where the test that started the app said, or the usual place.
+    let path = match std::env::var_os("SQLTOOL_SELFTEST_REPORT") {
+        Some(path) => PathBuf::from(path),
+        None => std::env::temp_dir().join("sqltool-selftest").join("report.json"),
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| ui_error("storage", e.to_string()))?;
+    }
+    std::fs::write(path, report).map_err(|e| ui_error("storage", e.to_string()))?;
     app.exit(0);
     Ok(())
 }
 
+/// Asks the window to close, as its close button does, so that the self-test
+/// can check that the app asks before losing work.
+#[tauri::command]
+fn selftest_close_window(app: tauri::AppHandle) -> Result<(), UiError> {
+    if !unattended() {
+        return Err(ui_error("unavailable", "Not in self-test mode."));
+    }
+    let window = app.get_webview_window("main").ok_or_else(|| ui_error("other", "There is no window."))?;
+    window.close().map_err(|e| ui_error("other", e.to_string()))
+}
+
 fn main() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    // Before anything else, so that a failure to start leaves a trace too.
+    if let Some(dir) = expected_data_dir(&context.config().identifier) {
+        set_crash_dir(dir);
+    }
+    log_panics();
+
+    let mut builder = tauri::Builder::default();
+    // One copy of the app at a time: a second start brings the first to the
+    // front. Two would each hold their own idea of the settings and of the
+    // order of the connections, and whichever saved last would win. Not
+    // when the data folder is set by hand, which is how the tests and a
+    // development build run a copy of their own beside the installed one.
+    if !cfg!(debug_assertions) && std::env::var_os("SQLTOOL_DATA_DIR").is_none() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _arguments, _folder| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.menu(mac_menu);
+    }
+    let outcome = builder
         .plugin(tauri_plugin_dialog::init())
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == QUIT_ITEM && may_close(app) {
+                app.exit(0);
+            }
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if !may_close(window.app_handle()) {
+                    api.prevent_close();
+                }
+            }
+        })
         .setup(|app| {
             // SQLTOOL_DATA_DIR overrides where profiles and history are kept,
             // which also keeps test runs away from real settings.
@@ -2033,7 +2344,7 @@ fn main() {
                 Some(dir) => PathBuf::from(dir),
                 None => app.path().app_data_dir()?,
             };
-            log_panics(data_dir.clone());
+            set_crash_dir(data_dir.clone());
             let state = AppState::new(data_dir);
             apply_settings(app.handle(), &state.settings());
             app.manage(state);
@@ -2097,9 +2408,16 @@ fn main() {
             history_clear,
             settings_get,
             settings_set,
+            ui_fault,
+            close_guard,
+            close_answer,
             selftest_config,
-            selftest_report
+            selftest_report,
+            selftest_close_window
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the application");
+        .run(context);
+    if let Err(e) = outcome {
+        fatal(&e.to_string());
+        std::process::exit(1);
+    }
 }

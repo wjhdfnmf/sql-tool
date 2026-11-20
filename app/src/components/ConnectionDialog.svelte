@@ -14,7 +14,8 @@
   interface Props {
     profile: Profile;
     onclose: () => void;
-    onsaved: () => void;
+    /** `note` is set when the connection was saved but the keychain could not take or give up its password. */
+    onsaved: (note: string | null) => void;
   }
 
   let { profile, onclose, onsaved }: Props = $props();
@@ -163,8 +164,8 @@
     saving = true;
     saveError = null;
     try {
-      await backend.profileSave(current(), draft.savePassword && password !== '' ? password : null);
-      onsaved();
+      const saved = await backend.profileSave(current(), draft.savePassword && password !== '' ? password : null);
+      onsaved(saved.keychainNote ?? null);
     } catch (e) {
       saveError = asUiError(e).message;
     } finally {

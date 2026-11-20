@@ -3,6 +3,7 @@
 // against the mock backend during development.
 
 import { Channel, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import type { ChartData, ChartRequest, ChartRole, ColumnSummary } from './chart';
 import { mockBackend } from './mock';
 import type {
@@ -163,8 +164,18 @@ export interface Backend {
   settingsGet(): Promise<Settings>;
   /** Saves the settings; resolves to them as stored, with out-of-range values corrected. */
   settingsSet(settings: Settings): Promise<Settings>;
+  /** Notes an error nothing handled in crash.log. Send where it came from, never what a server said. */
+  uiFault(message: string): Promise<void>;
+  /** Says whether closing the window now would lose something; if so, closing asks first. */
+  closeGuard(on: boolean): Promise<void>;
+  /** The answer to that question: close anyway, or stay open. */
+  closeAnswer(close: boolean): Promise<void>;
+  /** Calls `ask` when the window is being closed and the guard is on. Resolves to a function that stops listening. */
+  onCloseRequested(ask: () => void): Promise<() => void>;
   selftestConfig(): Promise<SelfTestConfig | null>;
   selftestReport(report: string): Promise<void>;
+  /** Asks the window to close, as its close button does. Self-test only. */
+  selftestCloseWindow(): Promise<void>;
 }
 
 const tauriBackend: Backend = {
@@ -240,8 +251,13 @@ const tauriBackend: Backend = {
   historyClear: () => invoke('history_clear'),
   settingsGet: () => invoke('settings_get'),
   settingsSet: (settings) => invoke('settings_set', { settings }),
+  uiFault: (message) => invoke('ui_fault', { message }),
+  closeGuard: (on) => invoke('close_guard', { on }),
+  closeAnswer: (close) => invoke('close_answer', { close }),
+  onCloseRequested: (ask) => listen('close-requested', () => ask()),
   selftestConfig: () => invoke('selftest_config'),
   selftestReport: (report) => invoke('selftest_report', { report }),
+  selftestCloseWindow: () => invoke('selftest_close_window'),
 };
 
 /** True inside the desktop app, false in a plain browser. */

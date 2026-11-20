@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { keys } from '../lib/platform';
   import type { EditorTab, WorkspaceState } from '../lib/state.svelte';
   import { formatCount, formatDuration } from '../lib/types';
   import ResultView from './ResultView.svelte';
@@ -44,7 +45,7 @@
   <div class="panel" hidden={tab.activeResult !== 'messages'}>
     {#if tab.messages.length === 0}
       <p class="hint muted">
-        Run the statement under the cursor with Ctrl+Enter, or the selection or whole script with Ctrl+Shift+Enter.
+        Run the statement under the cursor with {keys('Mod+Enter')}, or the selection or whole script with {keys('Mod+Shift+Enter')}.
         Results appear here.
       </p>
     {:else}

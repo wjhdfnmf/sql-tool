@@ -4,7 +4,10 @@
   "version": "0.3.0",
   "type": "module",
   "scripts": {
+    "licences": "node ../tools/licences.mjs",
+    "predev": "node ../tools/licences.mjs",
     "dev": "vite",
+    "prebuild": "node ../tools/licences.mjs --strict",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",

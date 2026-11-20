@@ -29,6 +29,8 @@ export interface Profile {
   group?: string | null;
   /** Whether the keychain holds a password. Set by the backend. */
   hasPassword?: boolean;
+  /** Set by a save that went through although the keychain could not be used: what became of the password. */
+  keychainNote?: string;
 }
 
 export function newProfile(): Profile {
@@ -393,6 +395,10 @@ export interface Settings {
 export interface AppInfo {
   version: string;
   devtools: boolean;
+  /** Started unattended against the demo server, to check that the app runs at all. */
+  smoke: boolean;
+  /** Where settings, connections, history and crash.log are kept. */
+  dataDir: string;
 }
 
 export interface SelfTestConfig {

@@ -35,6 +35,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - **History**: searchable. Statements that contain a password are not stored in full.
 - **Timeouts and dropped connections**: connecting gives up after 15 seconds (adjustable). A query runs until it finishes or is stopped, unless a query timeout is set, in which case it is interrupted on the server. A connection the server has closed for sitting idle is reopened before the next statement is sent, with a note in the output; an optional keep-alive prevents the closing.
 - **Output that gets out of the way** (a setting, off to begin with): a click in the editor puts the output away so the editor has the whole height; the pointer at the bottom edge brings it back at the height it had, and a click in it keeps it open. Running a query always shows it.
+- **Nothing lost quietly**: closing the window asks first while a statement is running, while changes in a result or a designer are not applied, or while a script has changes that would not be there next time. An error that nothing handled is shown, not swallowed, and noted in `crash.log` in the data folder (Help says where that is). A second start of the app brings the running one to the front.
 - **Settings and themes**: one window with a tab for each area (Appearance, Editor, Queries, Connections, Privacy), a mark on a tab where something differs from the defaults, and a button that restores one tab's defaults; sixteen themes, soft to bold, light and dark, each checked for readable contrast in the editor and grid (`python tools/themes.py . --check`); size of text; editor indent and wrapping; default row limit; timeouts; whether history and open tabs are kept.
 - **Default schema**: one per connection, used by every query tab. Choosing one writes it into the connection's settings, so the settings, the schema tree and the next connect all agree. If that schema has since been dropped, the connection still opens, with no default.
 
@@ -47,7 +48,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 
 ## Known limits
 
-- The automated tests run against MariaDB 11.8 and MySQL 8.4. MySQL Enterprise 8.4.3 and 5.7.37 have been connected to and used by hand. Hands-on use has been on Windows; the Linux and macOS builds pass the automated tests but have had no hands-on use.
+- The automated tests run against MariaDB 11.8 and MySQL 8.4. MySQL Enterprise 8.4.3 and 5.7.37 have been connected to and used by hand. Hands-on use has been on Windows. On Linux and macOS every commit builds the app, starts it and lets it check itself (connect to a built-in test server, run a query through the interface, copy, export), but nobody has yet used those builds by hand.
 - Query history and remembered query tabs are kept on this computer without encryption. Statements that contain a password are left out of both.
 - `sha256_password` accounts are not supported.
 - A result keeps about 512 MB in memory and spills the rest to a temporary file, which is private and removed when the result closes, but not encrypted.
@@ -60,7 +61,17 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 
 ## Download
 
-Installers are on the [releases page](../../releases). On Windows the app needs the Microsoft Edge WebView2 runtime, which Windows 10 and 11 normally already have.
+Installers are on the [releases page](../../releases), each with a `.sha256` file to check the download against.
+
+| System | File | Notes |
+|---|---|---|
+| Windows 10 and 11 | `..._x64-setup.exe` | Not code-signed, so SmartScreen warns: choose **More info**, then **Run anyway**. Needs the Microsoft Edge WebView2 runtime, which Windows normally already has. |
+| macOS, Apple silicon and Intel | `..._universal.dmg` | Not notarised, so macOS refuses the first start: open **System Settings**, **Privacy & Security**, and choose **Open Anyway** there. |
+| Debian, Ubuntu | `..._amd64.deb` | Built on Ubuntu 22.04, so it needs that or newer (Debian 12 or newer), with WebKitGTK 4.1. |
+| Fedora, openSUSE | `...x86_64.rpm` | The same: a C library as new as Ubuntu 22.04's (glibc 2.35), and WebKitGTK 4.1. |
+| Other Linux | `..._amd64.AppImage` | Make it executable and run it. The same C library is needed. |
+
+On Linux, saved passwords go to the desktop's keyring (GNOME Keyring, KWallet or another Secret Service). Without one the app still works: it asks for the password each time you connect.
 
 Installers for Windows, Linux and macOS are also built for every commit; they are attached to the run on the [Actions page](../../actions/workflows/ci.yml) for 14 days.
 
@@ -108,6 +119,16 @@ cargo test -p sqltool-core --test real_servers -- --ignored
 bash tests/servers/selftest.sh mariadb
 ```
 
+Whether the app starts and works at all on the system at hand, with no database (CI runs this on Windows, Linux and macOS):
+
+```bash
+cargo build --release -p sqltool-app --features custom-protocol,devtools
+```
+
+```bash
+bash tests/smoke.sh
+```
+
 ## Layout
 
 | Path | What it is |
@@ -123,4 +144,4 @@ bash tests/servers/selftest.sh mariadb
 
 ## Licence
 
-[Apache-2.0](LICENSE). The libraries the app is built with, and their licences, are listed in [THIRD-PARTY.md](THIRD-PARTY.md).
+[Apache-2.0](LICENSE). The libraries the app is built with, and their licences, are listed in [THIRD-PARTY.md](THIRD-PARTY.md); the app carries the full texts itself, under Help.

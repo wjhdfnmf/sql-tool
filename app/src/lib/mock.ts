@@ -256,7 +256,7 @@ function splitNaive(script: string): string[] {
 }
 
 export const mockBackend: Backend = {
-  appInfo: async () => ({ version: '0.0.1-mock', devtools: true }),
+  appInfo: async () => ({ version: '0.0.1-mock', devtools: true, smoke: false, dataDir: 'C:\\Users\\ann\\AppData\\Roaming\\dev.sqltool.app' }),
   profilesList: async () => structuredClone(profiles),
   profileSave: async (profile, password) => {
     const saved = { ...profile, id: profile.id || `p${nextId++}` };
@@ -804,6 +804,11 @@ export const mockBackend: Backend = {
     localStorage.setItem('sqltool.mock.settings', JSON.stringify(saved));
     return saved;
   },
+  uiFault: async () => {},
+  closeGuard: async () => {},
+  closeAnswer: async () => {},
+  onCloseRequested: async () => () => {},
   selftestConfig: async () => null,
   selftestReport: async () => {},
+  selftestCloseWindow: async () => {},
 };

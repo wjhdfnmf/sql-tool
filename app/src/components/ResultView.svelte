@@ -1,6 +1,7 @@
 <script lang="ts">
   import { backend } from '../lib/backend';
   import type { CellPosition, GridOverlay } from '../lib/grid';
+  import { keys } from '../lib/platform';
   import { separator, type MenuItem } from '../lib/menu';
   import { placeIn } from '../lib/place';
   import type { EditorTab, ResultTab, WorkspaceState } from '../lib/state.svelte';
@@ -248,6 +249,10 @@
   let inserts = $state<Record<number, string>[]>([]);
 
   const pending = $derived(Object.keys(updates).length + deletes.length + inserts.length);
+  // Known outside this view too, so that closing the window can ask before they are lost.
+  $effect(() => {
+    result.pendingEdits = pending;
+  });
   const overlay = $derived<GridOverlay>({
     cells: new Map(Object.entries(updates)),
     deletedRows: new Set(deletes),
@@ -403,15 +408,15 @@
     const range = selection ?? { rowStart: row, rowEnd: row, colStart: column, colEnd: column };
     const manyRows = range.rowEnd > range.rowStart;
     const items: MenuItem[] = [
-      { label: 'Copy', shortcut: 'Ctrl+C', action: () => void copy('tsv') },
-      { label: 'Copy with Column Names', shortcut: 'Ctrl+Shift+C', action: () => void copy('tsv', true) },
+      { label: 'Copy', shortcut: keys('Mod+C'), action: () => void copy('tsv') },
+      { label: 'Copy with Column Names', shortcut: keys('Mod+Shift+C'), action: () => void copy('tsv', true) },
       { label: 'Copy as CSV', action: () => void copy('csv', true) },
       { label: 'Copy as SQL INSERT', action: () => void copy('sql') },
       { label: 'Copy as IN (…) List', action: () => void copy('list') },
       separator,
       { label: manyRows ? 'Select Rows' : 'Select Row', shortcut: 'Shift+Space', action: () => grid?.selectRows(range.rowStart, range.rowEnd) },
-      { label: range.colEnd > range.colStart ? 'Select Columns' : 'Select Column', shortcut: 'Ctrl+Space', action: () => grid?.selectColumns(range.colStart, range.colEnd) },
-      { label: 'Select All', shortcut: 'Ctrl+A', action: () => grid?.selectAll() },
+      { label: range.colEnd > range.colStart ? 'Select Columns' : 'Select Column', shortcut: keys('Ctrl+Space'), action: () => grid?.selectColumns(range.colStart, range.colEnd) },
+      { label: 'Select All', shortcut: keys('Mod+A'), action: () => grid?.selectAll() },
       separator,
       { label: 'Filter by This Value', disabled: !result.done || pending > 0, action: () => void filterByCell(row, column) },
       { label: 'View Value…', action: () => void showCell(row, column) },
@@ -438,7 +443,7 @@
       { label: 'Sort Descending', checked: !!sorted?.descending, disabled: !result.done, action: () => setSort({ column, descending: true }) },
       { label: 'Clear Sort', disabled: !sort, action: () => setSort(null) },
       separator,
-      { label: 'Select Column', shortcut: 'Ctrl+Click', action: () => grid?.selectColumns(column, column) },
+      { label: 'Select Column', shortcut: keys('Mod+Click'), action: () => grid?.selectColumns(column, column) },
       { label: 'Copy Column Name', action: () => void writeClipboard(result.columns[column].name) },
       { label: 'Copy All Column Names', action: () => void writeClipboard(result.columns.map((c) => c.name).join(', ')) },
       separator,
@@ -495,7 +500,7 @@
         {exporting ? 'Exporting…' : 'Export…'}
       </button>
     {/if}
-    <button disabled={!selection} onclick={() => void copy('tsv')} title="Copy the selected cells (Ctrl+C). Right-click the grid for CSV, SQL INSERT and other forms.">
+    <button disabled={!selection} onclick={() => void copy('tsv')} title={`Copy the selected cells (${keys('Mod+C')}). Right-click the grid for CSV, SQL INSERT and other forms.`}>
       Copy
     </button>
     {#if target && pending > 0}

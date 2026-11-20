@@ -6,6 +6,7 @@
   import { layout, saveLayout } from '../lib/layout.svelte';
   import { separator, type MenuItem } from '../lib/menu';
   import { placeIn } from '../lib/place';
+  import { keys } from '../lib/platform';
   import { reformatPiece, reformatSql, type KeywordCase, type ReformatStyle } from '../lib/reformat';
   import { settings } from '../lib/settings.svelte';
   import { app, type EditorTab, type WorkspaceState } from '../lib/state.svelte';
@@ -590,9 +591,9 @@
         { label: 'History…', action: () => (historyOpen = true) },
         { label: 'Connection Info', action: () => (infoOpen = true) },
         separator,
-        { label: 'New Query Tab', shortcut: 'Ctrl+T', action: () => workspace.addTab() },
-        { label: 'Open SQL Script…', shortcut: 'Ctrl+O', action: () => void openScript() },
-        { label: 'Find and Replace…', shortcut: 'Ctrl+F', disabled: !!tab.design, action: () => editors[tab.id]?.openSearch() },
+        { label: 'New Query Tab', shortcut: keys('Mod+T'), action: () => workspace.addTab() },
+        { label: 'Open SQL Script…', shortcut: keys('Mod+O'), action: () => void openScript() },
+        { label: 'Find and Replace…', shortcut: keys('Mod+F'), disabled: !!tab.design, action: () => editors[tab.id]?.openSearch() },
         separator,
         { label: 'Create Schema…', action: () => openSchemaEditor(null) },
         { label: 'Create Table…', action: () => openDesigner(null) },
@@ -625,7 +626,7 @@
     else if (key === 's' && !e.altKey) void saveScript(tab, e.shiftKey);
     else if (key === 'w' && !e.shiftKey && !e.altKey) requestClose(tab);
     else if (key === 'b' && !e.shiftKey && !e.altKey) reformat();
-    else if (key === 'x' && e.altKey) void run(tab, 'explain');
+    else if ((key === 'x' || e.code === 'KeyX') && e.altKey) void run(tab, 'explain');
     else return;
     e.preventDefault();
   }
@@ -803,10 +804,10 @@
               >
                 {#if t.running}<span class="pulse" aria-hidden="true"></span>{/if}{tabLabel(t)}
               </button>
-              <button class="quiet close" aria-label={`Close ${t.title}`} title="Close tab (Ctrl+W)" onclick={() => requestClose(t)}>&#215;</button>
+              <button class="quiet close" aria-label={`Close ${t.title}`} title={`Close tab (${keys('Mod+W')})`} onclick={() => requestClose(t)}>&#215;</button>
             </div>
           {/each}
-          <button class="quiet add" aria-label="New query tab" title="New query tab (Ctrl+T)" onclick={() => workspace.addTab()}>+</button>
+          <button class="quiet add" aria-label="New query tab" title={`New query tab (${keys('Mod+T')})`} onclick={() => workspace.addTab()}>+</button>
         </div>
         <div class="tab-nav">
           <button class="quiet" aria-label="First tab" title="First tab" disabled={workspace.tabs[0]?.id === workspace.activeTabId} onclick={() => stepTab('first')}>&laquo;</button>
@@ -818,18 +819,18 @@
       </div>
 
       <div class="toolbar" role="toolbar" aria-label="Editor" hidden={!!tab.design}>
-        <button onclick={() => workspace.addTab()} title="A new, empty query tab (Ctrl+T)">New</button>
-        <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open</button>
-        <button onclick={() => saveScript(tab)} title="Save this script (Ctrl+S)">Save</button>
-        <button onclick={() => saveScript(tab, true)} title="Save this script under another name (Ctrl+Shift+S)">Save As</button>
+        <button onclick={() => workspace.addTab()} title={`A new, empty query tab (${keys('Mod+T')})`}>New</button>
+        <button onclick={openScript} title={`Open a SQL script file (${keys('Mod+O')})`}>Open</button>
+        <button onclick={() => saveScript(tab)} title={`Save this script (${keys('Mod+S')})`}>Save</button>
+        <button onclick={() => saveScript(tab, true)} title={`Save this script under another name (${keys('Mod+Shift+S')})`}>Save As</button>
         <span class="divider"></span>
-        <button class="primary" disabled={tab.running} title="Execute the selection, or everything (Ctrl+Shift+Enter)" onclick={() => run(tab, 'script')}>
+        <button class="primary" disabled={tab.running} title={`Execute the selection, or everything (${keys('Mod+Shift+Enter')})`} onclick={() => run(tab, 'script')}>
           &#9654; Execute
         </button>
-        <button disabled={tab.running} title="Execute the statement under the cursor (Ctrl+Enter)" onclick={() => run(tab, 'statement')}>
+        <button disabled={tab.running} title={`Execute the statement under the cursor (${keys('Mod+Enter')})`} onclick={() => run(tab, 'statement')}>
           Execute Statement
         </button>
-        <button disabled={tab.running} title="Show the execution plan of the statement under the cursor (Ctrl+Alt+X)" onclick={() => run(tab, 'explain')}>
+        <button disabled={tab.running} title={`Show the execution plan of the statement under the cursor (${keys('Mod+Alt+X')})`} onclick={() => run(tab, 'explain')}>
           Explain
         </button>
         <button
@@ -848,7 +849,7 @@
           </select>
         </label>
         <span class="divider"></span>
-        <button onclick={reformat} title="Reformat the selection, or the whole script (Ctrl+B)">Reformat</button>
+        <button onclick={reformat} title={`Reformat the selection, or the whole script (${keys('Mod+B')})`}>Reformat</button>
         <span class="divider"></span>
         <button
           class="pane-toggle"

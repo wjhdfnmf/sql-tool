@@ -42,10 +42,15 @@ jobs:
         include:
           - name: Windows
             os: windows-latest
+          # The oldest Ubuntu there is a runner for, not the newest: a program
+          # built against a C library runs on that version and later ones,
+          # so this is what decides which Linux systems the packages start on.
           - name: Linux
-            os: ubuntu-latest
+            os: ubuntu-22.04
+          # One app for both kinds of Mac, Apple silicon and Intel.
           - name: macOS
             os: macos-latest
+            tauri-args: --target universal-apple-darwin
     defaults:
       run:
         shell: bash
@@ -62,6 +67,10 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      - name: Add both Mac targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: actions/setup-node@v7
         with:
@@ -82,7 +91,7 @@ jobs:
 
       - name: Build the installers
         working-directory: app
-        run: npm run tauri build
+        run: npm run tauri build -- ${{ matrix.tauri-args }}
 
       - name: Attach the installers and their checksums
         run: |
@@ -92,7 +101,7 @@ jobs:
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
-            target/release/bundle/dmg/*.dmg
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
           )
           if [ ${#files[@]} -eq 0 ]; then
             echo "No installers were produced." >&2

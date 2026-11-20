@@ -28,6 +28,7 @@ pub mod workbench;
 pub use approved::ApprovedFiles;
 pub use ddl::ObjectKind;
 pub use error::Error;
+pub use files::decode_text;
 pub use policy::PolicyError;
 pub use profile::{CaSource, ConnectProfile, TlsMode};
 pub use history::{History, HistoryEntry};
