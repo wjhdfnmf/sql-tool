@@ -111,10 +111,7 @@ impl Session {
             )
             .await?
             .into_iter()
-            .map(|mut row| TableEntry {
-                name: cell(&mut row, 0),
-                is_view: cell(&mut row, 1).to_ascii_uppercase().contains("VIEW"),
-            })
+            .map(|mut row| TableEntry { name: cell(&mut row, 0), is_view: cell(&mut row, 1).to_ascii_uppercase().contains("VIEW") })
             .collect();
 
         let routines = self
@@ -125,10 +122,7 @@ impl Session {
             )
             .await?
             .into_iter()
-            .map(|mut row| RoutineEntry {
-                name: cell(&mut row, 0),
-                kind: cell(&mut row, 1).to_ascii_uppercase(),
-            })
+            .map(|mut row| RoutineEntry { name: cell(&mut row, 0), kind: cell(&mut row, 1).to_ascii_uppercase() })
             .collect();
 
         let triggers = self
@@ -139,10 +133,7 @@ impl Session {
             )
             .await?
             .into_iter()
-            .map(|mut row| TriggerEntry {
-                name: cell(&mut row, 0),
-                table: cell(&mut row, 1),
-            })
+            .map(|mut row| TriggerEntry { name: cell(&mut row, 0), table: cell(&mut row, 1) })
             .collect();
 
         let events = self
@@ -156,12 +147,7 @@ impl Session {
             .map(|mut row| cell(&mut row, 0))
             .collect();
 
-        Ok(SchemaObjects {
-            tables,
-            routines,
-            triggers,
-            events,
-        })
+        Ok(SchemaObjects { tables, routines, triggers, events })
     }
 
     pub async fn table_details(&mut self, schema: &str, table: &str) -> Result<Option<TableDetails>, Error> {
@@ -193,10 +179,7 @@ impl Session {
                 (schema,),
             )
             .await?;
-        Ok(rows.into_iter().next().map(|mut row| SchemaDefaults {
-            charset: cell(&mut row, 0),
-            collation: cell(&mut row, 1),
-        }))
+        Ok(rows.into_iter().next().map(|mut row| SchemaDefaults { charset: cell(&mut row, 0), collation: cell(&mut row, 1) }))
     }
 
     /// Character sets this server supports, with each one's default collation.
@@ -207,14 +190,7 @@ impl Session {
                  FROM information_schema.character_sets ORDER BY character_set_name",
             )
             .await?;
-        Ok(result
-            .rows
-            .into_iter()
-            .map(|mut row| Charset {
-                name: cell(&mut row, 0),
-                default_collation: cell(&mut row, 1),
-            })
-            .collect())
+        Ok(result.rows.into_iter().map(|mut row| Charset { name: cell(&mut row, 0), default_collation: cell(&mut row, 1) }).collect())
     }
 
     pub async fn collations(&mut self, charset: &str) -> Result<Vec<String>, Error> {
@@ -230,22 +206,12 @@ impl Session {
             "SELECT collation_name FROM information_schema.collations \
              WHERE character_set_name = ? ORDER BY collation_name"
         };
-        Ok(self
-            .query_params(sql, (charset,))
-            .await?
-            .into_iter()
-            .map(|mut row| cell(&mut row, 0))
-            .collect())
+        Ok(self.query_params(sql, (charset,)).await?.into_iter().map(|mut row| cell(&mut row, 0)).collect())
     }
 
     /// The statement that would recreate the object, as the server reports it.
     pub async fn show_create(&mut self, kind: ObjectKind, schema: &str, name: &str) -> Result<String, Error> {
-        let sql = format!(
-            "SHOW CREATE {} {}.{}",
-            kind.keyword(),
-            quote_identifier(schema),
-            quote_identifier(name)
-        );
+        let sql = format!("SHOW CREATE {} {}.{}", kind.keyword(), quote_identifier(schema), quote_identifier(name));
         // Which column holds the statement depends on the kind of object.
         let column = match kind {
             ObjectKind::Table | ObjectKind::View => 1,
@@ -253,16 +219,9 @@ impl Session {
             ObjectKind::Event => 3,
         };
         let mut result = self.query(&sql).await?;
-        result
-            .rows
-            .first_mut()
-            .and_then(|row| row.get_mut(column))
-            .and_then(Option::take)
-            .ok_or_else(|| {
-                Error::Other(format!(
-                    "The server did not return the definition of {name}. This account may not be allowed to see it."
-                ))
-            })
+        result.rows.first_mut().and_then(|row| row.get_mut(column)).and_then(Option::take).ok_or_else(|| {
+            Error::Other(format!("The server did not return the definition of {name}. This account may not be allowed to see it."))
+        })
     }
 
     pub async fn table_columns(&mut self, schema: &str, table: &str) -> Result<Vec<ColumnEntry>, Error> {
@@ -304,7 +263,19 @@ fn is_numeric_type(column_type: &str) -> bool {
     let base = column_type.split(['(', ' ']).next().unwrap_or("").to_ascii_lowercase();
     matches!(
         base.as_str(),
-        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "decimal" | "numeric" | "float" | "double" | "real" | "bit" | "year"
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "decimal"
+            | "numeric"
+            | "float"
+            | "double"
+            | "real"
+            | "bit"
+            | "year"
     )
 }
 
@@ -398,9 +369,7 @@ impl Session {
                         Some(crate::export::sql_literal(Some(value.as_bytes()), crate::store::ColumnKind::Text))
                     }
                 });
-                let on_update = extra_lower
-                    .find("on update ")
-                    .map(|at| extra[at + "on update ".len()..].trim().to_string());
+                let on_update = extra_lower.find("on update ").map(|at| extra[at + "on update ".len()..].trim().to_string());
 
                 ColumnSpec {
                     original_name: Some(name.clone()),

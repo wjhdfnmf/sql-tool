@@ -25,14 +25,8 @@ pub struct ApprovedFiles {
 impl ApprovedFiles {
     /// Reads the list kept at `path`. A missing or unreadable list is an empty one.
     pub fn load(path: PathBuf) -> Self {
-        let files = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Vec<PathBuf>>(&bytes).ok())
-            .unwrap_or_default();
-        Self {
-            path,
-            files: Mutex::new(files),
-        }
+        let files = std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<Vec<PathBuf>>(&bytes).ok()).unwrap_or_default();
+        Self { path, files: Mutex::new(files) }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<PathBuf>> {

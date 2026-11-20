@@ -52,10 +52,7 @@ pub fn top_level_words(statement: &str) -> Vec<String> {
                 i = bytes[i..].iter().position(|b| *b == b'\n').map_or(bytes.len(), |p| i + p);
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i = bytes[i + 2..]
-                    .windows(2)
-                    .position(|w| w == b"*/")
-                    .map_or(bytes.len(), |p| i + 2 + p + 2);
+                i = bytes[i + 2..].windows(2).position(|w| w == b"*/").map_or(bytes.len(), |p| i + 2 + p + 2);
             }
             b'(' => {
                 depth += 1;
@@ -106,7 +103,11 @@ pub fn classify(statement: &str) -> StatementKind {
             if words.get(1).is_some_and(|w| w == "ANALYZE") && !has("SELECT") {
                 StatementKind::Other
             } else if has("UPDATE") || has("DELETE") || has("INSERT") || has("REPLACE") {
-                if has("ANALYZE") { StatementKind::Write } else { StatementKind::Read }
+                if has("ANALYZE") {
+                    StatementKind::Write
+                } else {
+                    StatementKind::Read
+                }
             } else {
                 StatementKind::Read
             }
@@ -169,11 +170,7 @@ pub fn review<'a>(statements: impl IntoIterator<Item = &'a str>) -> Vec<Concern>
             _ => None,
         };
         if let Some(reason) = reason {
-            concerns.push(Concern {
-                index,
-                reason,
-                sql: preview(statement),
-            });
+            concerns.push(Concern { index, reason, sql: preview(statement) });
         }
     }
     concerns

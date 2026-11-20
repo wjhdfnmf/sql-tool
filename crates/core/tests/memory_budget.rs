@@ -30,10 +30,7 @@ fn open_results_share_one_memory_budget_and_give_it_back_when_closed() {
 
     let second = ResultStore::with_limits(own_allowance, 64 * 1024);
     fill(&second, 800);
-    assert!(
-        second.status().spilled_bytes > 0,
-        "the second result took the total past the budget, so it must use the disk"
-    );
+    assert!(second.status().spilled_bytes > 0, "the second result took the total past the budget, so it must use the disk");
     assert!(memory_in_use() < 1024 * 1024 + 2 * 64 * 1024, "in use: {}", memory_in_use());
 
     // What went to disk reads back the same.

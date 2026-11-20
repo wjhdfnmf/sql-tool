@@ -463,7 +463,11 @@ pub struct ColumnSummary {
 enum Values {
     /// NaN where the cell is NULL or unreadable.
     Numbers(Vec<f64>),
-    Codes { codes: Vec<u32>, labels: Vec<String>, overflow: bool },
+    Codes {
+        codes: Vec<u32>,
+        labels: Vec<String>,
+        overflow: bool,
+    },
 }
 
 struct Column {
@@ -478,9 +482,7 @@ impl Column {
     fn bytes(&self) -> u64 {
         match &self.values {
             Values::Numbers(v) => (v.len() * 8) as u64,
-            Values::Codes { codes, labels, .. } => {
-                (codes.len() * 4 + labels.iter().map(|l| l.len() + 24).sum::<usize>()) as u64
-            }
+            Values::Codes { codes, labels, .. } => (codes.len() * 4 + labels.iter().map(|l| l.len() + 24).sum::<usize>()) as u64,
         }
     }
 
@@ -494,7 +496,10 @@ impl Column {
 
 enum Builder {
     Number(Vec<f64>),
-    Time { out: Vec<f64>, dates: u64 },
+    Time {
+        out: Vec<f64>,
+        dates: u64,
+    },
     Category {
         codes: Vec<u32>,
         index: HashMap<Box<[u8]>, u32>,
@@ -831,10 +836,7 @@ impl Dataset {
             }
         }
         let rows = *kept.rows.get_or_insert(status.total_rows as usize);
-        Ok(Loaded {
-            rows,
-            columns: wanted.iter().map(|key| (*key, kept.columns[key].clone())).collect(),
-        })
+        Ok(Loaded { rows, columns: wanted.iter().map(|key| (*key, kept.columns[key].clone())).collect() })
     }
 
     /// What one column holds, read in `role`.
@@ -1275,8 +1277,7 @@ fn by_category(
     }
     data.series = (0..series)
         .map(|s| {
-            let mut values: Vec<Option<f64>> =
-                shown.iter().map(|(category, _)| tallies[category * series + s].value(statistic)).collect();
+            let mut values: Vec<Option<f64>> = shown.iter().map(|(category, _)| tallies[category * series + s].value(statistic)).collect();
             if !rest.is_empty() {
                 let mut merged = Tally::EMPTY;
                 for category in &rest {
@@ -1423,8 +1424,7 @@ fn binned(
 fn scatter(data: &mut ChartData, x: &[f64], y: &[f64], mask: &[bool], groups: &SeriesMap<'_>, request: &ChartRequest) {
     let large = request.large;
     let usable = |row: &usize| mask[*row] && !x[*row].is_nan() && !y[*row].is_nan();
-    let (mut x_lo, mut x_hi, mut y_lo, mut y_hi, mut drawn) =
-        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY, 0usize);
+    let (mut x_lo, mut x_hi, mut y_lo, mut y_hi, mut drawn) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY, 0usize);
     for row in (0..mask.len()).filter(usable) {
         x_lo = x_lo.min(x[row]);
         x_hi = x_hi.max(x[row]);
@@ -1474,11 +1474,7 @@ fn scatter(data: &mut ChartData, x: &[f64], y: &[f64], mask: &[bool], groups: &S
     }
     if data.sampled {
         let shown: usize = series.iter().map(|s| s.points.len() / 2).sum();
-        data.notes.push(format!(
-            "A random sample of {} of {} points is drawn.",
-            grouped(shown as u64),
-            grouped(drawn as u64)
-        ));
+        data.notes.push(format!("A random sample of {} of {} points is drawn.", grouped(shown as u64), grouped(drawn as u64)));
     }
     data.series = series;
 }
@@ -1519,7 +1515,11 @@ impl FitSums {
 
     fn scale(&self) -> f64 {
         let half = (self.u[1] - self.u[0]) / 2.0;
-        if half > 0.0 { half } else { 1.0 }
+        if half > 0.0 {
+            half
+        } else {
+            1.0
+        }
     }
 
     fn middle(&self) -> f64 {
@@ -1711,10 +1711,7 @@ fn assign_groups(
                 group[row] = (index / size) as u32;
             }
             if size > 1 && request.run_size.is_none_or(|asked| asked as usize != size) {
-                notes.push(format!(
-                    "Each point is the average of {} rows in a row, in the order of the result.",
-                    grouped(size as u64)
-                ));
+                notes.push(format!("Each point is the average of {} rows in a row, in the order of the result.", grouped(size as u64)));
             }
             let count = drawn.div_ceil(size);
             Ok((group, count, XAxis::Sequence { count, rows_per_point: size as u64 }))
@@ -1861,7 +1858,14 @@ fn box_stats(mut values: Vec<f64>) -> Option<BoxStats> {
     })
 }
 
-fn control(data: &mut ChartData, x: Option<&Values>, time: bool, request: &ChartRequest, mask: &[bool], y: &[f64]) -> Result<(), ChartError> {
+fn control(
+    data: &mut ChartData,
+    x: Option<&Values>,
+    time: bool,
+    request: &ChartRequest,
+    mask: &[bool],
+    y: &[f64],
+) -> Result<(), ChartError> {
     let (group, count, axis) = assign_groups(x, time, request, mask, y, true, &mut data.notes)?;
     let mut size = vec![0u64; count];
     let mut sum = vec![0f64; count];
@@ -1897,7 +1901,11 @@ fn control(data: &mut ChartData, x: Option<&Values>, time: bool, request: &Chart
     } else {
         // Several rows a point: the spread within the points, pooled over all of them.
         let freedom: u64 = size.iter().filter(|n| **n >= 2).map(|n| n - 1).sum();
-        if freedom == 0 { 0.0 } else { (within.iter().sum::<f64>() / freedom as f64).sqrt() }
+        if freedom == 0 {
+            0.0
+        } else {
+            (within.iter().sum::<f64>() / freedom as f64).sqrt()
+        }
     };
     let fixed = request.control_center.is_some() || request.control_sigma.is_some_and(|s| s > 0.0);
     let center = request.control_center.unwrap_or(sum.iter().sum::<f64>() / rows as f64);
@@ -1979,7 +1987,15 @@ fn control(data: &mut ChartData, x: Option<&Values>, time: bool, request: &Chart
 pub fn run_rules(z: &[f64], v: &[f64]) -> Vec<u8> {
     let n = z.len();
     let mut out = vec![0u8; n];
-    let side = |x: f64| if x > 0.0 { 1i8 } else if x < 0.0 { -1 } else { 0 };
+    let side = |x: f64| {
+        if x > 0.0 {
+            1i8
+        } else if x < 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
     // The direction of each step: up, down or level.
     let step: Vec<i8> = (0..n).map(|i| if i == 0 { 0 } else { side(v[i] - v[i - 1]) }).collect();
     let (mut same, mut rising, mut alternating, mut inner, mut outer) = (0usize, 0usize, 0usize, 0usize, 0usize);
@@ -1987,16 +2003,34 @@ pub fn run_rules(z: &[f64], v: &[f64]) -> Vec<u8> {
         if z[i].abs() > 3.0 {
             out[i] |= 1;
         }
-        same = if side(z[i]) != 0 && i > 0 && side(z[i]) == side(z[i - 1]) { same + 1 } else if side(z[i]) != 0 { 1 } else { 0 };
+        same = if side(z[i]) != 0 && i > 0 && side(z[i]) == side(z[i - 1]) {
+            same + 1
+        } else if side(z[i]) != 0 {
+            1
+        } else {
+            0
+        };
         if same >= 9 {
             out[i] |= 1 << 1;
         }
         // Steps in the same direction: five steps join six points.
-        rising = if step[i] != 0 && i > 1 && step[i] == step[i - 1] { rising + 1 } else if step[i] != 0 { 1 } else { 0 };
+        rising = if step[i] != 0 && i > 1 && step[i] == step[i - 1] {
+            rising + 1
+        } else if step[i] != 0 {
+            1
+        } else {
+            0
+        };
         if rising >= 5 {
             out[i] |= 1 << 2;
         }
-        alternating = if step[i] != 0 && i > 1 && step[i] == -step[i - 1] { alternating + 1 } else if step[i] != 0 { 1 } else { 0 };
+        alternating = if step[i] != 0 && i > 1 && step[i] == -step[i - 1] {
+            alternating + 1
+        } else if step[i] != 0 {
+            1
+        } else {
+            0
+        };
         if alternating >= 13 {
             out[i] |= 1 << 3;
         }
@@ -2198,8 +2232,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(labels(&data), ["east", "north", "south", NULL_LABEL]);
-        let series: Vec<(Option<&str>, &[Option<f64>])> =
-            data.series.iter().map(|s| (s.name.as_deref(), s.values.as_slice())).collect();
+        let series: Vec<(Option<&str>, &[Option<f64>])> = data.series.iter().map(|s| (s.name.as_deref(), s.values.as_slice())).collect();
         assert_eq!(
             series,
             [
@@ -2378,7 +2411,9 @@ mod tests {
         assert_eq!(series[1].1.len(), 4);
         assert_eq!(series[2].0, "south");
         assert!(!data.sampled && data.density.is_none());
-        assert!(orders().chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), ..request(ChartKind::Scatter) }).is_err());
+        assert!(orders()
+            .chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), ..request(ChartKind::Scatter) })
+            .is_err());
     }
 
     fn many_points(count: usize) -> Dataset {
@@ -2555,7 +2590,12 @@ mod tests {
             assert_eq!(data.series[0].values, [Some(4.0), Some(2.0), Some(1.0)]);
             // With a number column on Y the slices are its sum.
             let summed = orders()
-                .chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), statistic: Statistic::Sum, ..request(kind) })
+                .chart(&ChartRequest {
+                    x: axis(0, Role::Discrete),
+                    y: axis(1, Role::Continuous),
+                    statistic: Statistic::Sum,
+                    ..request(kind)
+                })
                 .unwrap();
             assert_eq!(labels(&summed), ["east", "north", "south", NULL_LABEL]);
             assert_eq!(summed.series[0].values, [Some(100.0), Some(40.0), Some(20.5), Some(7.0)]);
@@ -2599,7 +2639,12 @@ mod tests {
     #[test]
     fn boxes_are_made_for_each_category_or_bin_of_x() {
         let by_region = orders()
-            .chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), sort: BarSort::Label, ..request(ChartKind::Box) })
+            .chart(&ChartRequest {
+                x: axis(0, Role::Discrete),
+                y: axis(1, Role::Continuous),
+                sort: BarSort::Label,
+                ..request(ChartKind::Box)
+            })
             .unwrap();
         assert_eq!(labels(&by_region), ["east", "north", "south", NULL_LABEL]);
         let medians: Vec<f64> = by_region.boxes.iter().map(|b| b.as_ref().unwrap().median).collect();
@@ -2608,7 +2653,12 @@ mod tests {
 
         // Over time, by month: March has no rows, so it has no box.
         let by_month = orders()
-            .chart(&ChartRequest { x: axis(2, Role::Time), y: axis(1, Role::Continuous), bucket: Some(TimeBucket::Month), ..request(ChartKind::Box) })
+            .chart(&ChartRequest {
+                x: axis(2, Role::Time),
+                y: axis(1, Role::Continuous),
+                bucket: Some(TimeBucket::Month),
+                ..request(ChartKind::Box)
+            })
             .unwrap();
         assert_eq!(edges(&by_month).len(), 5);
         let rows: Vec<Option<u64>> = by_month.boxes.iter().map(|b| b.as_ref().map(|b| b.rows)).collect();
@@ -2620,7 +2670,8 @@ mod tests {
         let mut values: Vec<String> = (0..3000).map(|_| "10".to_string()).collect();
         values.extend((0..500).map(|i| (1000 + i).to_string()));
         let data = column_of("n", values.iter().map(String::as_str));
-        let stats = data.chart(&ChartRequest { y: axis(0, Role::Continuous), ..request(ChartKind::Box) }).unwrap().boxes[0].clone().unwrap();
+        let stats =
+            data.chart(&ChartRequest { y: axis(0, Role::Continuous), ..request(ChartKind::Box) }).unwrap().boxes[0].clone().unwrap();
         // Six in seven of the values are 10, so the box has no height and everything else is outside it.
         assert_eq!((stats.q1, stats.q3, stats.low, stats.high), (10.0, 10.0, 10.0, 10.0));
         assert_eq!(stats.outlier_count, 500);
@@ -2652,9 +2703,29 @@ mod tests {
     #[test]
     fn a_control_chart_with_subgroups_pools_the_spread_within_them_and_flags_a_point_outside() {
         // Lots a, b and c vary by one unit within themselves; lot d sits far above.
-        let rows = [("a", "9"), ("a", "10"), ("a", "11"), ("b", "10"), ("b", "11"), ("b", "12"), ("c", "9"), ("c", "10"), ("c", "11"), ("d", "19"), ("d", "20"), ("d", "21")];
+        let rows = [
+            ("a", "9"),
+            ("a", "10"),
+            ("a", "11"),
+            ("b", "10"),
+            ("b", "11"),
+            ("b", "12"),
+            ("c", "9"),
+            ("c", "10"),
+            ("c", "11"),
+            ("d", "19"),
+            ("d", "20"),
+            ("d", "21"),
+        ];
         let data = dataset(&["lot", "n"], rows.iter().map(|(lot, n)| vec![Some(*lot), Some(*n)]));
-        let chart = data.chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), sort: BarSort::Value, ..request(ChartKind::Control) }).unwrap();
+        let chart = data
+            .chart(&ChartRequest {
+                x: axis(0, Role::Discrete),
+                y: axis(1, Role::Continuous),
+                sort: BarSort::Value,
+                ..request(ChartKind::Control)
+            })
+            .unwrap();
         // In the order the lots first appear, whatever order was asked for.
         assert_eq!(labels(&chart), ["a", "b", "c", "d"]);
         assert_eq!(chart.series[0].values, [Some(10.0), Some(11.0), Some(10.0), Some(20.0)]);
@@ -2672,7 +2743,12 @@ mod tests {
     #[test]
     fn a_control_chart_over_time_uses_calendar_subgroups_and_skips_empty_ones() {
         let chart = orders()
-            .chart(&ChartRequest { x: axis(2, Role::Time), y: axis(1, Role::Continuous), bucket: Some(TimeBucket::Month), ..request(ChartKind::Control) })
+            .chart(&ChartRequest {
+                x: axis(2, Role::Time),
+                y: axis(1, Role::Continuous),
+                bucket: Some(TimeBucket::Month),
+                ..request(ChartKind::Control)
+            })
             .unwrap();
         assert_eq!(chart.series[0].values, [Some(20.0), Some(10.25), None, Some(100.0)]);
         let control = chart.control.unwrap();
@@ -2740,7 +2816,11 @@ mod tests {
         // Subgroups: the standard deviation within each, against limits for its size.
         let rows = [("a", "9"), ("a", "10"), ("a", "11"), ("b", "10"), ("b", "11"), ("b", "12"), ("c", "5")];
         let lots = dataset(&["lot", "n"], rows.iter().map(|(lot, n)| vec![Some(*lot), Some(*n)]));
-        let control = lots.chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), ..request(ChartKind::Control) }).unwrap().control.unwrap();
+        let control = lots
+            .chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), ..request(ChartKind::Control) })
+            .unwrap()
+            .control
+            .unwrap();
         assert_eq!(control.spread, [Some(1.0), Some(1.0), None], "a lot of one row has no spread of its own");
         let c4 = 8.0 / 9.0;
         assert!((control.spread_center[0].unwrap() - c4 * control.sigma).abs() < 1e-12);
@@ -2752,7 +2832,12 @@ mod tests {
     fn a_control_chart_can_be_judged_against_a_centre_and_sigma_given_from_before() {
         let data = column_of("n", ["10", "12", "11", "14", "12"]);
         let chart = data
-            .chart(&ChartRequest { y: axis(0, Role::Continuous), control_center: Some(10.0), control_sigma: Some(1.0), ..request(ChartKind::Control) })
+            .chart(&ChartRequest {
+                y: axis(0, Role::Continuous),
+                control_center: Some(10.0),
+                control_sigma: Some(1.0),
+                ..request(ChartKind::Control)
+            })
             .unwrap();
         let control = chart.control.unwrap();
         assert!(control.fixed);
@@ -2762,7 +2847,11 @@ mod tests {
         assert_eq!(control.beyond, 1);
         assert_eq!(control.signals, [0, 0, 0, 1, 0]);
         // Only a centre given: the sigma still comes from the data.
-        let centred = data.chart(&ChartRequest { y: axis(0, Role::Continuous), control_center: Some(10.0), ..request(ChartKind::Control) }).unwrap().control.unwrap();
+        let centred = data
+            .chart(&ChartRequest { y: axis(0, Role::Continuous), control_center: Some(10.0), ..request(ChartKind::Control) })
+            .unwrap()
+            .control
+            .unwrap();
         assert!(centred.fixed && (centred.sigma - 2.0 / 1.128).abs() < 1e-12);
     }
 
@@ -2796,7 +2885,12 @@ mod tests {
         assert!((plain.sigma_within.unwrap() - 1.0 / 1.128).abs() < 1e-12);
         assert_eq!((plain.below, plain.above), (None, None));
         let limited = data
-            .chart(&ChartRequest { x: axis(0, Role::Continuous), spec_low: Some(4.0), spec_high: Some(6.5), ..request(ChartKind::Histogram) })
+            .chart(&ChartRequest {
+                x: axis(0, Role::Continuous),
+                spec_low: Some(4.0),
+                spec_high: Some(6.5),
+                ..request(ChartKind::Histogram)
+            })
             .unwrap()
             .stats
             .unwrap();
@@ -2812,7 +2906,11 @@ mod tests {
         let u = if matches!(fit.kind, TrendKind::Logarithmic | TrendKind::Power) { x.ln() } else { x };
         let t = (u - fit.center) / fit.scale;
         let v: f64 = fit.coefficients.iter().rev().fold(0.0, |sum, c| sum * t + c);
-        if matches!(fit.kind, TrendKind::Exponential | TrendKind::Power) { v.exp() } else { v }
+        if matches!(fit.kind, TrendKind::Exponential | TrendKind::Power) {
+            v.exp()
+        } else {
+            v
+        }
     }
 
     fn fitted(points: &[(f64, f64)], kind: TrendKind, degree: u32) -> ChartData {
@@ -2873,10 +2971,16 @@ mod tests {
             .unwrap();
         let fit = &over_time.fits[0];
         assert_eq!(fit.rows, 5);
-        let residuals: f64 = [("2026-01-05 09:00:00", 10.0), ("2026-01-20 10:30:00", 30.0), ("2026-02-01 00:00:00", 5.0), ("2026-02-14 23:59:59", 15.5), ("2026-04-02 12:00:00", 100.0)]
-            .iter()
-            .map(|(when, amount)| amount - value_at(fit, date(when)))
-            .sum();
+        let residuals: f64 = [
+            ("2026-01-05 09:00:00", 10.0),
+            ("2026-01-20 10:30:00", 30.0),
+            ("2026-02-01 00:00:00", 5.0),
+            ("2026-02-14 23:59:59", 15.5),
+            ("2026-04-02 12:00:00", 100.0),
+        ]
+        .iter()
+        .map(|(when, amount)| amount - value_at(fit, date(when)))
+        .sum();
         assert!(residuals.abs() < 1e-6, "a least-squares line leaves residuals that cancel: {residuals}");
 
         // One line per group; a group of one point has none, and the chart says so.

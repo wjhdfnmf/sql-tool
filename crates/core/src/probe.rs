@@ -167,10 +167,7 @@ async fn probe(host: &str, port: u16) -> Result<CertificateInfo, Error> {
     tcp.write_all(&request).await.map_err(io)?;
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let capture = Arc::new(Capture {
-        seen: Mutex::new(None),
-        provider: provider.clone(),
-    });
+    let capture = Arc::new(Capture { seen: Mutex::new(None), provider: provider.clone() });
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| Error::Tls(e.to_string()))?
@@ -178,23 +175,17 @@ async fn probe(host: &str, port: u16) -> Result<CertificateInfo, Error> {
         .with_custom_certificate_verifier(capture.clone())
         .with_no_client_auth();
     let name = ServerName::try_from(host.to_string()).map_err(|e| Error::Tls(e.to_string()))?;
-    let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
-        .connect(name, tcp)
-        .await
-        .map_err(|e| Error::Tls(e.to_string()))?;
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await.map_err(|e| Error::Tls(e.to_string()))?;
     drop(tls);
 
     let der = capture.seen.lock().unwrap().take();
-    der.map(|der| describe(&der))
-        .ok_or_else(|| Error::Tls("The server did not present a certificate.".into()))
+    der.map(|der| describe(&der)).ok_or_else(|| Error::Tls("The server did not present a certificate.".into()))
 }
 
 /// Connects to `host:port`, starts TLS, and returns the certificate the
 /// server presented. Sends no credentials.
 pub async fn probe_certificate(host: &str, port: u16) -> Result<CertificateInfo, Error> {
-    tokio::time::timeout(TIMEOUT, probe(host, port))
-        .await
-        .unwrap_or_else(|_| Err(Error::Io("Timed out waiting for the server.".into())))
+    tokio::time::timeout(TIMEOUT, probe(host, port)).await.unwrap_or_else(|_| Err(Error::Io("Timed out waiting for the server.".into())))
 }
 
 #[cfg(test)]

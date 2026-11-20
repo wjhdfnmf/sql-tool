@@ -26,10 +26,7 @@ fn env_file(name: &str) -> HashMap<String, String> {
     let path = local_dir().join(name);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is missing ({e}); run the scripts in tests/servers first", path.display()));
-    text.lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect()
+    text.lines().filter_map(|line| line.split_once('=')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect()
 }
 
 /// MariaDB, logging in through PAM with the cleartext plugin over verified TLS.
@@ -73,12 +70,7 @@ async fn run(session: &mut Session, sql: &str, max_rows: Option<u64>) -> Outcome
                 out.order.push("set-done");
                 out.sets.push((current.take().expect("result without a start"), rows, truncated));
             }
-            RunEvent::Done {
-                affected_rows,
-                last_insert_id,
-                info,
-                ..
-            } => {
+            RunEvent::Done { affected_rows, last_insert_id, info, .. } => {
                 out.order.push("done");
                 out.done.push((affected_rows, last_insert_id, info));
             }
@@ -89,10 +81,7 @@ async fn run(session: &mut Session, sql: &str, max_rows: Option<u64>) -> Outcome
 }
 
 fn cell(store: &ResultStore, row: u64, column: usize) -> Option<String> {
-    store
-        .cell(row, column)
-        .expect("cell exists")
-        .map(|bytes| String::from_utf8(bytes).unwrap())
+    store.cell(row, column).expect("cell exists").map(|bytes| String::from_utf8(bytes).unwrap())
 }
 
 async fn check_metadata(session: &mut Session, expect_procedure: bool) {
@@ -174,22 +163,14 @@ async fn check_metadata(session: &mut Session, expect_procedure: bool) {
 }
 
 async fn check_rows_and_kinds(session: &mut Session, json_is_text: bool) {
-    let out = run(
-        session,
-        "SELECT id, name, born, profile, avatar, notes FROM sqltool_test.people ORDER BY id",
-        None,
-    )
-    .await;
+    let out = run(session, "SELECT id, name, born, profile, avatar, notes FROM sqltool_test.people ORDER BY id", None).await;
     assert_eq!(out.order, ["set", "set-done"]);
     let (store, rows, truncated) = &out.sets[0];
     assert_eq!((*rows, *truncated), (3, false));
 
     let kinds: Vec<ColumnKind> = store.status().columns.iter().map(|c| c.kind).collect();
     let json = if json_is_text { ColumnKind::Text } else { ColumnKind::Json };
-    assert_eq!(
-        kinds,
-        [ColumnKind::Number, ColumnKind::Text, ColumnKind::Date, json, ColumnKind::Binary, ColumnKind::Text]
-    );
+    assert_eq!(kinds, [ColumnKind::Number, ColumnKind::Text, ColumnKind::Date, json, ColumnKind::Binary, ColumnKind::Text]);
 
     assert_eq!(cell(store, 0, 1).as_deref(), Some("Ada Lovelace"));
     assert_eq!(cell(store, 0, 2).as_deref(), Some("1815-12-10"));
@@ -200,12 +181,7 @@ async fn check_rows_and_kinds(session: &mut Session, json_is_text: bool) {
 }
 
 async fn check_changing_rows(session: &mut Session) {
-    let created = run(
-        session,
-        "CREATE TEMPORARY TABLE scratch (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(10))",
-        None,
-    )
-    .await;
+    let created = run(session, "CREATE TEMPORARY TABLE scratch (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(10))", None).await;
     assert_eq!(created.order, ["done"]);
 
     let inserted = run(session, "INSERT INTO scratch (v) VALUES ('a'), ('b'), ('c')", None).await;
@@ -234,11 +210,7 @@ async fn check_row_limit(session: &mut Session, big_query: &str) {
     let (store, rows, truncated) = &out.sets[0];
     assert_eq!((*rows, *truncated), (1000, true));
     assert_eq!(store.status().rows, 1000);
-    assert!(
-        started.elapsed() < Duration::from_secs(15),
-        "the server kept running the query for {:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < Duration::from_secs(15), "the server kept running the query for {:?}", started.elapsed());
 
     // The interrupt must not spill over into the next statements.
     for expected in ["1", "2", "3"] {
@@ -248,28 +220,19 @@ async fn check_row_limit(session: &mut Session, big_query: &str) {
 }
 
 fn change(column: usize, value: Option<&str>) -> CellChange {
-    CellChange {
-        column,
-        value: value.map(str::to_string),
-    }
+    CellChange { column, value: value.map(str::to_string) }
 }
 
 fn texts(store: &ResultStore) -> Vec<Vec<Option<String>>> {
     let status = store.status();
-    (0..status.rows)
-        .map(|row| (0..status.columns.len()).map(|column| cell(store, row, column)).collect())
-        .collect()
+    (0..status.rows).map(|row| (0..status.columns.len()).map(|column| cell(store, row, column)).collect()).collect()
 }
 
 /// Editing rows through the grid: planned statements run in one transaction.
 async fn check_editing(session: &mut Session) {
     run(session, "DROP TABLE IF EXISTS sqltool_test.edit_scratch", None).await;
-    run(
-        session,
-        "CREATE TABLE sqltool_test.edit_scratch (id INT PRIMARY KEY, name VARCHAR(50) NULL, qty INT NOT NULL DEFAULT 0)",
-        None,
-    )
-    .await;
+    run(session, "CREATE TABLE sqltool_test.edit_scratch (id INT PRIMARY KEY, name VARCHAR(50) NULL, qty INT NOT NULL DEFAULT 0)", None)
+        .await;
     run(session, "INSERT INTO sqltool_test.edit_scratch VALUES (1, 'one', 10), (2, 'two', 20), (3, 'three', 30)", None).await;
 
     let read = run(session, "SELECT id, name, qty, qty * 2 AS doubled FROM sqltool_test.edit_scratch ORDER BY id", None).await;
@@ -295,10 +258,7 @@ async fn check_editing(session: &mut Session) {
 
     let after = run(session, "SELECT id, name, qty FROM sqltool_test.edit_scratch ORDER BY id", None).await;
     let s = |v: &str| Some(v.to_string());
-    assert_eq!(
-        texts(&after.sets[0].0),
-        [vec![s("1"), s(awkward), s("10")], vec![s("2"), None, s("25")], vec![s("4"), s("four"), s("0")]]
-    );
+    assert_eq!(texts(&after.sets[0].0), [vec![s("1"), s(awkward), s("10")], vec![s("2"), None, s("25")], vec![s("4"), s("four"), s("0")]]);
 
     // A failure part way through leaves everything as it was: the delete
     // targets row 3, which the batch above already removed.
@@ -324,11 +284,7 @@ async fn check_editing(session: &mut Session) {
 }
 
 fn new_column(name: &str, data_type: &str) -> ColumnSpec {
-    ColumnSpec {
-        name: name.into(),
-        data_type: data_type.into(),
-        ..ColumnSpec::default()
-    }
+    ColumnSpec { name: name.into(), data_type: data_type.into(), ..ColumnSpec::default() }
 }
 
 /// What must survive a round trip through the server.
@@ -519,11 +475,8 @@ async fn check_extras(profile: &ConnectProfile) {
 
     session.set_read_only().await.unwrap();
     assert!(session.run("SELECT COUNT(*) FROM sqltool_test.people", None, |_| {}).await.is_ok());
-    let refused = session
-        .run("INSERT INTO sqltool_test.people (name) VALUES ('must not appear')", None, |_| {})
-        .await
-        .unwrap_err()
-        .to_string();
+    let refused =
+        session.run("INSERT INTO sqltool_test.people (name) VALUES ('must not appear')", None, |_| {}).await.unwrap_err().to_string();
     assert!(refused.contains("READ ONLY") || refused.contains("read-only") || refused.contains("1792"), "{refused}");
 }
 
@@ -633,11 +586,7 @@ async fn check_reconnect(profile: &ConnectProfile) {
     assert!(session.ensure_alive(Duration::ZERO).await.unwrap(), "the dead connection was not noticed");
     let second = session.info().connection_id;
     assert_ne!(first, second, "a new connection has a new id");
-    assert_eq!(
-        session.current_database().await.unwrap().as_deref(),
-        Some("sqltool_test"),
-        "the default database is selected again"
-    );
+    assert_eq!(session.current_database().await.unwrap().as_deref(), Some("sqltool_test"), "the default database is selected again");
 
     // The handle made before the reconnect interrupts the new connection.
     let started = Instant::now();

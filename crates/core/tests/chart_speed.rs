@@ -13,7 +13,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use sqltool_core::chart::{AxisRef, ChartKind, ChartRequest, Dataset, Filter, Large, Role, Statistic, TimeBucket, TrendKind, TrendSpec, XAxis};
+use sqltool_core::chart::{
+    AxisRef, ChartKind, ChartRequest, Dataset, Filter, Large, Role, Statistic, TimeBucket, TrendKind, TrendSpec, XAxis,
+};
 use sqltool_core::store::memory_in_use;
 use sqltool_core::{ColumnInfo, ColumnKind, ResultStore, RowBatch};
 
@@ -88,7 +90,12 @@ fn charting_six_million_rows() {
     let data = Dataset::new(store);
 
     // Bars: amount summed by region. Reads two columns.
-    let bars = ChartRequest { x: axis(1, Role::Discrete), y: axis(2, Role::Continuous), statistic: Statistic::Sum, ..ChartRequest::new(ChartKind::Bar) };
+    let bars = ChartRequest {
+        x: axis(1, Role::Discrete),
+        y: axis(2, Role::Continuous),
+        statistic: Statistic::Sum,
+        ..ChartRequest::new(ChartKind::Bar)
+    };
     let chart = timed("bar, first time (reads region and amount)", || data.chart(&bars).unwrap());
     assert_eq!(chart.rows_drawn as usize, ROWS);
     assert_eq!(chart.series[0].values.len(), REGIONS.len());
@@ -112,7 +119,13 @@ fn charting_six_million_rows() {
     assert_eq!(chart.series[0].values.iter().flatten().sum::<f64>() as usize, ROWS);
 
     // Time on X, by month. Reads the date column.
-    let monthly = ChartRequest { x: axis(3, Role::Time), y: axis(2, Role::Continuous), statistic: Statistic::Mean, bucket: Some(TimeBucket::Month), ..ChartRequest::new(ChartKind::Bar) };
+    let monthly = ChartRequest {
+        x: axis(3, Role::Time),
+        y: axis(2, Role::Continuous),
+        statistic: Statistic::Mean,
+        bucket: Some(TimeBucket::Month),
+        ..ChartRequest::new(ChartKind::Bar)
+    };
     let chart = timed("bar by month, first time (reads the dates)", || data.chart(&monthly).unwrap());
     assert_eq!(chart.rows_drawn as usize, ROWS);
     let XAxis::Bins { edges, .. } = &chart.x else { panic!("time is binned") };
@@ -145,7 +158,12 @@ fn charting_six_million_rows() {
     assert_eq!(chart.boxes.iter().flatten().map(|b| b.rows as usize).sum::<usize>(), ROWS);
 
     // A control chart by day, and one of the rows in order.
-    let by_day = ChartRequest { x: axis(3, Role::Time), y: axis(2, Role::Continuous), bucket: Some(TimeBucket::Day), ..ChartRequest::new(ChartKind::Control) };
+    let by_day = ChartRequest {
+        x: axis(3, Role::Time),
+        y: axis(2, Role::Continuous),
+        bucket: Some(TimeBucket::Day),
+        ..ChartRequest::new(ChartKind::Control)
+    };
     let chart = timed("control chart by day", || data.chart(&by_day).unwrap());
     assert_eq!(chart.series[0].values.len(), 417);
     assert_eq!(chart.stats.as_ref().unwrap().rows as usize, ROWS);

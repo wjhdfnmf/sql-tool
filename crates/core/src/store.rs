@@ -63,12 +63,7 @@ pub struct ColumnInfo {
 impl ColumnInfo {
     /// A column that is not tied to a table, as tests and computed results use.
     pub fn plain(name: &str, kind: ColumnKind) -> Self {
-        Self {
-            name: name.to_string(),
-            kind,
-            source: None,
-            primary_key: false,
-        }
+        Self { name: name.to_string(), kind, source: None, primary_key: false }
     }
 }
 
@@ -297,11 +292,7 @@ impl Inner {
         open.extend_from_slice(row);
         self.memory_bytes += row.len() as u64;
         MEMORY_IN_USE.fetch_add(row.len() as u64, Relaxed);
-        self.rows.push(RowLocation {
-            chunk: chunk as u32,
-            start: start as u32,
-            end: (start + row.len()) as u32,
-        });
+        self.rows.push(RowLocation { chunk: chunk as u32, start: start as u32, end: (start + row.len()) as u32 });
     }
 
     /// Called when the last chunk will not be written to again. If memory is
@@ -327,7 +318,6 @@ impl Inner {
             Err(_) => self.spill_failed = true,
         }
     }
-
 
     /// The stored row behind a visible row number.
     fn resolve(&self, visible_row: u64) -> Option<usize> {
@@ -517,12 +507,7 @@ impl ResultStore {
     }
 
     /// Calls `visit` with the cells of visible rows `first..=last`.
-    pub(crate) fn for_each_row_in<E>(
-        &self,
-        first: u64,
-        last: u64,
-        mut visit: impl FnMut(Cells<'_>) -> Result<(), E>,
-    ) -> Result<(), E> {
+    pub(crate) fn for_each_row_in<E>(&self, first: u64, last: u64, mut visit: impl FnMut(Cells<'_>) -> Result<(), E>) -> Result<(), E> {
         let inner = self.inner.read().unwrap();
         for index in first..=last.min(inner.visible().saturating_sub(1)) {
             let Some(row) = inner.resolve(index) else { break };
@@ -549,11 +534,7 @@ impl ResultStore {
         let mut rows: Vec<u32> = match needle {
             None => (0..total as u32).collect(),
             Some(needle) => (0..total)
-                .filter(|row| {
-                    Cells(inner.raw_row(*row))
-                        .flatten()
-                        .any(|cell| contains_ignore_ascii_case(cell, needle.as_bytes()))
-                })
+                .filter(|row| Cells(inner.raw_row(*row)).flatten().any(|cell| contains_ignore_ascii_case(cell, needle.as_bytes())))
                 .map(|row| row as u32)
                 .collect(),
         };
@@ -590,13 +571,15 @@ impl ResultStore {
                     (Key::Number(x), Key::Number(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
                     (Key::Number(_), Key::Text(_)) => Ordering::Less,
                     (Key::Text(_), Key::Number(_)) => Ordering::Greater,
-                    (Key::Text(x), Key::Text(y)) => x
-                        .iter()
-                        .map(u8::to_ascii_lowercase)
-                        .cmp(y.iter().map(u8::to_ascii_lowercase))
-                        .then_with(|| x.cmp(y)),
+                    (Key::Text(x), Key::Text(y)) => {
+                        x.iter().map(u8::to_ascii_lowercase).cmp(y.iter().map(u8::to_ascii_lowercase)).then_with(|| x.cmp(y))
+                    }
                 };
-                if descending { ordering.reverse() } else { ordering }
+                if descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
             });
             rows = keyed.into_iter().map(|(_, row)| row).collect();
         }
@@ -623,9 +606,7 @@ mod tests {
     }
 
     fn column(store: &ResultStore, index: usize) -> Vec<Option<String>> {
-        (0..store.status().rows)
-            .map(|row| store.cell(row, index).unwrap().map(|b| String::from_utf8(b).unwrap()))
-            .collect()
+        (0..store.status().rows).map(|row| store.cell(row, index).unwrap().map(|b| String::from_utf8(b).unwrap())).collect()
     }
 
     #[test]
@@ -658,10 +639,7 @@ mod tests {
         batch.push_row([Some(&b"c"[..])]);
         store.append(&mut batch);
         assert_eq!(store.status().rows, 3);
-        assert_eq!(
-            store.window(0, 3),
-            [&3u32.to_le_bytes()[..], &[1, b'a', 1, b'b', 1, b'c']].concat()
-        );
+        assert_eq!(store.window(0, 3), [&3u32.to_le_bytes()[..], &[1, b'a', 1, b'b', 1, b'c']].concat());
     }
 
     #[test]
@@ -790,10 +768,7 @@ mod tests {
             &[None, Some("carol")],
             &[Some("9"), Some("ann")],
         ]);
-        store.set_columns(vec![
-            ColumnInfo::plain("id", ColumnKind::Number),
-            ColumnInfo::plain("name", ColumnKind::Text),
-        ]);
+        store.set_columns(vec![ColumnInfo::plain("id", ColumnKind::Number), ColumnInfo::plain("name", ColumnKind::Text)]);
         store
     }
 
@@ -801,10 +776,7 @@ mod tests {
     fn numeric_columns_sort_by_value_with_nulls_first() {
         let store = people();
         store.set_view(None, Some((0, false)));
-        assert_eq!(
-            column(&store, 0),
-            [None, Some("9".into()), Some("9".into()), Some("10".into()), Some("100".into())]
-        );
+        assert_eq!(column(&store, 0), [None, Some("9".into()), Some("9".into()), Some("10".into()), Some("100".into())]);
         // Equal keys keep their arrival order.
         assert_eq!(column(&store, 1)[1..3], [Some("Ann".to_string()), Some("ann".to_string())]);
 
@@ -817,10 +789,7 @@ mod tests {
     fn text_columns_sort_ignoring_ascii_case() {
         let store = people();
         store.set_view(None, Some((1, false)));
-        assert_eq!(
-            column(&store, 1),
-            [None, Some("Ann".into()), Some("ann".into()), Some("bob".into()), Some("carol".into())]
-        );
+        assert_eq!(column(&store, 1), [None, Some("Ann".into()), Some("ann".into()), Some("bob".into()), Some("carol".into())]);
     }
 
     #[test]

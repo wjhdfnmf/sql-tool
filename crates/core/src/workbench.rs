@@ -67,7 +67,11 @@ pub fn parse(xml: &str) -> Result<Vec<Found>, Error> {
             let settings: HashMap<String, String> = child("value", "parameterValues")
                 .map(|dict| dict.children().filter_map(|v| Some((v.attribute("key")?.to_string(), text(v)))).collect())
                 .unwrap_or_default();
-            convert(&child("value", "name").map(text).unwrap_or_default(), &child("link", "driver").map(text).unwrap_or_default(), &settings)
+            convert(
+                &child("value", "name").map(text).unwrap_or_default(),
+                &child("link", "driver").map(text).unwrap_or_default(),
+                &settings,
+            )
         })
         .collect();
     Ok(found)
@@ -116,7 +120,10 @@ fn convert(name: &str, driver: &str, settings: &HashMap<String, String>) -> Foun
         (false, Some(3)) | (true, Some(1)) => TlsSetting::VerifyCa,
         (false, Some(4)) | (true, Some(2)) => TlsSetting::VerifyIdentity,
         _ => {
-            notes.push("Its SSL setting was not recognised. It is set to verify the server, the safe choice; change it if that does not connect.".to_string());
+            notes.push(
+                "Its SSL setting was not recognised. It is set to verify the server, the safe choice; change it if that does not connect."
+                    .to_string(),
+            );
             TlsSetting::VerifyIdentity
         }
     };
@@ -163,7 +170,8 @@ mod tests {
     use super::*;
 
     fn connection(name: &str, driver: &str, settings: &[(&str, &str, &str)]) -> String {
-        let values: String = settings.iter().map(|(kind, key, value)| format!("<value type=\"{kind}\" key=\"{key}\">{value}</value>\n")).collect();
+        let values: String =
+            settings.iter().map(|(kind, key, value)| format!("<value type=\"{kind}\" key=\"{key}\">{value}</value>\n")).collect();
         format!(
             r#"<value type="object" struct-name="db.mgmt.Connection" id="{{A1}}" struct-checksum="0x96ba47d8">
   <link type="object" struct-name="db.mgmt.Driver" key="driver">com.mysql.rdbms.mysql.driver.{driver}</link>
@@ -193,7 +201,14 @@ mod tests {
     fn a_standard_connection_comes_over_with_its_host_port_user_and_schema() {
         let found = one(
             "native",
-            &[("string", "hostName", "db.example.test"), ("int", "port", "3307"), ("string", "userName", "ann"), ("string", "schema", "plant"), ("int", "useSSL", "2"), ("string", "sslCA", "")],
+            &[
+                ("string", "hostName", "db.example.test"),
+                ("int", "port", "3307"),
+                ("string", "userName", "ann"),
+                ("string", "schema", "plant"),
+                ("int", "useSSL", "2"),
+                ("string", "sslCA", ""),
+            ],
         );
         assert_eq!((found.name.as_str(), found.method.as_str(), &found.problem), ("Line 3", "Standard (TCP/IP)", &None));
         let profile = found.profile.unwrap();
@@ -245,7 +260,13 @@ mod tests {
 
     #[test]
     fn what_this_app_cannot_do_is_listed_with_the_reason_and_no_profile() {
-        for (driver, reason) in [("native_socket", "socket or pipe"), ("native_sshtun", "SSH tunnel"), ("ldap_sasl_kerberos", "SASL or Kerberos"), ("ldap_kerberos", "Kerberos"), ("something_new", "does not know")] {
+        for (driver, reason) in [
+            ("native_socket", "socket or pipe"),
+            ("native_sshtun", "SSH tunnel"),
+            ("ldap_sasl_kerberos", "SASL or Kerberos"),
+            ("ldap_kerberos", "Kerberos"),
+            ("something_new", "does not know"),
+        ] {
             let found = one(driver, &[("string", "hostName", "h"), ("string", "sshHost", "jump:22")]);
             assert!(found.profile.is_none(), "{driver}");
             assert!(found.problem.as_deref().unwrap().contains(reason), "{driver}: {:?}", found.problem);
@@ -255,7 +276,10 @@ mod tests {
 
     #[test]
     fn what_is_left_behind_is_said() {
-        let found = one("native", &[("int", "useSSL", "4"), ("string", "sslCert", "/c.pem"), ("string", "sslKey", "/k.pem"), ("string", "SQL_MODE", "ANSI")]);
+        let found = one(
+            "native",
+            &[("int", "useSSL", "4"), ("string", "sslCert", "/c.pem"), ("string", "sslKey", "/k.pem"), ("string", "SQL_MODE", "ANSI")],
+        );
         assert!(found.notes.iter().any(|n| n.contains("client certificate")));
         assert!(found.notes.iter().any(|n| n.contains("extra options")));
     }

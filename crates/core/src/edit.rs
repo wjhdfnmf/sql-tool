@@ -75,12 +75,7 @@ pub fn edit_target(columns: &[ColumnInfo]) -> Result<EditTarget, String> {
     let Some((schema, name)) = table else {
         return Err("The result does not come straight from a table.".into());
     };
-    let key_columns: Vec<usize> = columns
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.source.is_some() && c.primary_key)
-        .map(|(i, _)| i)
-        .collect();
+    let key_columns: Vec<usize> = columns.iter().enumerate().filter(|(_, c)| c.source.is_some() && c.primary_key).map(|(i, _)| i).collect();
     if key_columns.is_empty() {
         return Err("The result does not include the table's primary key.".into());
     }
@@ -106,11 +101,7 @@ pub fn plan(target: &EditTarget, store: &ResultStore, edits: &[RowEdit]) -> Resu
     let table = format!("{}.{}", quote_identifier(&target.schema), quote_identifier(&target.table));
     let kind = |column: usize| info.get(column).map_or(ColumnKind::Text, |c| c.kind);
     let column_name = |column: usize| -> Result<&str, Error> {
-        target
-            .columns
-            .get(column)
-            .and_then(Option::as_deref)
-            .ok_or_else(|| fail("That column cannot be edited."))
+        target.columns.get(column).and_then(Option::as_deref).ok_or_else(|| fail("That column cannot be edited."))
     };
 
     // `WHERE key = ? AND ...` for a row, from the values it had when read.
@@ -196,11 +187,7 @@ mod tests {
         ColumnInfo {
             name: name.to_string(),
             kind,
-            source: Some(ColumnSource {
-                schema: "shop".into(),
-                table: table.into(),
-                column: name.to_string(),
-            }),
+            source: Some(ColumnSource { schema: "shop".into(), table: table.into(), column: name.to_string() }),
             primary_key,
         }
     }
@@ -246,15 +233,9 @@ mod tests {
     fn update_names_the_row_by_its_original_key() {
         let (columns, store) = people();
         let target = edit_target(&columns).unwrap();
-        let planned = plan(
-            &target,
-            &store,
-            &[RowEdit::Update {
-                row: 1,
-                changes: vec![CellChange { column: 1, value: Some("O'Neil".into()) }],
-            }],
-        )
-        .unwrap();
+        let planned =
+            plan(&target, &store, &[RowEdit::Update { row: 1, changes: vec![CellChange { column: 1, value: Some("O'Neil".into()) }] }])
+                .unwrap();
         assert_eq!(planned[0].sql, "UPDATE `shop`.`people` SET `name` = ? WHERE `id` = ? LIMIT 1");
         assert_eq!(planned[0].params, [Some(b"O'Neil".to_vec()), Some(b"8".to_vec())]);
         assert_eq!(planned[0].preview, "UPDATE `shop`.`people` SET `name` = 'O''Neil' WHERE `id` = 8 LIMIT 1;");
@@ -314,12 +295,7 @@ impl crate::session::Session {
         if details.is_none_or(|d| d.is_view) {
             return Err(fail("Views cannot be edited here."));
         }
-        let key_size = self
-            .table_columns(&target.schema, &target.table)
-            .await?
-            .iter()
-            .filter(|c| c.key == "PRI")
-            .count();
+        let key_size = self.table_columns(&target.schema, &target.table).await?.iter().filter(|c| c.key == "PRI").count();
         if key_size != target.key_columns.len() {
             return Err(fail("The result does not include every column of the table's primary key."));
         }

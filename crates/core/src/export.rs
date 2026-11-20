@@ -86,11 +86,7 @@ fn csv_field(out: &mut impl Write, value: Option<&[u8]>, kind: ColumnKind) -> io
     let Some(bytes) = value else {
         return Ok(()); // NULL is an empty, unquoted field
     };
-    let text = if kind == ColumnKind::Binary {
-        hex(bytes).into()
-    } else {
-        String::from_utf8_lossy(bytes)
-    };
+    let text = if kind == ColumnKind::Binary { hex(bytes).into() } else { String::from_utf8_lossy(bytes) };
     // An empty string is quoted so it can be told apart from NULL.
     if text.is_empty() || text.contains([',', '"', '\n', '\r']) {
         write!(out, "\"{}\"", text.replace('"', "\"\""))
@@ -103,16 +99,8 @@ fn tsv_field(out: &mut impl Write, value: Option<&[u8]>, kind: ColumnKind) -> io
     let Some(bytes) = value else {
         return out.write_all(b"\\N");
     };
-    let text = if kind == ColumnKind::Binary {
-        hex(bytes).into()
-    } else {
-        String::from_utf8_lossy(bytes)
-    };
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('\t', "\\t")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
+    let text = if kind == ColumnKind::Binary { hex(bytes).into() } else { String::from_utf8_lossy(bytes) };
+    let escaped = text.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r");
     out.write_all(escaped.as_bytes())
 }
 
@@ -150,12 +138,7 @@ impl RowWriter {
     pub fn new(format: ExportFormat, columns: Vec<ColumnInfo>, table: &str) -> Self {
         let target = quote_identifier(if table.trim().is_empty() { "table_name" } else { table.trim() });
         let names: Vec<String> = columns.iter().map(|c| quote_identifier(&c.name)).collect();
-        Self {
-            format,
-            insert: format!("INSERT INTO {target} ({}) VALUES (", names.join(", ")),
-            columns,
-            rows: 0,
-        }
+        Self { format, insert: format!("INSERT INTO {target} ({}) VALUES (", names.join(", ")), columns, rows: 0 }
     }
 
     fn kind(&self, index: usize) -> ColumnKind {
@@ -352,7 +335,9 @@ mod tests {
 
     #[test]
     fn only_plain_decimals_are_written_unquoted() {
-        for (text, plain) in [("12", true), ("-3.50", true), ("0", true), ("007", false), ("1e5", false), ("NaN", false), ("", false), ("1.", false)] {
+        for (text, plain) in
+            [("12", true), ("-3.50", true), ("0", true), ("007", false), ("1e5", false), ("NaN", false), ("", false), ("1.", false)]
+        {
             assert_eq!(is_plain_number(text), plain, "{text:?}");
         }
         assert_eq!(sql_literal(Some(b"007"), ColumnKind::Number), "'007'");
@@ -390,11 +375,7 @@ fn clipboard_field(value: Option<&[u8]>, kind: ColumnKind) -> String {
     let Some(bytes) = value else {
         return "NULL".to_string();
     };
-    let text = if kind == ColumnKind::Binary {
-        hex(bytes).into()
-    } else {
-        String::from_utf8_lossy(bytes)
-    };
+    let text = if kind == ColumnKind::Binary { hex(bytes).into() } else { String::from_utf8_lossy(bytes) };
     if text.contains(['\t', '\n', '\r', '"']) {
         format!("\"{}\"", text.replace('"', "\"\""))
     } else {
@@ -403,13 +384,7 @@ fn clipboard_field(value: Option<&[u8]>, kind: ColumnKind) -> String {
 }
 
 /// The cells of `range` as text for the clipboard.
-pub fn copy_range(
-    store: &ResultStore,
-    range: CellRange,
-    format: CopyFormat,
-    headers: bool,
-    table: &str,
-) -> Result<String, Error> {
+pub fn copy_range(store: &ResultStore, range: CellRange, format: CopyFormat, headers: bool, table: &str) -> Result<String, Error> {
     let columns: Vec<ColumnInfo> = store.status().columns;
     let last_column = range.col_end.min(columns.len().saturating_sub(1));
     if columns.is_empty() || range.col_start > last_column || range.row_start > range.row_end {
@@ -448,9 +423,7 @@ pub fn copy_range(
     let mut first_value = true;
     store.for_each_row_in(range.row_start, range.row_end, |cells| {
         if out.len() > MAX_COPY_BYTES {
-            return Err(Error::Other(
-                "That selection is too large to copy. Export it to a file instead.".into(),
-            ));
+            return Err(Error::Other("That selection is too large to copy. Export it to a file instead.".into()));
         }
         let picked = cells.enumerate().skip(range.col_start).take(selected.len());
         match format {
@@ -567,10 +540,7 @@ mod range_tests {
     #[test]
     fn tsv_pastes_into_a_spreadsheet_as_cells() {
         let text = copy_range(&sample(), range(0, 2, 0, 2), CopyFormat::Tsv, true, "").unwrap();
-        assert_eq!(
-            text,
-            "id\tname\tamount\n1\tAnn\t10.5\n2\t\"O'Brien\tJr\"\tNULL\n3\t\"line\nbreak \"\"q\"\"\"\t4"
-        );
+        assert_eq!(text, "id\tname\tamount\n1\tAnn\t10.5\n2\t\"O'Brien\tJr\"\tNULL\n3\t\"line\nbreak \"\"q\"\"\"\t4");
     }
 
     #[test]
@@ -594,10 +564,7 @@ mod range_tests {
     #[test]
     fn list_format_is_ready_for_an_in_clause() {
         assert_eq!(copy_range(&sample(), range(0, 2, 0, 0), CopyFormat::List, false, "").unwrap(), "1, 2, 3");
-        assert_eq!(
-            copy_range(&sample(), range(0, 1, 1, 1), CopyFormat::List, false, "").unwrap(),
-            "'Ann', 'O''Brien\tJr'"
-        );
+        assert_eq!(copy_range(&sample(), range(0, 1, 1, 1), CopyFormat::List, false, "").unwrap(), "'Ann', 'O''Brien\tJr'");
     }
 
     #[test]

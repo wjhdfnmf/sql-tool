@@ -89,9 +89,7 @@ impl Config {
             server_version: "8.4.3-commercial".into(),
             version_comment: "MySQL Enterprise Server - Commercial".into(),
             handshake_plugin: "caching_sha2_password".into(),
-            auth: Auth::Cleartext {
-                password: password.into(),
-            },
+            auth: Auth::Cleartext { password: password.into() },
             tls,
             tls12_only: false,
             on_query: QueryBehaviour::Normal,
@@ -104,9 +102,7 @@ impl Config {
             server_version: "5.7.37-enterprise-commercial-advanced-log".into(),
             version_comment: "MySQL Enterprise Server - Advanced Edition (Commercial)".into(),
             handshake_plugin: "mysql_native_password".into(),
-            auth: Auth::Cleartext {
-                password: password.into(),
-            },
+            auth: Auth::Cleartext { password: password.into() },
             tls,
             tls12_only: true,
             on_query: QueryBehaviour::Normal,
@@ -155,12 +151,7 @@ impl FakeServer {
         };
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let shared = Arc::new(Shared {
-            cfg,
-            observed: Mutex::new(Observed::default()),
-            kill: Mutex::new(HashMap::new()),
-            acceptor,
-        });
+        let shared = Arc::new(Shared { cfg, observed: Mutex::new(Observed::default()), kill: Mutex::new(HashMap::new()), acceptor });
         let accept_shared = shared.clone();
         let task = tokio::spawn(async move {
             let mut next_id: u32 = 100;
@@ -201,11 +192,8 @@ impl Drop for FakeServer {
 fn build_acceptor(id: &TlsIdentity, tls12_only: bool) -> io::Result<TlsAcceptor> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let versions: &[&rustls::SupportedProtocolVersion] = if tls12_only {
-        &[&rustls::version::TLS12]
-    } else {
-        &[&rustls::version::TLS13, &rustls::version::TLS12]
-    };
+    let versions: &[&rustls::SupportedProtocolVersion] =
+        if tls12_only { &[&rustls::version::TLS12] } else { &[&rustls::version::TLS13, &rustls::version::TLS12] };
     let cfg = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(versions)
         .map_err(io::Error::other)?
@@ -331,11 +319,8 @@ fn parse_client_hello(p: &[u8]) -> Option<ClientHello> {
     if caps & CLIENT_CONNECT_WITH_DB != 0 {
         take_cstr(p, &mut pos)?;
     }
-    let plugin = if caps & CLIENT_PLUGIN_AUTH != 0 {
-        take_cstr(p, &mut pos).map(|s| String::from_utf8_lossy(s).into_owned())
-    } else {
-        None
-    };
+    let plugin =
+        if caps & CLIENT_PLUGIN_AUTH != 0 { take_cstr(p, &mut pos).map(|s| String::from_utf8_lossy(s).into_owned()) } else { None };
     Some(ClientHello { user, plugin })
 }
 
@@ -364,29 +349,22 @@ async fn handle_connection(shared: Arc<Shared>, mut tcp: TcpStream, conn_id: u32
     tcp.flush().await?;
 
     let (seq, first) = read_packet(&mut tcp).await?;
-    let client_caps = u32::from_le_bytes(
-        first
-            .get(0..4)
-            .ok_or_else(|| bad_data("short first packet"))?
-            .try_into()
-            .unwrap(),
-    );
+    let client_caps = u32::from_le_bytes(first.get(0..4).ok_or_else(|| bad_data("short first packet"))?.try_into().unwrap());
 
     // A 32-byte first packet with CLIENT_SSL set is an SSLRequest: the client
     // wants to upgrade before sending anything else.
     let wants_tls = first.len() == 32 && client_caps & CLIENT_SSL != 0;
-    let (mut io, mut seq, hello_bytes, over_tls): (Box<dyn Io>, u8, Vec<u8>, bool) =
-        match (&shared.acceptor, wants_tls) {
-            (Some(acceptor), true) => {
-                let tls = acceptor.accept(tcp).await?;
-                let version = tls.get_ref().1.protocol_version().map(|v| format!("{v:?}"));
-                shared.observed.lock().unwrap().tls_version = version;
-                let mut io: Box<dyn Io> = Box::new(tls);
-                let (seq, bytes) = read_packet(&mut io).await?;
-                (io, seq, bytes, true)
-            }
-            _ => (Box::new(tcp), seq, first, false),
-        };
+    let (mut io, mut seq, hello_bytes, over_tls): (Box<dyn Io>, u8, Vec<u8>, bool) = match (&shared.acceptor, wants_tls) {
+        (Some(acceptor), true) => {
+            let tls = acceptor.accept(tcp).await?;
+            let version = tls.get_ref().1.protocol_version().map(|v| format!("{v:?}"));
+            shared.observed.lock().unwrap().tls_version = version;
+            let mut io: Box<dyn Io> = Box::new(tls);
+            let (seq, bytes) = read_packet(&mut io).await?;
+            (io, seq, bytes, true)
+        }
+        _ => (Box::new(tcp), seq, first, false),
+    };
 
     let hello = parse_client_hello(&hello_bytes).ok_or_else(|| bad_data("bad handshake response"))?;
     {
@@ -436,24 +414,13 @@ async fn handle_connection(shared: Arc<Shared>, mut tcp: TcpStream, conn_id: u32
 enum Reply {
     Ok,
     Err(u16, &'static str, String),
-    Rows {
-        columns: Vec<String>,
-        rows: Vec<Vec<Option<String>>>,
-    },
-    Generated {
-        rows: u64,
-        columns: usize,
-    },
+    Rows { columns: Vec<String>, rows: Vec<Vec<Option<String>>> },
+    Generated { rows: u64, columns: usize },
     Sleep(f64),
     LocalInfile(String),
 }
 
-async fn command_loop(
-    shared: &Arc<Shared>,
-    io: Box<dyn Io>,
-    user: &str,
-    killed: Arc<Notify>,
-) -> io::Result<()> {
+async fn command_loop(shared: &Arc<Shared>, io: Box<dyn Io>, user: &str, killed: Arc<Notify>) -> io::Result<()> {
     let mut io = BufWriter::with_capacity(256 * 1024, io);
     loop {
         let (_, packet) = read_packet(&mut io).await?;
@@ -461,8 +428,8 @@ async fn command_loop(
             return Err(bad_data("empty command"));
         };
         match cmd {
-            0x01 => return Ok(()),                                         // COM_QUIT
-            0x0E | 0x1F => write_packet(&mut io, 1, &ok_packet()).await?,  // PING, RESET_CONNECTION
+            0x01 => return Ok(()),                                        // COM_QUIT
+            0x0E | 0x1F => write_packet(&mut io, 1, &ok_packet()).await?, // PING, RESET_CONNECTION
             0x03 => {
                 let sql = String::from_utf8_lossy(body).into_owned();
                 shared.observed.lock().unwrap().queries.push(sql.clone());
@@ -474,10 +441,7 @@ async fn command_loop(
                         _ = tokio::time::sleep(Duration::from_secs_f64(secs)) => "0",
                         _ = killed.notified() => "1",
                     };
-                    reply = Reply::Rows {
-                        columns: vec!["SLEEP".into()],
-                        rows: vec![vec![Some(interrupted.into())]],
-                    };
+                    reply = Reply::Rows { columns: vec!["SLEEP".into()], rows: vec![vec![Some(interrupted.into())]] };
                 }
                 write_reply(shared, &mut io, reply).await?;
             }
@@ -511,34 +475,17 @@ fn answer(shared: &Arc<Shared>, sql: &str, user: &str) -> Reply {
     }
 
     if lower.starts_with("show session status where variable_name in") {
-        let version = shared
-            .observed
-            .lock()
-            .unwrap()
-            .tls_version
-            .clone()
-            .map(|v| v.replace("TLSv1_", "TLSv1."))
-            .unwrap_or_default();
+        let version = shared.observed.lock().unwrap().tls_version.clone().map(|v| v.replace("TLSv1_", "TLSv1.")).unwrap_or_default();
         return Reply::Rows {
             columns: vec!["Variable_name".into(), "Value".into()],
-            rows: vec![
-                vec![Some("Ssl_cipher".into()), Some(String::new())],
-                vec![Some("Ssl_version".into()), Some(version)],
-            ],
+            rows: vec![vec![Some("Ssl_cipher".into()), Some(String::new())], vec![Some("Ssl_version".into()), Some(version)]],
         };
     }
 
     if let Some(rest) = lower.strip_prefix("show session status like ") {
         let name = rest.trim().trim_matches('\'');
         let value = match name {
-            "ssl_version" => shared
-                .observed
-                .lock()
-                .unwrap()
-                .tls_version
-                .clone()
-                .map(|v| v.replace("TLSv1_", "TLSv1."))
-                .unwrap_or_default(),
+            "ssl_version" => shared.observed.lock().unwrap().tls_version.clone().map(|v| v.replace("TLSv1_", "TLSv1.")).unwrap_or_default(),
             "ssl_cipher" => String::new(),
             _ => String::new(),
         };
@@ -557,10 +504,7 @@ fn answer(shared: &Arc<Shared>, sql: &str, user: &str) -> Reply {
     if let Some(args) = list.strip_prefix("fake_rows(").and_then(|s| s.strip_suffix(')')) {
         let mut parts = args.split(',').map(|s| s.trim().parse::<u64>());
         if let (Some(Ok(rows)), Some(Ok(columns))) = (parts.next(), parts.next()) {
-            return Reply::Generated {
-                rows,
-                columns: columns.clamp(1, 200) as usize,
-            };
+            return Reply::Generated { rows, columns: columns.clamp(1, 200) as usize };
         }
         return Reply::Err(1064, "42000", "usage: SELECT fake_rows(rows, columns)".into());
     }
@@ -586,10 +530,7 @@ fn answer(shared: &Arc<Shared>, sql: &str, user: &str) -> Reply {
             other => other.parse::<i64>().ok().map(|n| n.to_string()),
         });
     }
-    Reply::Rows {
-        columns,
-        rows: vec![row],
-    }
+    Reply::Rows { columns, rows: vec![row] }
 }
 
 fn column_def(name: &str, col_type: u8, charset: u16) -> Vec<u8> {
@@ -612,11 +553,7 @@ fn column_def(name: &str, col_type: u8, charset: u16) -> Vec<u8> {
 
 // The last `send!` in each branch bumps `seq` without a later read.
 #[allow(unused_assignments)]
-async fn write_reply<W: AsyncWrite + AsyncRead + Unpin>(
-    shared: &Arc<Shared>,
-    io: &mut W,
-    reply: Reply,
-) -> io::Result<()> {
+async fn write_reply<W: AsyncWrite + AsyncRead + Unpin>(shared: &Arc<Shared>, io: &mut W, reply: Reply) -> io::Result<()> {
     let mut seq: u8 = 1;
     macro_rules! send {
         ($payload:expr) => {{
@@ -676,15 +613,9 @@ async fn write_reply<W: AsyncWrite + AsyncRead + Unpin>(
                         0 => write!(cur, "{}", r + 1)?,
                         c if c % 4 == 1 => write!(cur, "customer {} / {}", r % 9973, c)?,
                         c if c % 4 == 2 => write!(cur, "{}.{:02}", (r * 37 + c as u64) % 100_000, r % 100)?,
-                        c if c % 4 == 3 => write!(
-                            cur,
-                            "2026-{:02}-{:02} {:02}:{:02}:{:02}",
-                            r % 12 + 1,
-                            r % 28 + 1,
-                            r % 24,
-                            r % 60,
-                            (r / 7) % 60
-                        )?,
+                        c if c % 4 == 3 => {
+                            write!(cur, "2026-{:02}-{:02} {:02}:{:02}:{:02}", r % 12 + 1, r % 28 + 1, r % 24, r % 60, (r / 7) % 60)?
+                        }
                         // Every tenth note is NULL so NULL handling is exercised.
                         _ if r % 10 == 0 => {
                             buf.push(0xFB);

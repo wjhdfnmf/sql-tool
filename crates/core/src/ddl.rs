@@ -69,11 +69,7 @@ fn charset_clause(charset: Option<&str>, collation: Option<&str>) -> Result<Stri
 
 pub fn create_schema(name: &str, charset: Option<&str>, collation: Option<&str>) -> Result<String, Error> {
     check_name(name)?;
-    Ok(format!(
-        "CREATE SCHEMA {}{};",
-        quote_identifier(name.trim()),
-        charset_clause(charset, collation)?
-    ))
+    Ok(format!("CREATE SCHEMA {}{};", quote_identifier(name.trim()), charset_clause(charset, collation)?))
 }
 
 pub fn alter_schema(name: &str, charset: Option<&str>, collation: Option<&str>) -> Result<String, Error> {
@@ -100,13 +96,7 @@ fn or_replace(create: &str) -> String {
 /// the script does that, so a failed change leaves the original untouched.
 /// MySQL has no such statement for them, so there the script drops and
 /// recreates, and says so at the top.
-pub fn alter_script(
-    kind: ObjectKind,
-    schema: &str,
-    name: &str,
-    create_statement: &str,
-    supports_or_replace: bool,
-) -> String {
+pub fn alter_script(kind: ObjectKind, schema: &str, name: &str, create_statement: &str, supports_or_replace: bool) -> String {
     let schema_q = quote_identifier(schema);
     let name_q = quote_identifier(name);
     let create = create_statement.trim().trim_end_matches(';');
@@ -121,10 +111,7 @@ pub fn alter_script(
             )
         }
         ObjectKind::View => format!("USE {schema_q};\n\n{};\n", or_replace(create)),
-        _ if supports_or_replace => format!(
-            "{DEFINER_NOTE}USE {schema_q};\n\nDELIMITER $$\n{}$$\nDELIMITER ;\n",
-            or_replace(create)
-        ),
+        _ if supports_or_replace => format!("{DEFINER_NOTE}USE {schema_q};\n\nDELIMITER $$\n{}$$\nDELIMITER ;\n", or_replace(create)),
         _ => format!(
             "-- This server cannot replace a {what} in one statement, so this script drops it\n\
              -- and creates it again. If the CREATE fails, the {what} is gone until you fix\n\
@@ -195,10 +182,7 @@ mod tests {
     #[test]
     fn alter_schema_needs_something_to_change() {
         assert!(alter_schema("shop", None, None).is_err());
-        assert_eq!(
-            alter_schema("shop", Some("latin1"), None).unwrap(),
-            "ALTER SCHEMA `shop` DEFAULT CHARACTER SET latin1;"
-        );
+        assert_eq!(alter_schema("shop", Some("latin1"), None).unwrap(), "ALTER SCHEMA `shop` DEFAULT CHARACTER SET latin1;");
     }
 
     #[test]

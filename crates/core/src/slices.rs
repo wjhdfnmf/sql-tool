@@ -116,9 +116,7 @@ pub fn plan(sql: &str, start: &str, end: &str, step_secs: u64) -> Result<Vec<Sli
     }
     let count = ((to - from) as u64).div_ceil(step_secs);
     if count as usize > MAX_SLICES {
-        return refuse(format!(
-            "That is {count} slices, more than the {MAX_SLICES} allowed. Use longer slices or a shorter range."
-        ));
+        return refuse(format!("That is {count} slices, more than the {MAX_SLICES} allowed. Use longer slices or a shorter range."));
     }
     let mut slices = Vec::with_capacity(count as usize);
     let mut at = from;
@@ -156,7 +154,10 @@ mod tests {
             ]
         );
         assert_eq!(slices[0].sql, "SELECT * FROM events WHERE at >= '2026-09-18 22:00:00' AND at < '2026-09-18 23:00:00'");
-        assert_eq!(whole(QUERY, "2026-09-18 22:00", "2026-09-19 01:30").unwrap(), "SELECT * FROM events WHERE at >= '2026-09-18 22:00:00' AND at < '2026-09-19 01:30:00'");
+        assert_eq!(
+            whole(QUERY, "2026-09-18 22:00", "2026-09-19 01:30").unwrap(),
+            "SELECT * FROM events WHERE at >= '2026-09-18 22:00:00' AND at < '2026-09-19 01:30:00'"
+        );
         // Each slice starts where the one before ended, across month and year ends too.
         let year_end = plan(QUERY, "2026-12-31", "2027-01-02", 86_400).unwrap();
         assert_eq!(year_end[1].start, "2027-01-01 00:00:00");
@@ -170,7 +171,10 @@ mod tests {
         assert_eq!(numbered[0].sql, "SELECT 1 FROM t WHERE c BETWEEN '2026-01-01 00:00:00' AND '2026-01-02 00:00:00'");
         // Already in quotes, in capitals, and used twice.
         let quoted = plan("SELECT '{START}' AS s FROM t WHERE c >= '{start}' AND c < '{End}'", "2026-01-01", "2026-01-02", 86_400).unwrap();
-        assert_eq!(quoted[0].sql, "SELECT '2026-01-01 00:00:00' AS s FROM t WHERE c >= '2026-01-01 00:00:00' AND c < '2026-01-02 00:00:00'");
+        assert_eq!(
+            quoted[0].sql,
+            "SELECT '2026-01-01 00:00:00' AS s FROM t WHERE c >= '2026-01-01 00:00:00' AND c < '2026-01-02 00:00:00'"
+        );
         // Text that is not plain ASCII is left as it is.
         let accented = plan("SELECT 'Zoë' FROM t WHERE c >= {start} AND c < {end}", "2026-01-01", "2026-01-02", 86_400).unwrap();
         assert!(accented[0].sql.starts_with("SELECT 'Zoë' FROM t"));
