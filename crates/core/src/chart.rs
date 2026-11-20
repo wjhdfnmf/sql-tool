@@ -239,6 +239,18 @@ pub struct ChartRequest {
     pub spec_low: Option<f64>,
     #[serde(default)]
     pub spec_high: Option<f64>,
+    /// Leave rows whose X is NULL out of a chart of categories, instead of giving them a bar of their own.
+    #[serde(default)]
+    pub skip_null: bool,
+    /// For a control chart of rows in order: how many consecutive rows make a point. Chosen to fit if left out.
+    #[serde(default)]
+    pub run_size: Option<u32>,
+    /// For a control chart: a centre line and a sigma known from before, to judge
+    /// this data against, instead of ones worked out from it.
+    #[serde(default)]
+    pub control_center: Option<f64>,
+    #[serde(default)]
+    pub control_sigma: Option<f64>,
 }
 
 impl ChartRequest {
@@ -261,6 +273,10 @@ impl ChartRequest {
             trend: None,
             spec_low: None,
             spec_high: None,
+            skip_null: false,
+            run_size: None,
+            control_center: None,
+            control_sigma: None,
         }
     }
 }
@@ -339,6 +355,16 @@ pub struct Control {
     pub beyond: u64,
     /// Each point is one row.
     pub individuals: bool,
+    /// The centre and sigma were given, not worked out from this data.
+    pub fixed: bool,
+    /// For each point, the run rules it breaks: bit 0 is rule 1, bit 7 rule 8 (see [`run_rules`]).
+    pub signals: Vec<u8>,
+    /// The spread at each point, for the companion chart: the range from the
+    /// point before (single rows) or the standard deviation within the point.
+    pub spread: Vec<Option<f64>>,
+    pub spread_center: Vec<Option<f64>>,
+    pub spread_upper: Vec<Option<f64>>,
+    pub spread_lower: Vec<Option<f64>>,
 }
 
 /// What the measured column holds, among the rows drawn.
@@ -587,7 +613,7 @@ fn parse_number(cell: &[u8]) -> Option<f64> {
 /// Returns milliseconds (since 1970-01-01 for a date, since midnight for a
 /// time) and whether there was a date. Zero dates (`0000-00-00`) are not
 /// dates and give `None`.
-fn parse_time(cell: &[u8]) -> Option<(f64, bool)> {
+pub(crate) fn parse_time(cell: &[u8]) -> Option<(f64, bool)> {
     let text = cell.trim_ascii();
     if text.len() >= 10 && text[4] == b'-' && text[7] == b'-' {
         let (year, month, day) = (digits(&text[..4])?, digits(&text[5..7])?, digits(&text[8..10])?);
@@ -645,7 +671,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 /// The year, month and day of a number of days since 1970-01-01.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z - era * 146_097;
@@ -1201,7 +1227,14 @@ fn by_category(
             &labels[category]
         }
     };
-    let mut shown: Vec<(usize, Tally)> = (0..=null_at).map(|c| (c, total(c))).filter(|(_, t)| t.count > 0).collect();
+    let last = if request.skip_null && codes.is_some() { null_at.saturating_sub(1) } else { null_at };
+    let mut shown: Vec<(usize, Tally)> = (0..=last).map(|c| (c, total(c))).filter(|(_, t)| t.count > 0).collect();
+    if request.skip_null && codes.is_some() {
+        data.rows_drawn = drawn - total(null_at).count;
+        if labels.is_empty() {
+            shown.clear();
+        }
+    }
     let limit = (request.max_categories.unwrap_or(DEFAULT_CATEGORIES as u32) as usize).clamp(1, MAX_CATEGORIES);
     let by_value = |a: &(usize, Tally), b: &(usize, Tally)| {
         let (va, vb) = (a.1.value(statistic), b.1.value(statistic));
@@ -1672,11 +1705,12 @@ fn assign_groups(
     match x {
         None if in_order => {
             let drawn = (0..rows).filter(usable).count();
-            let size = drawn.div_ceil(MAX_CONTROL_POINTS).max(1);
+            // As many rows to a point as asked for, but never so few that there are too many points to draw.
+            let size = drawn.div_ceil(MAX_CONTROL_POINTS).max(request.run_size.unwrap_or(1) as usize).max(1);
             for (index, row) in (0..rows).filter(usable).enumerate() {
                 group[row] = (index / size) as u32;
             }
-            if size > 1 {
+            if size > 1 && request.run_size.is_none_or(|asked| asked as usize != size) {
                 notes.push(format!(
                     "Each point is the average of {} rows in a row, in the order of the result.",
                     grouped(size as u64)
@@ -1844,34 +1878,146 @@ fn control(data: &mut ChartData, x: Option<&Values>, time: bool, request: &Chart
     if rows == 0 {
         return Ok(());
     }
-    let center = sum.iter().sum::<f64>() / rows as f64;
     let individuals = size.iter().all(|n| *n <= 1);
-    let sigma = if individuals {
+    // The spread within each point, and the spread the data itself shows.
+    let mut within = vec![0f64; count];
+    for (row, g) in group.iter().enumerate() {
+        if let Some(m) = mean.get(*g as usize).copied().flatten() {
+            within[*g as usize] += (y[row] - m).powi(2);
+        }
+    }
+    let points: Vec<(usize, f64)> = mean.iter().enumerate().filter_map(|(i, m)| m.map(|m| (i, m))).collect();
+    let estimated = if individuals {
         // One row a point: the spread is judged from how far each point is from the one before.
-        let points: Vec<f64> = mean.iter().flatten().copied().collect();
         if points.len() < 2 {
             0.0
         } else {
-            points.windows(2).map(|pair| (pair[1] - pair[0]).abs()).sum::<f64>() / (points.len() - 1) as f64 / D2
+            points.windows(2).map(|pair| (pair[1].1 - pair[0].1).abs()).sum::<f64>() / (points.len() - 1) as f64 / D2
         }
     } else {
         // Several rows a point: the spread within the points, pooled over all of them.
-        let mut within = 0f64;
-        for (row, g) in group.iter().enumerate() {
-            if let Some(m) = mean.get(*g as usize).copied().flatten() {
-                within += (y[row] - m).powi(2);
-            }
-        }
         let freedom: u64 = size.iter().filter(|n| **n >= 2).map(|n| n - 1).sum();
-        if freedom == 0 { 0.0 } else { (within / freedom as f64).sqrt() }
+        if freedom == 0 { 0.0 } else { (within.iter().sum::<f64>() / freedom as f64).sqrt() }
     };
+    let fixed = request.control_center.is_some() || request.control_sigma.is_some_and(|s| s > 0.0);
+    let center = request.control_center.unwrap_or(sum.iter().sum::<f64>() / rows as f64);
+    let sigma = request.control_sigma.filter(|s| *s > 0.0).unwrap_or(estimated);
     let limit = |n: u64, sign: f64| (n > 0).then(|| center + sign * 3.0 * sigma / (n as f64).sqrt());
     let upper: Vec<Option<f64>> = size.iter().map(|n| limit(*n, 1.0)).collect();
     let lower: Vec<Option<f64>> = size.iter().map(|n| limit(*n, -1.0)).collect();
-    let beyond = (0..count).filter(|i| matches!((mean[*i], upper[*i], lower[*i]), (Some(m), Some(u), Some(l)) if m > u || m < l)).count();
+
+    // How far each point is from the centre, in its own standard errors.
+    let distance: Vec<f64> =
+        points.iter().map(|(i, m)| if sigma > 0.0 { (m - center) / (sigma / (size[*i] as f64).sqrt()) } else { 0.0 }).collect();
+    let values: Vec<f64> = points.iter().map(|(_, m)| *m).collect();
+    let mut signals = vec![0u8; count];
+    for ((i, _), signal) in points.iter().zip(run_rules(&distance, &values)) {
+        signals[*i] = signal;
+    }
+    let beyond = signals.iter().filter(|s| **s & 1 != 0).count();
+
+    // The companion chart: is the spread itself steady?
+    let mut spread = vec![None; count];
+    let (mut spread_center, mut spread_upper, mut spread_lower) = (vec![None; count], vec![None; count], vec![None; count]);
+    if individuals {
+        for pair in points.windows(2) {
+            spread[pair[1].0] = Some((pair[1].1 - pair[0].1).abs());
+        }
+        // The average range is 1.128 sigma, and a range above 3.267 times the average is a signal.
+        let average = sigma * D2;
+        for (i, _) in points.iter().skip(1) {
+            spread_center[*i] = Some(average);
+            spread_upper[*i] = Some(3.267 * average);
+            spread_lower[*i] = Some(0.0);
+        }
+    } else {
+        for i in 0..count {
+            if size[i] >= 2 {
+                let n = size[i] as f64;
+                // How much smaller than sigma a standard deviation of n values is on average (the constant c4).
+                let c4 = 4.0 * (n - 1.0) / (4.0 * n - 3.0);
+                let reach = 3.0 * (1.0 - c4 * c4).sqrt();
+                spread[i] = Some((within[i] / (n - 1.0)).sqrt());
+                spread_center[i] = Some(c4 * sigma);
+                spread_upper[i] = Some((c4 + reach) * sigma);
+                spread_lower[i] = Some((c4 - reach).max(0.0) * sigma);
+            }
+        }
+    }
+
     data.series = vec![Series { name: None, values: mean, points: Vec::new() }];
-    data.control = Some(Control { center, sigma, upper, lower, beyond: beyond as u64, individuals });
+    data.control = Some(Control {
+        center,
+        sigma,
+        upper,
+        lower,
+        beyond: beyond as u64,
+        individuals,
+        fixed,
+        signals,
+        spread,
+        spread_center,
+        spread_upper,
+        spread_lower,
+    });
     Ok(())
+}
+
+/// The eight run rules (Nelson's, which include the four Western Electric
+/// rules), for points given as their distance from the centre in standard
+/// errors (`z`) and as plain values (`v`, for the rules about direction).
+/// Bit k - 1 of a point's answer is set if it completes a run that breaks rule k:
+///
+/// 1. one point more than 3 sigma from the centre
+/// 2. nine points in a row on the same side of the centre
+/// 3. six points in a row each higher, or each lower, than the one before
+/// 4. fourteen points in a row alternating up and down
+/// 5. two of three points in a row more than 2 sigma out, on the same side
+/// 6. four of five points in a row more than 1 sigma out, on the same side
+/// 7. fifteen points in a row within 1 sigma of the centre
+/// 8. eight points in a row more than 1 sigma out, on either side
+pub fn run_rules(z: &[f64], v: &[f64]) -> Vec<u8> {
+    let n = z.len();
+    let mut out = vec![0u8; n];
+    let side = |x: f64| if x > 0.0 { 1i8 } else if x < 0.0 { -1 } else { 0 };
+    // The direction of each step: up, down or level.
+    let step: Vec<i8> = (0..n).map(|i| if i == 0 { 0 } else { side(v[i] - v[i - 1]) }).collect();
+    let (mut same, mut rising, mut alternating, mut inner, mut outer) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for i in 0..n {
+        if z[i].abs() > 3.0 {
+            out[i] |= 1;
+        }
+        same = if side(z[i]) != 0 && i > 0 && side(z[i]) == side(z[i - 1]) { same + 1 } else if side(z[i]) != 0 { 1 } else { 0 };
+        if same >= 9 {
+            out[i] |= 1 << 1;
+        }
+        // Steps in the same direction: five steps join six points.
+        rising = if step[i] != 0 && i > 1 && step[i] == step[i - 1] { rising + 1 } else if step[i] != 0 { 1 } else { 0 };
+        if rising >= 5 {
+            out[i] |= 1 << 2;
+        }
+        alternating = if step[i] != 0 && i > 1 && step[i] == -step[i - 1] { alternating + 1 } else if step[i] != 0 { 1 } else { 0 };
+        if alternating >= 13 {
+            out[i] |= 1 << 3;
+        }
+        for (window, needed, beyond, bit) in [(3usize, 2usize, 2.0f64, 4u8), (5, 4, 1.0, 5)] {
+            if i + 1 >= window && side(z[i]) != 0 && z[i].abs() > beyond {
+                let hits = (i + 1 - window..=i).filter(|j| side(z[*j]) == side(z[i]) && z[*j].abs() > beyond).count();
+                if hits >= needed {
+                    out[i] |= 1 << bit;
+                }
+            }
+        }
+        inner = if z[i].abs() < 1.0 { inner + 1 } else { 0 };
+        if inner >= 15 {
+            out[i] |= 1 << 6;
+        }
+        outer = if z[i].abs() > 1.0 { outer + 1 } else { 0 };
+        if outer >= 8 {
+            out[i] |= 1 << 7;
+        }
+    }
+    out
 }
 
 // ---------- small helpers ----------
@@ -2550,6 +2696,94 @@ mod tests {
         let wide = dataset(&["id", "n"], ids.iter().map(|id| vec![Some(id.as_str()), Some("1")]));
         let refused = wide.chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), ..request(ChartKind::Control) });
         assert!(refused.unwrap_err().to_string().contains("too many"));
+    }
+
+    #[test]
+    fn run_rules_flag_the_point_that_completes_each_pattern() {
+        let flagged = |z: &[f64], rule: u8| -> Vec<usize> {
+            run_rules(z, z).iter().enumerate().filter(|(_, s)| **s & (1 << (rule - 1)) != 0).map(|(i, _)| i).collect()
+        };
+        // 1: beyond three sigma, either way.
+        assert_eq!(flagged(&[0.5, 3.1, -3.5, 2.9], 1), [1, 2]);
+        // 2: the ninth point in a row on one side, and every one after it until the side changes.
+        let mut above = vec![0.5; 10];
+        above.push(-0.5);
+        assert_eq!(flagged(&above, 2), [8, 9]);
+        // 3: six points each higher than the last.
+        assert_eq!(flagged(&[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.1], 3), [5, 6]);
+        assert!(flagged(&[0.0, 0.1, 0.2, 0.3, 0.4, 0.4, 0.5], 3).is_empty(), "a level step breaks the run");
+        // 4: fourteen points alternating up and down.
+        let zigzag: Vec<f64> = (0..15).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        assert_eq!(flagged(&zigzag, 4), [13, 14]);
+        // 5: two of three beyond two sigma on the same side; one on each side is not.
+        assert_eq!(flagged(&[2.5, 0.1, 2.2, 0.0, -2.5, 2.5], 5), [2]);
+        // 6: four of five beyond one sigma on the same side.
+        assert_eq!(flagged(&[1.5, 1.2, 0.2, 1.1, 1.3, 0.0], 6), [4]);
+        // 7: fifteen in a row hugging the centre.
+        assert_eq!(flagged(&[0.3; 16], 7), [14, 15]);
+        // 8: eight in a row away from the centre, on either side.
+        assert_eq!(flagged(&[1.5, -1.5, 1.2, -1.2, 1.5, -1.5, 1.2, -1.2, 0.2], 8), [7]);
+        assert!(run_rules(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_control_chart_has_a_companion_chart_of_the_spread() {
+        // Single rows: the moving range, against 3.267 times its average.
+        let single = column_of("n", ["10", "12", "11", "14", "12"]);
+        let control = single.chart(&ChartRequest { y: axis(0, Role::Continuous), ..request(ChartKind::Control) }).unwrap().control.unwrap();
+        assert_eq!(control.spread, [None, Some(2.0), Some(1.0), Some(3.0), Some(2.0)]);
+        assert!((control.spread_center[1].unwrap() - 2.0).abs() < 1e-12);
+        assert!((control.spread_upper[1].unwrap() - 6.534).abs() < 1e-9);
+        assert_eq!((control.spread_center[0], control.spread_lower[4]), (None, Some(0.0)));
+        assert!(!control.fixed && control.signals.iter().all(|s| *s == 0));
+
+        // Subgroups: the standard deviation within each, against limits for its size.
+        let rows = [("a", "9"), ("a", "10"), ("a", "11"), ("b", "10"), ("b", "11"), ("b", "12"), ("c", "5")];
+        let lots = dataset(&["lot", "n"], rows.iter().map(|(lot, n)| vec![Some(*lot), Some(*n)]));
+        let control = lots.chart(&ChartRequest { x: axis(0, Role::Discrete), y: axis(1, Role::Continuous), ..request(ChartKind::Control) }).unwrap().control.unwrap();
+        assert_eq!(control.spread, [Some(1.0), Some(1.0), None], "a lot of one row has no spread of its own");
+        let c4 = 8.0 / 9.0;
+        assert!((control.spread_center[0].unwrap() - c4 * control.sigma).abs() < 1e-12);
+        assert!(control.spread_upper[0].unwrap() > control.spread_center[0].unwrap());
+        assert_eq!(control.spread_lower[0], Some(0.0), "below zero, the lower limit is zero");
+    }
+
+    #[test]
+    fn a_control_chart_can_be_judged_against_a_centre_and_sigma_given_from_before() {
+        let data = column_of("n", ["10", "12", "11", "14", "12"]);
+        let chart = data
+            .chart(&ChartRequest { y: axis(0, Role::Continuous), control_center: Some(10.0), control_sigma: Some(1.0), ..request(ChartKind::Control) })
+            .unwrap();
+        let control = chart.control.unwrap();
+        assert!(control.fixed);
+        assert_eq!((control.center, control.sigma), (10.0, 1.0));
+        assert_eq!((control.upper[0], control.lower[0]), (Some(13.0), Some(7.0)));
+        // 14 is four sigma out. The 12s are exactly two sigma out, which is not beyond it, so no other rule is broken.
+        assert_eq!(control.beyond, 1);
+        assert_eq!(control.signals, [0, 0, 0, 1, 0]);
+        // Only a centre given: the sigma still comes from the data.
+        let centred = data.chart(&ChartRequest { y: axis(0, Role::Continuous), control_center: Some(10.0), ..request(ChartKind::Control) }).unwrap().control.unwrap();
+        assert!(centred.fixed && (centred.sigma - 2.0 / 1.128).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rows_in_order_can_be_charted_several_to_a_point() {
+        let values: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let chart = column_of("n", values.iter().map(String::as_str))
+            .chart(&ChartRequest { y: axis(0, Role::Continuous), run_size: Some(5), ..request(ChartKind::Control) })
+            .unwrap();
+        assert_eq!(chart.x, XAxis::Sequence { count: 4, rows_per_point: 5 });
+        assert_eq!(chart.series[0].values, [Some(2.0), Some(7.0), Some(12.0), Some(17.0)]);
+        assert!(chart.notes.is_empty(), "asked for, so not worth a note: {:?}", chart.notes);
+    }
+
+    #[test]
+    fn rows_with_no_category_can_be_left_out() {
+        for kind in [ChartKind::Bar, ChartKind::Pie, ChartKind::Pareto] {
+            let data = orders().chart(&ChartRequest { x: axis(3, Role::Discrete), skip_null: true, ..request(kind) }).unwrap();
+            assert_eq!(labels(&data), ["paid", "open"], "{kind:?}");
+            assert_eq!((data.rows_filtered, data.rows_drawn), (7, 6));
+        }
     }
 
     #[test]

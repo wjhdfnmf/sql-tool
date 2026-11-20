@@ -60,6 +60,13 @@ export interface ChartRequest {
   /** Specification limits of the measured column: rows outside them are counted. */
   specLow: number | null;
   specHigh: number | null;
+  /** Leave rows whose X is NULL out of a chart of categories. */
+  skipNull: boolean;
+  /** For a control chart of rows in order: rows per point. Null lets the backend choose. */
+  runSize: number | null;
+  /** For a control chart: a centre and sigma known from before, to judge this data against. */
+  controlCenter: number | null;
+  controlSigma: number | null;
 }
 
 export type XAxis =
@@ -114,6 +121,55 @@ export interface Control {
   beyond: number;
   /** Each point is one row. */
   individuals: boolean;
+  /** The centre and sigma were given, not worked out from this data. */
+  fixed: boolean;
+  /** For each point, the run rules it breaks: bit 0 is rule 1, bit 7 rule 8. */
+  signals: number[];
+  /** The spread at each point: the range from the point before, or the standard deviation within the point. */
+  spread: (number | null)[];
+  spreadCenter: (number | null)[];
+  spreadUpper: (number | null)[];
+  spreadLower: (number | null)[];
+}
+
+/** The eight run rules of a control chart, in the usual numbering (Nelson's; 1, 2, 5 and 6 are the Western Electric rules). */
+export const RUN_RULES: { rule: number; short: string; text: string }[] = [
+  { rule: 1, short: 'Beyond a limit', text: 'One point more than 3 sigma from the centre line' },
+  { rule: 2, short: '9 on one side', text: 'Nine points in a row on the same side of the centre line: the level has shifted' },
+  { rule: 3, short: '6 rising or falling', text: 'Six points in a row each higher, or each lower, than the one before: a drift' },
+  { rule: 4, short: '14 alternating', text: 'Fourteen points in a row alternating up and down: two sources being mixed' },
+  { rule: 5, short: '2 of 3 beyond 2 sigma', text: 'Two of three points in a row more than 2 sigma out, on the same side' },
+  { rule: 6, short: '4 of 5 beyond 1 sigma', text: 'Four of five points in a row more than 1 sigma out, on the same side' },
+  { rule: 7, short: '15 near the centre', text: 'Fifteen points in a row within 1 sigma of the centre line: less variation than the limits assume' },
+  { rule: 8, short: '8 away from the centre', text: 'Eight points in a row more than 1 sigma out, on either side' },
+];
+
+/** The same rules as the backend applies, for the mock backend. `z` is each point's distance from the centre in standard errors. */
+export function runRules(z: number[], v: number[]): number[] {
+  const out = new Array<number>(z.length).fill(0);
+  const side = (x: number) => Math.sign(x);
+  const step = v.map((value, i) => (i === 0 ? 0 : side(value - v[i - 1])));
+  let [same, rising, alternating, inner, outer] = [0, 0, 0, 0, 0];
+  for (let i = 0; i < z.length; i++) {
+    if (Math.abs(z[i]) > 3) out[i] |= 1;
+    same = side(z[i]) !== 0 && i > 0 && side(z[i]) === side(z[i - 1]) ? same + 1 : side(z[i]) !== 0 ? 1 : 0;
+    if (same >= 9) out[i] |= 2;
+    rising = step[i] !== 0 && i > 1 && step[i] === step[i - 1] ? rising + 1 : step[i] !== 0 ? 1 : 0;
+    if (rising >= 5) out[i] |= 4;
+    alternating = step[i] !== 0 && i > 1 && step[i] === -step[i - 1] ? alternating + 1 : step[i] !== 0 ? 1 : 0;
+    if (alternating >= 13) out[i] |= 8;
+    for (const [window, needed, beyond, bit] of [[3, 2, 2, 16], [5, 4, 1, 32]]) {
+      if (i + 1 < window || side(z[i]) === 0 || Math.abs(z[i]) <= beyond) continue;
+      let hits = 0;
+      for (let j = i + 1 - window; j <= i; j++) if (side(z[j]) === side(z[i]) && Math.abs(z[j]) > beyond) hits++;
+      if (hits >= needed) out[i] |= bit;
+    }
+    inner = Math.abs(z[i]) < 1 ? inner + 1 : 0;
+    if (inner >= 15) out[i] |= 64;
+    outer = Math.abs(z[i]) > 1 ? outer + 1 : 0;
+    if (outer >= 8) out[i] |= 128;
+  }
+  return out;
 }
 
 /** The measured column in figures, among the rows drawn. */

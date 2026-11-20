@@ -124,6 +124,7 @@ const schemas: Record<string, Record<string, [string, string, boolean, string][]
 const mockDefaults: Settings = {
   theme: 'system', zoom: 100, editorTabSize: 2, editorWordWrap: false, uppercaseKeywords: true, rememberTabs: true,
   defaultRowLimit: 10_000, queryTimeoutSecs: 0, connectTimeoutSecs: 15, keepAliveSecs: 0, keepHistory: true, resultMemoryMb: 512,
+  reformatStyle: 'standard', reformatKeywords: 'upper', sliceThreads: 1,
 };
 
 let nextId = 100;
@@ -217,6 +218,37 @@ function encodeRows(cell: CellOf, columns: number, offset: number, count: number
     }
   }
   return Uint8Array.from(chunks);
+}
+
+/** The thread count saved in the mock's settings. */
+function mockThreads(): number {
+  try {
+    return Math.min(16, Math.max(1, Number(JSON.parse(localStorage.getItem('sqltool.mock.settings') ?? '{}').sliceThreads) || 1));
+  } catch {
+    return 1;
+  }
+}
+
+/** The mock's stand-in for planning time slices: the same rules, loosely. */
+function mockSlices(sql: string, start: string, end: string, stepSecs: number) {
+  if (!/\{(start|0)\}/i.test(sql) || !/\{(end|1)\}/i.test(sql)) {
+    throw fail('other', 'To run a query in time slices, mark where its time range goes with {start} and {end}, for example: WHERE created >= {start} AND created < {end}');
+  }
+  const read = (text: string) => Date.parse(text.trim().replace(' ', 'T') + (text.trim().length <= 10 ? 'T00:00:00Z' : text.trim().length <= 16 ? ':00Z' : 'Z'));
+  const [from, to] = [read(start), read(end)];
+  if (Number.isNaN(from)) throw fail('other', `The start of the range, "${start}", is not a date and time such as 2026-07-04 13:30.`);
+  if (Number.isNaN(to)) throw fail('other', `The end of the range, "${end}", is not a date and time such as 2026-07-04 13:30.`);
+  if (to <= from) throw fail('other', 'The end of the range must be after its start.');
+  const slices = Math.ceil((to - from) / 1000 / stepSecs);
+  if (slices > 5000) throw fail('other', `That is ${slices} slices, more than the 5000 allowed. Use longer slices or a shorter range.`);
+  const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+  const fill = (a: number, b: number) => sql.replace(/'?\{(start|0)\}'?/gi, `'${stamp(a)}'`).replace(/'?\{(end|1)\}'?/gi, `'${stamp(b)}'`);
+  return {
+    slices,
+    first: fill(from, Math.min(to, from + stepSecs * 1000)),
+    last: fill(from + (slices - 1) * stepSecs * 1000, to),
+    threads: Math.min(slices, mockThreads()),
+  };
 }
 
 function splitNaive(script: string): string[] {
@@ -349,6 +381,36 @@ export const mockBackend: Backend = {
   },
   cancel: async (_workspaceId, tabId) => {
     cancelled.add(tabId);
+  },
+  slicePlan: async (sql, start, end, stepSecs) => mockSlices(sql, start, end, stepSecs),
+  runSliced: async (_workspaceId, tabId, sql, start, end, stepSecs, maxRows, onEvent) => {
+    const plan = mockSlices(sql, start, end, stepSecs);
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
+    cancelled.delete(tabId);
+    onEvent({ type: 'started', index: 0, total: 1, sql: plan.first });
+    const resultId = nextId++;
+    const process = sql.toLowerCase().includes('process');
+    const columns = process ? processColumns : demoColumns;
+    results.set(resultId, { columns, rows: 0, cell: process ? processText : (row, column) => cellText(row, column % demoColumns.length) });
+    let rows = 0;
+    let failed = false;
+    for (let done = 1; done <= plan.slices; done++) {
+      await wait(Math.max(20, 180 / plan.threads));
+      if (cancelled.has(tabId)) {
+        failed = true;
+        break;
+      }
+      rows = Math.min(maxRows ?? Infinity, rows + 350);
+      results.get(resultId)!.rows = rows;
+      if (done === 1) onEvent({ type: 'resultSet', index: 0, resultId, columns, sql: plan.first });
+      onEvent({ type: 'progress', resultId, rows });
+      onEvent({ type: 'slices', done, total: plan.slices, rows, etaMs: done < plan.slices ? Math.round((elapsed() * (plan.slices - done)) / done) : null, threads: plan.threads });
+      if (maxRows !== null && rows >= maxRows) break;
+    }
+    if (rows > 0) onEvent({ type: 'resultDone', index: 0, resultId, rows, truncated: failed || (maxRows !== null && rows >= maxRows), elapsedMs: elapsed() });
+    if (failed) onEvent({ type: 'failed', index: 0, message: 'Stopped.', elapsedMs: elapsed() });
+    onEvent({ type: 'finished', ran: 1, total: 1, failed, elapsedMs: elapsed() });
   },
   setDefaultSchema: async (_workspaceId, schema) => {
     await wait(80);

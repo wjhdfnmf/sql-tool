@@ -427,6 +427,23 @@ impl ResultStore {
         batch.clear();
     }
 
+    /// Copies rows of another result onto the end of this one, up to `limit`
+    /// of them, and returns how many were copied. This result takes the
+    /// other's columns if it has none yet. For putting the pieces of a query
+    /// that was run in slices end to end.
+    pub fn append_from(&self, other: &ResultStore, limit: Option<u64>) -> u64 {
+        let from = other.inner.read().unwrap();
+        let mut inner = self.inner.write().unwrap();
+        if inner.columns.is_empty() {
+            inner.columns = from.columns.clone();
+        }
+        let take = limit.map_or(from.rows.len(), |limit| (limit as usize).min(from.rows.len()));
+        for row in 0..take {
+            inner.push_row(from.raw_row(row));
+        }
+        take as u64
+    }
+
     pub fn finish(&self, error: Option<String>) {
         let mut inner = self.inner.write().unwrap();
         inner.done = true;
@@ -645,6 +662,22 @@ mod tests {
             store.window(0, 3),
             [&3u32.to_le_bytes()[..], &[1, b'a', 1, b'b', 1, b'c']].concat()
         );
+    }
+
+    #[test]
+    fn rows_of_another_result_are_put_on_the_end() {
+        let all = ResultStore::new();
+        let first = store_with(&[&[Some("1"), Some("a")], &[Some("2"), None]]);
+        first.set_columns(vec![ColumnInfo::plain("n", ColumnKind::Number), ColumnInfo::plain("t", ColumnKind::Text)]);
+        let second = store_with(&[&[Some("3"), Some("c")], &[Some("4"), Some("d")], &[Some("5"), Some("e")]]);
+        assert_eq!(all.append_from(&first, None), 2);
+        assert_eq!(all.status().columns.len(), 2, "the columns come with the first rows");
+        // Only as many as there is room for.
+        assert_eq!(all.append_from(&second, Some(2)), 2);
+        assert_eq!(column(&all, 0), [Some("1".into()), Some("2".into()), Some("3".into()), Some("4".into())]);
+        assert_eq!(column(&all, 1), [Some("a".into()), None, Some("c".into()), Some("d".into())]);
+        assert_eq!(second.status().total_rows, 3, "the other result is left as it was");
+        assert_eq!(all.append_from(&ResultStore::new(), None), 0);
     }
 
     #[test]

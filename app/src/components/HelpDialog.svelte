@@ -19,6 +19,7 @@
         ['Execute the statement under the cursor', 'Ctrl+Enter'],
         ['Execute the selection, or everything', 'Ctrl+Shift+Enter'],
         ['Explain the statement under the cursor', 'Ctrl+Alt+X'],
+        ['Run a long query as many short ones', 'In Slices, with {start} and {end} in the query'],
       ],
     },
     {
@@ -52,6 +53,7 @@
         ['Add a trend line', 'Right-click the chart'],
         ['Name an axis, add a title', 'Right-click the chart, or Options'],
         ['Capability figures (Cp, Cpk)', 'Mark a line as a specification limit'],
+        ['Start a graph over', 'Reset'],
         ['Zoom in to a range', 'Drag across the chart'],
         ['Show the whole range again', 'Double-click the chart, or All'],
         ['Back to the query', 'Esc'],

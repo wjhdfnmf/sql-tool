@@ -80,6 +80,31 @@ export class GraphState {
   trend = $state<TrendSetup | null>(null);
   /** Draw the bell curve of a normal distribution with the data's mean and spread over a histogram. */
   normalCurve = $state(false);
+  /** Write each bar's value over it (bar and Pareto charts). */
+  barLabels = $state(false);
+  /** Leave rows with no value on X out of a chart of categories. */
+  skipNull = $state(false);
+
+  // A Pareto chart.
+  /** Draw the running total. */
+  paretoLine = $state(true);
+  /** Where the running total is marked, in percent: the bars up to it are the "vital few". 0 for no mark. */
+  paretoCutoff = $state(80);
+  /** Fade the bars past the mark. */
+  paretoFade = $state(true);
+
+  // A control chart.
+  /** The run rules that mark a point: 1 to 8. */
+  rules = $state<number[]>([1, 2, 5, 6]);
+  /** Draw the 1 and 2 sigma lines the rules are judged by. */
+  zones = $state(false);
+  /** Draw the chart of the spread (moving range, or standard deviation within each point) underneath. */
+  spreadChart = $state(true);
+  /** Rows per point when the rows are charted in order. Null lets the backend choose. */
+  runSize = $state<number | null>(null);
+  /** A centre line and sigma known from before, to judge this data against. */
+  fixedCenter = $state<number | null>(null);
+  fixedSigma = $state<number | null>(null);
 
   /**
    * The colour each group has been given, so a group keeps its colour when a
@@ -91,6 +116,44 @@ export class GraphState {
   constructor(resultId: number, columns: ColumnInfo[]) {
     this.resultId = resultId;
     this.columns = columns;
+  }
+
+  /** Back to an empty graph of the same result: nothing on the axes, no filters, lines or names. The kind of chart stays. */
+  reset(): void {
+    this.x = null;
+    this.y = null;
+    this.color = null;
+    this.statistic = 'sum';
+    this.bins = null;
+    this.bucket = null;
+    this.filters = [];
+    this.xRange = null;
+    this.yRange = null;
+    this.large = 'density';
+    this.sort = 'value';
+    this.maxCategories = 40;
+    this.stacked = true;
+    this.legend = 'right';
+    this.title = '';
+    this.xLabel = '';
+    this.yLabel = '';
+    this.logY = false;
+    this.pointSize = 0;
+    this.lines = [];
+    this.trend = null;
+    this.normalCurve = false;
+    this.barLabels = false;
+    this.skipNull = false;
+    this.paretoLine = true;
+    this.paretoCutoff = 80;
+    this.paretoFade = true;
+    this.rules = [1, 2, 5, 6];
+    this.zones = false;
+    this.spreadChart = true;
+    this.runSize = null;
+    this.fixedCenter = null;
+    this.fixedSigma = null;
+    this.slots.clear();
   }
 
   /** True if these are the columns the graph was set up for (so it can follow a query that was run again). */
@@ -305,6 +368,10 @@ export class GraphState {
       trend: this.kind === 'scatter' && trend && trend.kind !== 'moving' ? { kind: trend.kind, degree: trend.degree, perGroup: trend.perGroup } : null,
       specLow: this.measured ? this.spec('lsl') : null,
       specHigh: this.measured ? this.spec('usl') : null,
+      skipNull: this.skipNull,
+      runSize: this.kind === 'control' && !this.x ? this.runSize : null,
+      controlCenter: this.kind === 'control' ? this.fixedCenter : null,
+      controlSigma: this.kind === 'control' ? this.fixedSigma : null,
     };
   }
 }

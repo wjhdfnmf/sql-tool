@@ -126,6 +126,10 @@ export class EditorTab {
   design = $state<TabDesign | null>(null);
   /** The designer has changes that have not been applied. */
   designDirty = $state(false);
+  /** How far a run in time slices has got, while one is running. */
+  slices = $state<{ done: number; total: number; rows: number; etaMs: number | null; threads: number } | null>(null);
+  /** The range and slice length last used to run this tab in time slices. */
+  sliceSetup: { start: string; end: string; every: number; unit: 'minutes' | 'hours' | 'days' } | null = null;
   /** The graph set up from one of this tab's results, kept so that leaving it and coming back finds it as it was. */
   graph = $state<GraphState | null>(null);
 
@@ -341,6 +345,31 @@ export class WorkspaceState {
   }
 
   /**
+   * Runs one query once for each slice of a time range, on connections of
+   * its own, and shows the rows of all the slices as one result. The query
+   * marks its range with {start} and {end}.
+   */
+  async runSliced(tab: EditorTab, sql: string, start: string, end: string, stepSecs: number): Promise<void> {
+    if (tab.running) return;
+    this.releaseResults(tab);
+    tab.messages = [];
+    tab.hiddenMessages = 0;
+    tab.activeResult = 'messages';
+    tab.lastRunMs = null;
+    tab.running = true;
+    tab.slices = null;
+    const lines = new Map<number, MessageLine>();
+    try {
+      await backend.runSliced(this.info.id, tab.id, sql, start, end, stepSecs, this.maxRows, (message) => this.onRunMsg(tab, lines, message));
+    } catch (e) {
+      tab.report(asUiError(e).message);
+    } finally {
+      tab.running = false;
+      tab.slices = null;
+    }
+  }
+
+  /**
    * Runs statements on a separate connection, without touching any editor
    * tab. For actions such as creating a schema. Returns the error, if any.
    */
@@ -406,7 +435,10 @@ export class WorkspaceState {
         if (l) {
           l.state = 'ok';
           l.elapsedMs = m.elapsedMs;
-          l.text = `${formatCount(m.rows)} ${m.rows === 1 ? 'row' : 'rows'}` + (m.truncated ? ' (row limit reached, more exist)' : '');
+          l.text =
+            `${formatCount(m.rows)} ${m.rows === 1 ? 'row' : 'rows'}` +
+            (tab.slices ? `, from ${formatCount(tab.slices.done)} time ${tab.slices.done === 1 ? 'slice' : 'slices'}` : '') +
+            (m.truncated ? (tab.slices ? ' (stopped before the end of the range)' : ' (row limit reached, more exist)') : '');
         }
         lines.delete(m.index);
         break;
@@ -428,6 +460,12 @@ export class WorkspaceState {
         const l = lines.get(m.index);
         if (l) Object.assign(l, { state: 'error', text: m.message, elapsedMs: m.elapsedMs });
         tab.activeResult = 'messages';
+        break;
+      }
+      case 'slices': {
+        tab.slices = { done: m.done, total: m.total, rows: m.rows, etaMs: m.etaMs, threads: m.threads };
+        const l = lines.get(0);
+        if (l && l.state === 'running') l.text = `Running in time slices: ${formatCount(m.done)} of ${formatCount(m.total)} done, ${formatCount(m.rows)} rows so far`;
         break;
       }
       case 'reconnected':

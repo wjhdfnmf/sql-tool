@@ -299,7 +299,7 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     expect(filtered && filtered.rows === visible && filtered.filtered, `filtered export wrote ${filtered?.rows} of ${visible} visible rows`);
 
     // A chart is worked out from every row held, whatever the grid is filtered to (it still is, here).
-    const chart: Omit<ChartRequest, 'kind' | 'x' | 'y' | 'color'> = { statistic: 'count', bins: null, bucket: null, filters: [], xRange: null, yRange: null, large: 'density', sort: 'value', maxCategories: null, trend: null, specLow: null, specHigh: null };
+    const chart: Omit<ChartRequest, 'kind' | 'x' | 'y' | 'color'> = { statistic: 'count', bins: null, bucket: null, filters: [], xRange: null, yRange: null, large: 'density', sort: 'value', maxCategories: null, trend: null, specLow: null, specHigh: null, skipNull: false, runSize: null, controlCenter: null, controlSigma: null };
     const number: AxisRef = { column: 0, role: 'continuous' };
     let clock = performance.now();
     const lap = () => {
@@ -517,6 +517,77 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     expect(finished.failed && finished.ran === 2 && finished.total === 3, `finished was ${JSON.stringify(finished)}`);
     await backend.closeResults(ofType(messages, 'resultSet').map((s) => s.resultId));
     return ofType(messages, 'failed')[0].message;
+  });
+
+  await step('a query run in time slices comes back whole and in order, one at a time or several at once', async () => {
+    expect(workspace, 'not connected');
+    const live = workspace;
+    // Each slice returns two rows that say which slice they came from.
+    const sql = 'SELECT {start} AS s, {end} AS e, n FROM (SELECT 1 AS n UNION ALL SELECT 2) t WHERE {start} < {end}';
+    const [from, to] = ['2026-03-01', '2026-03-01 05:30'];
+    const plan = await backend.slicePlan(sql, from, to, 3600);
+    expect(plan.slices === 6 && plan.first.includes("'2026-03-01 00:00:00' AS s") && plan.last.includes("'2026-03-01 05:30:00' AS e"), `the plan was ${JSON.stringify(plan)}`);
+    const sliced = async (maxRows: number | null) => {
+      const messages: RunMsg[] = [];
+      await backend.runSliced(live.id, tabId, sql, from, to, 3600, maxRows, (m) => messages.push(m));
+      return messages;
+    };
+    const whole = async (messages: RunMsg[], threads: number) => {
+      const done = ofType(messages, 'resultDone')[0];
+      expect(done && done.rows === 12 && !done.truncated && ofType(messages, 'failed').length === 0, `with ${threads} at a time the run ended as ${JSON.stringify(messages.slice(-3))}`);
+      const progress = ofType(messages, 'slices');
+      expect(progress.length === 6 && progress[5].done === 6 && progress[5].rows === 12, `progress was ${JSON.stringify(progress)}`);
+      expect(progress[5].threads === threads, `it ran ${progress[5].threads} at a time, not ${threads}`);
+      const cells = decodeCells(await backend.getRows(done.resultId, 0, 12), 36).values;
+      // Row by row: the slices in order of time, two rows each, whichever finished first.
+      const starts = Array.from({ length: 12 }, (_, row) => cells[row * 3]);
+      const expected = Array.from({ length: 12 }, (_, row) => `2026-03-01 0${Math.floor(row / 2)}:00:00`);
+      expect(starts.join() === expected.join(), `the rows came back as ${starts.join()}`);
+      expect(cells[11 * 3 + 1] === '2026-03-01 05:30:00' && cells[2] === '1' && cells[5] === '2', `the last slice ended at ${cells[11 * 3 + 1]}`);
+      await backend.closeResults([done.resultId]);
+    };
+    await whole(await sliced(null), 1);
+
+    // Several connections at once: the same rows in the same order.
+    const before = await backend.settingsGet();
+    expect(before.sliceThreads === 1, `slices run ${before.sliceThreads} at a time before anyone asked`);
+    await backend.settingsSet({ ...before, sliceThreads: 4 });
+    try {
+      await whole(await sliced(null), 4);
+      // The row limit counts the rows of all the slices together.
+      const limited = await sliced(5);
+      const cut = ofType(limited, 'resultDone')[0];
+      expect(cut && cut.rows === 5 && cut.truncated, `with a limit of 5 rows the result was ${JSON.stringify(cut)}`);
+      await backend.closeResults([cut.resultId]);
+    } finally {
+      await backend.settingsSet(before);
+    }
+
+    // What must not be sliced is refused before anything is sent.
+    for (const [bad, reason] of [
+      ['SELECT 1', '{start} and {end}'],
+      ['DELETE FROM nowhere WHERE at >= {start} AND at < {end}', 'plain read'],
+    ]) {
+      try {
+        await backend.runSliced(live.id, tabId, bad, from, to, 3600, null, () => {});
+        throw new Error(`"${bad}" was run in slices`);
+      } catch (e) {
+        expect(asUiError(e).message.includes(reason), `refusing "${bad}" said: ${asUiError(e).message}`);
+      }
+    }
+    // A slice that fails stops the run and says which one.
+    const broken = await (async () => {
+      const messages: RunMsg[] = [];
+      await backend.runSliced(live.id, tabId, 'SELECT * FROM no_such_table_here WHERE at >= {start} AND at < {end}', from, to, 3600, null, (m) => messages.push(m));
+      return messages;
+    })();
+    const failure = ofType(broken, 'failed')[0];
+    expect(failure && failure.message.includes('The slice from 2026-03-01 0') && ofType(broken, 'finished')[0]?.failed, `a failing slice gave ${JSON.stringify(broken)}`);
+    // The tab's own session was not used, and still works.
+    const after = await run('SELECT 3 AS three', { kind: 'all' }, null);
+    expect(ofType(after, 'resultSet').length === 1, 'the tab is unusable after a sliced run');
+    await backend.closeResults(ofType(after, 'resultSet').map((r) => r.resultId));
+    return { slices: plan.slices, failure: failure.message.slice(0, 120) };
   });
 
   await step('cancel a running statement', async () => {

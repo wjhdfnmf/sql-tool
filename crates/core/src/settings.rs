@@ -43,7 +43,17 @@ pub struct Settings {
     pub keep_history: bool,
     /// Result data held in memory, across all open results, before more goes to disk.
     pub result_memory_mb: u32,
+    /// How Reformat lays SQL out: one of [`REFORMAT_STYLES`].
+    pub reformat_style: String,
+    /// What Reformat does to keywords: `upper`, `lower` or `preserve`.
+    pub reformat_keywords: String,
+    /// Connections a query run in time slices uses at once. 1 runs the slices one after another.
+    pub slice_threads: u32,
 }
+
+pub const REFORMAT_STYLES: [&str; 4] = ["standard", "compact", "aligned", "oneline"];
+/// The most connections a sliced run opens at once: enough to be quick, few enough not to crowd a server.
+pub const MAX_SLICE_THREADS: u32 = 16;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -60,6 +70,9 @@ impl Default for Settings {
             keep_alive_secs: 0,
             keep_history: true,
             result_memory_mb: 512,
+            reformat_style: "standard".into(),
+            reformat_keywords: "upper".into(),
+            slice_threads: 1,
         }
     }
 }
@@ -81,6 +94,13 @@ impl Settings {
             self.keep_alive_secs = self.keep_alive_secs.clamp(30, 60 * 60);
         }
         self.result_memory_mb = self.result_memory_mb.clamp(64, 16 * 1024);
+        if !REFORMAT_STYLES.contains(&self.reformat_style.as_str()) {
+            self.reformat_style = "standard".into();
+        }
+        if !["upper", "lower", "preserve"].contains(&self.reformat_keywords.as_str()) {
+            self.reformat_keywords = "upper".into();
+        }
+        self.slice_threads = self.slice_threads.clamp(1, MAX_SLICE_THREADS);
         self
     }
 

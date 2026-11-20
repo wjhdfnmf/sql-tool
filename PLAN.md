@@ -36,6 +36,22 @@ Asked for: a graphing tool in the manner of JMP's Graph Builder, reached from a 
 
 **Not verified by hand:** copying a picture to the clipboard (Save image is exercised by the self-test); the graph builder on Linux and macOS.
 
+## Time slices, deeper Pareto and control charts (after 0.2.0)
+
+Asked for, with a script of the user's own as the model: break a long query into time slices that are run one by one and put back together, so that none times out; run several at once as a hidden option; and show progress without taking room. Also a deeper Pareto chart and control chart, layouts for Reformat, a New button and a way to reset a graph.
+
+**Time slices** (`crates/core/src/slices.rs`, `run_sliced` in the shell). The query marks its range with `{start}` and `{end}` (`{0}` and `{1}` are read too, as a script filling a query with `format` writes them). The range is cut into half-open slices; each slice's statement gets the times as quoted literals, written from parsed dates. Slices run on connections of their own, taken from a shared counter, so the tab's session is untouched. They finish in any order; a slice's rows are added to the one result only when every slice before it is in, so the result is in the order of the slices. The row limit counts all slices together. A failing slice stops the run and names itself; what came before it is kept. The query timeout applies to each slice, which is the point. Stop interrupts every connection. Only a plain read is accepted.
+
+What the script did that this does differently: it sent the times unquoted; it used `BETWEEN`, which returns a row on a boundary twice (the dialog warns); it opened a new connection pool for every slice; a failed slice left a hole that broke the join at the end; and it kept logins in a text file.
+
+**Threads** are a setting with no control until it is found (the Queries heading clicked five times, or the word typed in Settings): 1 to 16 connections. Verified in the desktop self-test on both servers: the same rows in the same order with one connection and with four.
+
+**Control chart.** The eight run rules (Nelson's numbering; 1, 2, 5 and 6 are the Western Electric set) are worked out in the core for every point and returned as a bit mask; the interface chooses which ones mark a point. Limits can come from a centre and sigma given from before. A companion chart shows the spread: the moving range against 3.267 times its average for single rows, the standard deviation within each point against limits from c4 (taken as 4(n-1)/(4n-3)) for subgroups. Rows in order can be charted a chosen number to a point.
+
+**Pareto chart.** The first version scaled the left axis to the total so that the running-total line could share it, which squashed the bars. Now the bars have the left axis to themselves and the line is read on a 0 to 100% axis on the right: two scales, but the second is a share of the first, as every Pareto chart is drawn.
+
+**Not done:** attribute charts (p, np, c, u), range charts for small subgroups, phases with their own limits, capability from a non-normal fit; slicing by anything but time; resuming a sliced run that failed part-way.
+
 ## Reliability pass, settings and themes (after 0.1.2)
 
 ### How a query "timing out" is handled

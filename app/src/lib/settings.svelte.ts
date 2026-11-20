@@ -18,6 +18,9 @@ export const defaultSettings: Settings = {
   keepAliveSecs: 0,
   keepHistory: true,
   resultMemoryMb: 512,
+  reformatStyle: 'standard',
+  reformatKeywords: 'upper',
+  sliceThreads: 1,
 };
 
 export interface Theme {

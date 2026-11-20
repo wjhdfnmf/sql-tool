@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,7 @@ use sqltool_core::edit::{self, EditTarget, RowEdit};
 use sqltool_core::export::{self, CellRange, CopyFormat, ExportFormat, RangeStats};
 use sqltool_core::guard::{self, Concern};
 use sqltool_core::metadata::{Charset, ColumnEntry, ForeignKeyEntry, SchemaDefaults, SchemaObjects, TableDetails};
+use sqltool_core::slices;
 use sqltool_core::table::{self, IndexSpec, TableSpec};
 use sqltool_core::{
     ddl, split, ApprovedFiles, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
@@ -505,6 +506,17 @@ enum RunMsg {
     /// The server had closed the tab's connection; a new one was opened
     /// before anything was sent.
     Reconnected,
+    /// How far a query run in time slices has got.
+    #[serde(rename_all = "camelCase")]
+    Slices {
+        done: usize,
+        total: usize,
+        rows: u64,
+        /// How long the rest should take at the pace so far. `None` before the first slice is in.
+        eta_ms: Option<u64>,
+        /// Connections running slices at once.
+        threads: usize,
+    },
     Finished {
         ran: usize,
         total: usize,
@@ -763,6 +775,236 @@ async fn run(
         failed,
         elapsed_ms: run_started.elapsed().as_millis() as u64,
     });
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SlicePlan {
+    slices: usize,
+    /// The first slice's statement, to show what will be sent.
+    first: String,
+    last: String,
+    threads: usize,
+}
+
+/// What running a query in time slices would do: how many slices, and the
+/// statement of the first and last. Rejects with the reason if it cannot be sliced.
+#[tauri::command(async)]
+fn slice_plan(state: State<'_, AppState>, sql: String, start: String, end: String, step_secs: u64) -> Result<SlicePlan, UiError> {
+    let plan = slices::plan(&sql, &start, &end, step_secs)?;
+    Ok(SlicePlan {
+        slices: plan.len(),
+        first: plan[0].sql.clone(),
+        last: plan[plan.len() - 1].sql.clone(),
+        threads: (state.settings().slice_threads as usize).min(plan.len()),
+    })
+}
+
+/// Runs one query as many: the time range between `start` and `end` is cut
+/// into slices of `step_secs`, the query (which marks its range with
+/// `{start}` and `{end}`) is run for each, and the rows are put end to end
+/// in the order of the slices, as one result. No single run is long, so none
+/// meets a timeout.
+///
+/// The slices run on connections of their own, as many at once as the
+/// settings allow, so the tab's session is not touched; the tab is still
+/// held busy until the run ends, and `cancel` with its id stops it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn run_sliced(
+    state: State<'_, AppState>,
+    workspace_id: u64,
+    tab_id: String,
+    sql: String,
+    start: String,
+    end: String,
+    step_secs: u64,
+    max_rows: Option<u64>,
+    on_event: Channel<RunMsg>,
+) -> Result<(), UiError> {
+    let workspace = state.workspace(workspace_id)?;
+    let plan = Arc::new(slices::plan(&sql, &start, &end, step_secs)?);
+    let whole = slices::whole(&sql, &start, &end)?;
+    let tab = workspace.tab(&tab_id).await?;
+    let mut session = tab
+        .session
+        .try_lock()
+        .map_err(|_| ui_error("busy", "A query is already running in this tab."))?;
+    tab.cancel_requested.store(false, Ordering::Relaxed);
+    let settings = state.settings();
+    let total = plan.len();
+    let run_started = Instant::now();
+    let elapsed = || run_started.elapsed().as_millis() as u64;
+    let _ = on_event.send(RunMsg::Started { index: 0, total: 1, sql: preview(&whole) });
+
+    // A connection for each slice running at once. If the server will not
+    // give as many as were asked for, the run goes ahead with what it gave.
+    let wanted = (settings.slice_threads as usize).clamp(1, total);
+    let mut workers: Vec<(String, Arc<Tab>)> = Vec::new();
+    let mut refused: Option<UiError> = None;
+    for n in 0..wanted {
+        let id = format!("{tab_id}#slice{n}");
+        match workspace.tab(&id).await {
+            Ok(worker) => {
+                worker.cancel_requested.store(false, Ordering::Relaxed);
+                workers.push((id, worker));
+            }
+            Err(e) => {
+                refused = Some(UiError::from(e));
+                break;
+            }
+        }
+    }
+    let threads = workers.len();
+
+    let next = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(usize, Result<Arc<ResultStore>, Error>)>();
+    let query_timeout = settings.query_timeout();
+    for (_, worker) in &workers {
+        let (worker, plan, next, stop, tx) = (worker.clone(), plan.clone(), next.clone(), stop.clone(), tx.clone());
+        tauri::async_runtime::spawn(async move {
+            let mut session = worker.session.lock().await;
+            while !stop.load(Ordering::Relaxed) {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(slice) = plan.get(index) else { break };
+                // The query timeout applies to each slice, which is the point of slicing.
+                let timed_out = Arc::new(AtomicBool::new(false));
+                let timer = query_timeout.map(|limit| {
+                    let (canceller, timed_out) = (worker.canceller.clone(), timed_out.clone());
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(limit).await;
+                        timed_out.store(true, Ordering::Relaxed);
+                        let _ = canceller.cancel().await;
+                    })
+                });
+                let mut found: Option<Arc<ResultStore>> = None;
+                let outcome = session
+                    .run(&slice.sql, max_rows, |event| {
+                        if let RunEvent::ResultSet { store } = event {
+                            found.get_or_insert(store);
+                        }
+                    })
+                    .await;
+                if let Some(timer) = timer {
+                    timer.abort();
+                }
+                if timed_out.load(Ordering::Relaxed) || worker.cancel_requested.load(Ordering::Relaxed) {
+                    session.absorb_stray_kill().await;
+                }
+                let message = match outcome {
+                    Ok(()) => found.ok_or_else(|| Error::Other("the statement returned no result set".into())),
+                    Err(_) if timed_out.load(Ordering::Relaxed) => Err(Error::Other(
+                        "it ran longer than the query timeout in Settings. Use shorter slices, or a longer timeout".into(),
+                    )),
+                    Err(e) => Err(e),
+                };
+                let failed = message.is_err();
+                if tx.send((index, message)).is_err() || failed {
+                    break;
+                }
+            }
+        });
+    }
+    drop(tx);
+
+    // Slices finish in any order; their rows are added in the order of the slices.
+    let combined = Arc::new(ResultStore::new());
+    let result_id = state.id();
+    let mut waiting: HashMap<usize, Arc<ResultStore>> = HashMap::new();
+    let (mut announced, mut added, mut done, mut rows, mut truncated) = (false, 0usize, 0usize, 0u64, false);
+    let mut failure: Option<String> = refused.filter(|_| threads == 0).map(|e| e.message);
+    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    while failure.is_none() && !truncated && added < total {
+        tokio::select! {
+            message = rx.recv() => match message {
+                Some((index, Ok(store))) => {
+                    done += 1;
+                    waiting.insert(index, store);
+                    while let Some(store) = waiting.remove(&added) {
+                        let room = max_rows.map(|limit| limit.saturating_sub(rows));
+                        let piece = store.status();
+                        let (target, from) = (combined.clone(), store.clone());
+                        rows += blocking(move || target.append_from(&from, room)).await?;
+                        added += 1;
+                        if !announced {
+                            announced = true;
+                            let columns = combined.status().columns;
+                            state.results.lock().unwrap().insert(result_id, combined.clone());
+                            let _ = on_event.send(RunMsg::ResultSet { index: 0, result_id, columns, sql: whole.clone() });
+                        }
+                        // The row limit counts the rows of all the slices together.
+                        if piece.truncated || room.is_some_and(|room| piece.total_rows > room) || (max_rows.is_some_and(|limit| rows >= limit) && added < total) {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                    let eta_ms = (done < total).then(|| elapsed() * (total - done) as u64 / done as u64);
+                    let _ = on_event.send(RunMsg::Progress { result_id, rows });
+                    let _ = on_event.send(RunMsg::Slices { done, total, rows, eta_ms, threads });
+                }
+                Some((index, Err(e))) => {
+                    let slice = &plan[index];
+                    failure = Some(format!("The slice from {} to {} failed: {e}", slice.start, slice.end));
+                }
+                None => failure = Some("The slices stopped before all of them had run.".into()),
+            },
+            _ = tick.tick() => {
+                if tab.cancel_requested.load(Ordering::Relaxed) {
+                    failure = Some("Stopped.".into());
+                }
+            }
+        }
+    }
+
+    // Whatever ended the run, nothing more is started and what is running is interrupted.
+    stop.store(true, Ordering::Relaxed);
+    if added < total {
+        for (_, worker) in &workers {
+            worker.cancel_requested.store(true, Ordering::Relaxed);
+            let _ = worker.canceller.cancel().await;
+        }
+    }
+    {
+        let mut tabs = workspace.tabs.lock().await;
+        for (id, _) in &workers {
+            tabs.remove(id);
+        }
+    }
+    if tab.cancel_requested.swap(false, Ordering::Relaxed) {
+        session.absorb_stray_kill().await;
+    }
+
+    if let Some(message) = &mut failure {
+        if announced && added > 0 {
+            message.push_str(&format!(
+                ". The result holds the {added} of {total} slices before it, up to {}",
+                plan[added - 1].end
+            ));
+        }
+    }
+    if truncated {
+        combined.set_truncated();
+    }
+    combined.finish(failure.clone());
+    if announced {
+        let _ = on_event.send(RunMsg::ResultDone { index: 0, result_id, rows, truncated: truncated || failure.is_some(), elapsed_ms: elapsed() });
+    }
+    if let Some(message) = &failure {
+        let _ = on_event.send(RunMsg::Failed { index: 0, message: message.clone(), elapsed_ms: elapsed() });
+    }
+    if settings.keep_history {
+        let _ = state.history.append(HistoryEntry {
+            at_ms: now_ms(),
+            profile_name: workspace.name.clone(),
+            sql: whole,
+            duration_ms: elapsed(),
+            ok: failure.is_none(),
+            summary: failure.clone().unwrap_or_else(|| format!("{rows} rows, in {total} time slices")),
+        });
+    }
+    let _ = on_event.send(RunMsg::Finished { ran: 1, total: 1, failed: failure.is_some(), elapsed_ms: elapsed() });
     Ok(())
 }
 
@@ -1736,6 +1978,8 @@ fn main() {
             close_tab,
             run,
             set_default_schema,
+            slice_plan,
+            run_sliced,
             cancel,
             get_rows,
             get_cell,

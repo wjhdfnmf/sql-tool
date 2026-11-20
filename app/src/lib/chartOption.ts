@@ -21,6 +21,7 @@ import {
   movingAverage,
   normalDensity,
 } from './chart';
+import { RUN_RULES } from './chart';
 import type { ChartData, ChartKind, Fit, RefLine, TimeBucket } from './chart';
 import type { TrendSetup } from './graph.svelte';
 
@@ -60,6 +61,16 @@ export interface ChartView {
   lines: RefLine[];
   trend: TrendSetup | null;
   normalCurve: boolean;
+  /** Write each bar's value over it. */
+  barLabels: boolean;
+  /** A Pareto chart: draw the running total, where to mark it (percent; 0 for nowhere), and whether to fade the bars past the mark. */
+  paretoLine: boolean;
+  paretoCutoff: number;
+  paretoFade: boolean;
+  /** A control chart: the run rules that mark a point, the 1 and 2 sigma lines, and the chart of the spread underneath. */
+  rules: number[];
+  zones: boolean;
+  spreadChart: boolean;
 }
 
 type Options = Record<string, unknown>;
@@ -455,10 +466,8 @@ export function buildOption(data: ChartData, view: ChartView, look: ChartLook): 
     if (view.kind === 'control' && data.control) {
       const control = data.control;
       const means = data.series[0]?.values ?? [];
-      const outside = (i: number) => {
-        const [m, u, l] = [means[i], control.upper[i], control.lower[i]];
-        return m !== null && u !== null && l !== null && (m > u || m < l);
-      };
+      const watched = view.rules.reduce((bits, rule) => bits | (1 << (rule - 1)), 0);
+      const broken = (i: number) => (control.signals[i] ?? 0) & watched;
       const uppers = control.upper.filter((v): v is number => v !== null);
       const lowers = control.lower.filter((v): v is number => v !== null);
       // With every point the same size the limits are two straight lines; otherwise they step with the size.
@@ -471,47 +480,94 @@ export function buildOption(data: ChartData, view: ChartView, look: ChartLook): 
       });
       const fixed: Options[] = [edge(control.center, 'Centre', { color: look.ok, type: 'solid', width: 1.2 })];
       if (level) fixed.push(edge(uppers[0], 'UCL', limitStyle), edge(lowers[0], 'LCL', limitStyle));
-      const step = (values: (number | null)[], name: string): Options => ({
+      const step = (values: (number | null)[], name: string, style: Options, axes: Options = {}): Options => ({
         type: 'line',
         name,
         data: values.map((v) => (v === null ? '-' : v)),
         step: 'middle',
         showSymbol: false,
         // Named at its right end, as the level limits are.
-        endLabel: { show: true, formatter: () => name, color: look.text, fontSize: 11, offset: [-28, name === 'UCL' ? -8 : 10] },
-        lineStyle: limitStyle,
+        endLabel: name ? { show: true, formatter: () => name, color: look.text, fontSize: 11, offset: [-28, name === 'LCL' ? 10 : -8] } : undefined,
+        lineStyle: style,
         itemStyle: { color: look.danger },
         silent: true,
         tooltip: { show: false },
+        ...axes,
       });
-      option.yAxis = { ...yAxis, type: 'value', scale: true, ...widened(reach('y', level ? [uppers[0], lowers[0], control.center] : [control.center])) };
+      // The 1 and 2 sigma lines: a third and two thirds of the way from the centre to each limit.
+      const zoneStyle = { color: look.muted, type: 'dotted', width: 1, opacity: 0.8 };
+      const zones: Options[] = view.zones
+        ? [1, 2].flatMap((k) =>
+            [1, -1].map((sign) =>
+              step(control.upper.map((u, i) => (u === null || control.lower[i] === null ? null : control.center + (sign * k * (u - (control.lower[i] as number))) / 6)), '', zoneStyle),
+            ),
+          )
+        : [];
+      const marked = (values: (number | null)[], test: (i: number) => boolean, axes: Options = {}): Options => ({
+        type: 'scatter',
+        name: 'Marked',
+        data: values.flatMap((v, i) => (v !== null && test(i) ? [[i, v]] : [])),
+        symbolSize: 9,
+        itemStyle: { color: look.danger, borderColor: look.bg, borderWidth: 1 },
+        silent: true,
+        tooltip: { show: false },
+        z: 4,
+        ...axes,
+      });
+      const run = (values: (number | null)[], name: string, axes: Options = {}): Options => ({
+        type: 'line',
+        name,
+        data: values.map((m) => (m === null ? '-' : m)),
+        symbol: 'circle',
+        symbolSize: values.length > 150 ? 3 : 6,
+        showSymbol: values.length <= 600,
+        showAllSymbol: values.length <= 150,
+        connectNulls: true,
+        lineStyle: { color: palette[0], width: 1.5 },
+        itemStyle: { color: palette[0] },
+        emphasis: { disabled: true },
+        ...axes,
+      });
+
+      const spreadName = control.individuals ? 'Moving range' : 'Std dev within';
+      const below = view.spreadChart && control.spread.some((v) => v !== null);
+      const mainAxis = { ...yAxis, type: 'value', scale: true, ...widened(reach('y', level ? [uppers[0], lowers[0], control.center] : [control.center])) };
+      if (below) {
+        // Two charts sharing the row of names: the level above, its spread underneath.
+        const base = option.grid as Options;
+        option.grid = [
+          { ...base, bottom: '31%' },
+          { ...base, top: '73%' },
+        ];
+        option.xAxis = [
+          { ...nameAxis, gridIndex: 0, name: '', axisLabel: { show: false }, axisTick: { show: false } },
+          { ...nameAxis, gridIndex: 1 },
+        ];
+        option.yAxis = [
+          { ...mainAxis, gridIndex: 0 },
+          { ...axis, type: 'value', gridIndex: 1, min: 0, name: spreadName, splitNumber: 3, axisLabel: numberLabel },
+        ];
+        option.axisPointer = { link: [{ xAxisIndex: 'all' }] };
+      } else {
+        option.yAxis = mainAxis;
+      }
+      const under = { xAxisIndex: 1, yAxisIndex: 1 };
+      const spreadOut = (i: number) => control.spread[i] !== null && control.spreadUpper[i] !== null && (control.spread[i] as number) > (control.spreadUpper[i] as number);
       option.series = [
-        {
-          type: 'line',
-          name: view.yName,
-          data: means.map((m) => (m === null ? '-' : m)),
-          symbol: 'circle',
-          symbolSize: means.length > 150 ? 3 : 6,
-          showSymbol: means.length <= 600,
-          showAllSymbol: means.length <= 150,
-          connectNulls: true,
-          lineStyle: { color: palette[0], width: 1.5 },
-          itemStyle: { color: palette[0] },
-          emphasis: { disabled: true },
-        },
-        ...(level ? [] : [step(control.upper, 'UCL'), step(control.lower, 'LCL')]),
-        {
-          type: 'scatter',
-          name: 'Outside the limits',
-          data: means.flatMap((m, i) => (m !== null && outside(i) ? [[i, m]] : [])),
-          symbolSize: 9,
-          itemStyle: { color: look.danger, borderColor: look.bg, borderWidth: 1 },
-          silent: true,
-          tooltip: { show: false },
-          z: 4,
-        },
+        run(means, view.yName),
+        ...(level ? [] : [step(control.upper, 'UCL', limitStyle), step(control.lower, 'LCL', limitStyle)]),
+        ...zones,
+        marked(means, (i) => broken(i) !== 0),
         ...trendSeries(),
         lineCarrier(fixed),
+        ...(below
+          ? [
+              run(control.spread, spreadName, under),
+              step(control.spreadCenter, '', { color: look.ok, type: 'solid', width: 1.2 }, under),
+              step(control.spreadUpper, '', limitStyle, under),
+              marked(control.spread, spreadOut, under),
+            ]
+          : []),
       ];
       tooltip.axisPointer = { type: 'line', lineStyle: { color: look.border } };
       tooltip.formatter = (items: { dataIndex: number }[]) => {
@@ -519,10 +575,12 @@ export function buildOption(data: ChartData, view: ChartView, look: ChartLook): 
         const [m, u, l] = [means[at], control.upper[at], control.lower[at]];
         if (m === null || u === null || l === null) return tip(labels[at] ?? '', []);
         const rows: TipRow[] = [
-          { swatch: outside(at) ? look.danger : palette[0], label: view.yName, value: formatNumber(m) },
+          { swatch: broken(at) ? look.danger : palette[0], label: view.yName, value: formatNumber(m) },
           { label: 'Limits', value: `${formatNumber(l)} to ${formatNumber(u)}` },
         ];
-        if (outside(at)) rows.push({ label: 'Outside the limits', value: m > u ? 'above' : 'below' });
+        const spread = control.spread[at];
+        if (spread !== null) rows.push({ label: spreadName, value: formatNumber(spread) + (spreadOut(at) ? '  (above its limit)' : '') });
+        for (const rule of RUN_RULES) if (broken(at) & (1 << (rule.rule - 1))) rows.push({ swatch: look.danger, label: `Rule ${rule.rule}`, value: rule.short });
         const x = data.x;
         const title = x.type === 'sequence' ? (x.rowsPerPoint > 1 ? `Rows ${labels[at]} to ${formatNumber(at * x.rowsPerPoint + x.rowsPerPoint)}` : `Row ${labels[at]}`) : (labels[at] ?? '');
         return tip(title, rows);
@@ -535,54 +593,66 @@ export function buildOption(data: ChartData, view: ChartView, look: ChartLook): 
       const whole = values.reduce((a, b) => a + b, 0);
       let running = 0;
       const share = values.map((v) => (whole > 0 ? ((running += v) / whole) * 100 : 0));
-      // One scale read two ways: the whole on the left is 100% on the right, so the line is the running total on both.
+      const part = (v: number) => (whole > 0 ? `${((v / whole) * 100).toFixed(v / whole < 0.1 ? 1 : 0)}%` : '');
+      // The "vital few": the bars it takes to reach the mark, the one that crosses it included.
+      const cutoff = Math.min(100, Math.max(0, view.paretoCutoff));
+      const vital = values.map((_, i) => cutoff <= 0 || (i === 0 ? 0 : share[i - 1]) < cutoff);
+      const faded = mixColors(look.bg, palette[0], 0.38);
+      // The bars have the left axis to themselves, so the tallest fills the height. The running
+      // total is read on the right, 0 to 100%: a scale of its own, since it is a share, not an amount.
       option.yAxis = [
-        { ...yAxis, type: 'value', min: 0, max: whole > 0 ? whole : undefined, ...(reach('y') && whole > 0 ? { max: Math.max(whole, reach('y')![1]) } : {}) },
+        { ...yAxis, type: 'value', min: 0 },
         {
           ...axis,
           type: 'value',
+          show: view.paretoLine,
           min: 0,
-          max: reach('y') && whole > 0 ? (Math.max(whole, reach('y')![1]) / whole) * 100 : 100,
+          max: 100,
+          interval: 20,
           name: 'Running total',
           splitLine: { show: false },
-          axisLabel: { ...axis.axisLabel, formatter: (v: number) => (v <= 100 ? `${Math.round(v)}%` : '') },
+          axisLabel: { ...axis.axisLabel, formatter: (v: number) => `${Math.round(v)}%` },
         },
       ];
-      (option.grid as Options).right = gridRight;
-      option.series = [
-        {
-          type: 'bar',
-          name: view.yName,
-          data: values,
-          barMaxWidth: 64,
-          itemStyle: { color: palette[0], borderColor: look.bg, borderWidth: 1, borderRadius: [3, 3, 0, 0] },
-          emphasis: { disabled: true },
-        },
-        {
-          type: 'line',
-          name: 'Running total',
-          yAxisIndex: 1,
-          data: share,
-          symbol: 'circle',
-          symbolSize: 6,
-          lineStyle: { color: look.text, width: 2 },
-          itemStyle: { color: look.text },
-          emphasis: { disabled: true },
-          // The usual mark: where the running total passes four fifths.
-          markLine: {
-            symbol: 'none',
-            silent: true,
-            data: [{ yAxis: 80, lineStyle: { color: look.muted, type: 'dotted', width: 1 }, label: { show: true, formatter: () => '80%', position: 'insideEndTop', color: look.muted, fontSize: 11 } }],
-          },
-        },
-        lineCarrier(),
-      ];
+      const bars: Options = {
+        type: 'bar',
+        name: view.yName,
+        data: values.map((v, i) => ({ value: v, itemStyle: { color: view.paretoFade && !vital[i] ? faded : palette[0] } })),
+        barMaxWidth: 72,
+        barCategoryGap: '18%',
+        itemStyle: { borderColor: look.bg, borderWidth: 1, borderRadius: [3, 3, 0, 0] },
+        label: view.barLabels
+          ? { show: true, position: 'top', color: look.text, fontSize: 11, formatter: (item: { dataIndex: number }) => `${formatNumber(values[item.dataIndex])}  ${part(values[item.dataIndex])}` }
+          : undefined,
+        emphasis: { disabled: true },
+      };
+      const total: Options = {
+        type: 'line',
+        name: 'Running total',
+        yAxisIndex: 1,
+        data: share,
+        symbol: 'circle',
+        symbolSize: values.length > 40 ? 4 : 6,
+        lineStyle: { color: look.text, width: 2 },
+        itemStyle: { color: look.text, borderColor: look.bg, borderWidth: 1 },
+        emphasis: { disabled: true },
+        markLine:
+          cutoff > 0 && cutoff < 100
+            ? {
+                symbol: 'none',
+                silent: true,
+                data: [{ yAxis: cutoff, lineStyle: { color: look.muted, type: 'dashed', width: 1 }, label: { show: true, formatter: () => `${cutoff}%`, position: 'insideStartTop', color: look.muted, fontSize: 11 } }],
+              }
+            : undefined,
+      };
+      option.series = [bars, ...(view.paretoLine ? [total] : []), lineCarrier()];
       tooltip.formatter = (items: { dataIndex: number }[]) => {
         const at = items[0]?.dataIndex ?? 0;
         return tip(labels[at] ?? '', [
-          { swatch: palette[0], label: view.yName, value: formatNumber(values[at]) },
-          { label: 'Share', value: whole > 0 ? `${((values[at] / whole) * 100).toFixed(1)}%` : '' },
+          { swatch: view.paretoFade && !vital[at] ? faded : palette[0], label: view.yName, value: formatNumber(values[at]) },
+          { label: 'Share', value: part(values[at]) },
           { label: 'Running total', value: `${share[at].toFixed(1)}%` },
+          { label: 'Rank', value: `${at + 1} of ${values.length}` },
         ]);
       };
       return option;
@@ -612,6 +682,7 @@ export function buildOption(data: ChartData, view: ChartView, look: ChartLook): 
               stack: stacked ? 'all' : undefined,
               barMaxWidth: 56,
               barGap: '8%',
+              label: view.barLabels && !stacked ? { show: true, position: 'top', color: look.text, fontSize: 11, formatter: (item: { value: unknown }) => (typeof item.value === 'number' ? formatNumber(item.value) : '') } : undefined,
               // A hairline of background between neighbours, so two fills never touch.
               itemStyle: { color: colorOf(s.name), borderColor: look.bg, borderWidth: 1, borderRadius: stacked ? 0 : [3, 3, 0, 0] },
               emphasis: { disabled: true },
