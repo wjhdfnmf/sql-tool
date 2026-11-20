@@ -5,9 +5,12 @@
   import { app, forgetSavedTabs, type WorkspaceState } from '../lib/state.svelte';
   import { asUiError, explainConnectError, newProfile, type Profile, type TlsSetting } from '../lib/types';
   import ConnectionDialog from './ConnectionDialog.svelte';
+  import WorkbenchImport from './WorkbenchImport.svelte';
   import Menu from './Menu.svelte';
   import PasswordPrompt from './PasswordPrompt.svelte';
 
+  /** The dialog that brings connections over from MySQL Workbench is open. */
+  let importing = $state(false);
   let editing = $state<Profile | null>(null);
   let asking = $state<Profile | null>(null);
   let promptError = $state<string | null>(null);
@@ -132,12 +135,15 @@
 <main class="home">
   <header>
     <h1>Connections</h1>
-    <button class="primary" onclick={() => (editing = newProfile())}>New connection</button>
+    <span class="head-buttons">
+      <button title="Bring connections over from MySQL Workbench: choose which ones" onclick={() => (importing = true)}>Import from Workbench&hellip;</button>
+      <button class="primary" onclick={() => (editing = newProfile())}>New connection</button>
+    </span>
   </header>
 
   {#if app.profiles.length === 0}
     <p class="empty muted">
-      No saved connections yet. Create one to connect to a MySQL or MariaDB server.
+      No saved connections yet. Create one to connect to a MySQL or MariaDB server, or import the ones you have in MySQL Workbench.
     </p>
   {/if}
 
@@ -245,6 +251,10 @@
   </dialog>
 {/if}
 
+{#if importing}
+  <WorkbenchImport onclose={() => (importing = false)} />
+{/if}
+
 {#if editing}
   <ConnectionDialog
     profile={editing}
@@ -273,6 +283,11 @@
     flex: 1;
     overflow: auto;
     padding: 24px max(24px, calc((100% - 860px) / 2));
+  }
+
+  .head-buttons {
+    display: flex;
+    gap: 8px;
   }
 
   header {

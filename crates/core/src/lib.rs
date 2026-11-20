@@ -23,6 +23,7 @@ pub mod split;
 pub mod store;
 pub mod table;
 pub mod version;
+pub mod workbench;
 
 pub use approved::ApprovedFiles;
 pub use ddl::ObjectKind;

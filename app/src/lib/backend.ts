@@ -25,6 +25,7 @@ import type {
   TableKeys,
   TableSpec,
   Profile,
+  WorkbenchFile,
   RunMode,
   RunMsg,
   SchemaDefaults,
@@ -96,6 +97,11 @@ export interface Backend {
   /** A script that changes an existing object, built from its current definition. */
   alterScript(workspaceId: number, kind: ObjectKind, schema: string, name: string): Promise<string>;
   createTemplate(kind: ObjectKind, schema: string | null): Promise<string>;
+  /**
+   * The connections MySQL Workbench has saved. Without `pick`, from where Workbench keeps them (null if it has
+   * no file there); with `pick`, from a file the user chooses (null if they cancel). Reads only.
+   */
+  workbenchConnections(pick: boolean): Promise<WorkbenchFile | null>;
   /** Shows the native open dialog. Null if the user cancels. */
   scriptOpen(workspaceId: number): Promise<ScriptFile | null>;
   /** Where Open and Save As start for this connection: its script folder, if it has one that exists. */
@@ -199,6 +205,7 @@ const tauriBackend: Backend = {
   schemaDdl: (alter, name, charset, collation) => invoke('schema_ddl', { alter, name, charset, collation }),
   alterScript: (workspaceId, kind, schema, name) => invoke('alter_script', { workspaceId, kind, schema, name }),
   createTemplate: (kind, schema) => invoke('create_template', { kind, schema }),
+  workbenchConnections: (pick) => invoke('workbench_connections', { pick }),
   scriptOpen: (workspaceId) => invoke('script_open', { workspaceId }),
   folderPick: (start) => invoke('folder_pick', { start }),
   scriptFolderOf: (workspaceId) => invoke('script_folder_of', { workspaceId }),

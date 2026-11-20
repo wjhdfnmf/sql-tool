@@ -23,6 +23,7 @@ use sqltool_core::guard::{self, Concern};
 use sqltool_core::metadata::{Charset, ColumnEntry, ForeignKeyEntry, SchemaDefaults, SchemaObjects, TableDetails};
 use sqltool_core::slices;
 use sqltool_core::table::{self, IndexSpec, TableSpec};
+use sqltool_core::workbench;
 use sqltool_core::{
     ddl, split, ApprovedFiles, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
     ResultStore, RunEvent, SavedProfile, ServerInfo, Session, Settings, SettingsStore, TlsMode,
@@ -1312,6 +1313,65 @@ async fn script_open(
     }))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbenchFile {
+    path: String,
+    connections: Vec<workbench::Found>,
+}
+
+/// The connections MySQL Workbench has saved, for the user to choose which to
+/// bring over. Without `pick`, looks where Workbench keeps them on this
+/// system and returns `None` if there is no file there; with `pick`, asks the
+/// user for the file, and returns `None` if they cancel.
+///
+/// Only reads. Nothing is saved here: the UI saves the connections the user
+/// ticks, through the same command as a connection typed by hand. Workbench's
+/// file holds no passwords and none is looked for.
+#[tauri::command]
+async fn workbench_connections(app: tauri::AppHandle, pick: bool) -> Result<Option<WorkbenchFile>, UiError> {
+    let usual = || {
+        // The unattended self-test has no Workbench to read from; it names a file of its own.
+        #[cfg(feature = "devtools")]
+        if std::env::var_os("SQLTOOL_SELFTEST_HOST").is_some() {
+            return std::env::var_os("SQLTOOL_SELFTEST_WORKBENCH").map(PathBuf::from);
+        }
+        workbench::default_path()
+    };
+    let path = if pick {
+        use tauri_plugin_dialog::DialogExt;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut dialog = app.dialog().file().add_filter("MySQL Workbench connections", &["xml"]).add_filter("All files", &["*"]);
+        if let Some(folder) = workbench::default_path().and_then(|p| p.parent().map(PathBuf::from)).filter(|f| f.is_dir()) {
+            dialog = dialog.set_directory(folder);
+        }
+        dialog.pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+        match rx.await.ok().flatten().and_then(|path| path.into_path().ok()) {
+            Some(path) => path,
+            None => return Ok(None),
+        }
+    } else {
+        match usual().filter(|path| path.is_file()) {
+            Some(path) => path,
+            None => return Ok(None),
+        }
+    };
+    let shown = path.to_string_lossy().into_owned();
+    let connections = blocking(move || -> Result<Vec<workbench::Found>, UiError> {
+        let storage = |e: std::io::Error| ui_error("storage", format!("Could not open {}: {e}", path.display()));
+        if std::fs::metadata(&path).map_err(storage)?.len() > workbench::MAX_FILE_BYTES {
+            return Err(ui_error("storage", "That file is too large to be a MySQL Workbench connections file."));
+        }
+        let text = String::from_utf8(std::fs::read(&path).map_err(storage)?)
+            .map_err(|_| ui_error("storage", "That file is not text, so it is not a MySQL Workbench connections file."))?;
+        Ok(workbench::parse(&text)?)
+    })
+    .await??;
+    Ok(Some(WorkbenchFile { path: shown, connections }))
+}
+
 /// Saves a script. With `path`, writes back to a file opened or saved earlier
 /// in this session; without, asks where to save. `None` if cancelled.
 #[tauri::command]
@@ -1998,6 +2058,7 @@ fn main() {
             script_folder_of,
             script_open,
             script_save,
+            workbench_connections,
             review_script,
             result_view,
             copy_range,

@@ -36,6 +36,21 @@ Asked for: a graphing tool in the manner of JMP's Graph Builder, reached from a 
 
 **Not verified by hand:** copying a picture to the clipboard (Save image is exercised by the self-test); the graph builder on Linux and macOS.
 
+## Import from MySQL Workbench (after 0.2.0)
+
+Workbench keeps its connections in `connections.xml` in its data folder (`%APPDATA%\\MySQL\\Workbench` on Windows, `~/Library/Application Support/MySQL/Workbench` on macOS, `~/.mysql/workbench` on Linux): a list of `db.mgmt.Connection` objects, each with a driver, a name and a dictionary of settings. The names of the drivers and settings, and the numbering of the SSL choices, were taken from Workbench's own definition file (`mysql_rdbms_info.xml` in its source), not guessed.
+
+`crates/core/src/workbench.rs` reads the file and turns each connection into a profile where it can:
+
+- *Standard (TCP/IP)* and *LDAP User/Password* come over. The other four ways Workbench connects (socket or pipe, SSH tunnel, SASL/Kerberos, native Kerberos) are listed with the reason they cannot.
+- *SSL:* No becomes not encrypted; If available and Require become encrypted, not verified (with a note for If available, which here never falls back to no encryption); Require and Verify CA, and Verify Identity, map across with the CA file. The LDAP connection numbers the same choices from nought, which the reader allows for. A number it does not know becomes verify identity, the safe side.
+- *Clear-text sign-in* is carried over, and is on for the LDAP connection, which is clear text by nature. The acknowledgement of its risk is never set by the import.
+- *Not carried over:* passwords (they are in the system vault, not the file, and the vault is not read), client certificates, SQL mode and other extra options. Each is said in the list.
+
+The interface lists what was found, ticks everything that can come over except what is already here (same host, port and user), and saves the ticked ones through the same command as a connection typed by hand. A name already in use gets "(Workbench)" after it. The backend never saves anything on its own account, and the interface never names the file.
+
+**Not verified:** against a `connections.xml` written by a real Workbench; this computer has none. The format is from Workbench's source and the tests use files built to it.
+
 ## Time slices, deeper Pareto and control charts (after 0.2.0)
 
 Asked for, with a script of the user's own as the model: break a long query into time slices that are run one by one and put back together, so that none times out; run several at once as a hidden option; and show progress without taking room. Also a deeper Pareto chart and control chart, layouts for Reformat, a New button and a way to reset a graph.
