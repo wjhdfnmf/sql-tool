@@ -63,6 +63,23 @@
     if (outputMode === 'peek') setOutput('tucked', 350);
   }
 
+  /**
+   * Switches "hide the output while editing" on or off without a trip to
+   * Settings: a double-click on Output, or the keyboard. The output is left
+   * in view either way, so what changed can be seen: switched on, it goes
+   * away at the next click in the editor.
+   */
+  async function toggleAutoHide() {
+    clearTimeout(outputTimer);
+    workspace.showOutput = true;
+    outputMode = 'open';
+    try {
+      await settings.save({ ...$state.snapshot(settings.current), autoHideOutput: !settings.current.autoHideOutput });
+    } catch (e) {
+      tab.report(asUiError(e).message);
+    }
+  }
+
   // A query that starts always brings its output into view.
   $effect(() => {
     if (tab.running) {
@@ -623,6 +640,7 @@
     const key = e.key.toLowerCase();
     if (key === 't' && !e.shiftKey && !e.altKey) workspace.addTab();
     else if (key === 'o' && !e.shiftKey && !e.altKey) void openScript();
+    else if (key === 'o' && e.shiftKey && !e.altKey) void toggleAutoHide();
     else if (key === 's' && !e.altKey) void saveScript(tab, e.shiftKey);
     else if (key === 'w' && !e.shiftKey && !e.altKey) requestClose(tab);
     else if (key === 'b' && !e.shiftKey && !e.altKey) reformat();
@@ -827,8 +845,13 @@
         <button class="primary" disabled={tab.running} title={`Execute the selection, or everything (${keys('Mod+Shift+Enter')})`} onclick={() => run(tab, 'script')}>
           &#9654; Execute
         </button>
-        <button disabled={tab.running} title={`Execute the statement under the cursor (${keys('Mod+Enter')})`} onclick={() => run(tab, 'statement')}>
-          Execute Statement
+        <button
+          disabled={tab.running}
+          aria-label="Execute statement"
+          title={`Execute Statement: run the statement under the cursor (${keys('Mod+Enter')})`}
+          onclick={() => run(tab, 'statement')}
+        >
+          ES
         </button>
         <button disabled={tab.running} title={`Show the execution plan of the statement under the cursor (${keys('Mod+Alt+X')})`} onclick={() => run(tab, 'explain')}>
           Explain
@@ -859,12 +882,16 @@
         >
         <button
           class="pane-toggle"
+          class:auto={autoHide}
           aria-pressed={workspace.showOutput}
-          title="Show or hide the output (messages and results)"
-          onclick={() => {
-            if (tucked && workspace.showOutput) setOutput('open');
+          title={`Show or hide the output (messages and results). Double-click, or press ${keys('Mod+Shift+O')}, to have it hide itself while you edit: that is ${autoHide ? 'on' : 'off'} now.`}
+          onclick={(e) => {
+            // The second click of a double-click. The first has already been acted on; switching puts the output back in view.
+            if (e.detail === 2) void toggleAutoHide();
+            else if (tucked && workspace.showOutput) setOutput('open');
             else workspace.showOutput = !workspace.showOutput;
-          }}>Output</button
+          }}
+          >Output</button
         >
       </div>
 
@@ -1116,6 +1143,20 @@
     color: var(--text);
   }
 
+  /* The Output button takes the theme's colour while the output hides itself
+     during editing. A colour and not a mark beside the word, so the button
+     stays the width it was and the row of buttons does not wrap. */
+  .toolbar .pane-toggle.auto {
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+    color: color-mix(in srgb, var(--accent) 55%, var(--muted));
+  }
+
+  /* A tint of the colour, not the colour itself: it is a state to notice, not a call to press. */
+  .toolbar .pane-toggle.auto[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--accent) 14%, var(--panel-2));
+    color: var(--text);
+  }
+
   .slices {
     display: inline-flex;
     align-items: center;
@@ -1265,10 +1306,17 @@
   }
 
   .tab-nav button {
+    min-width: 26px;
     padding: 0 6px;
-    font-size: 15px;
-    line-height: 22px;
-    color: var(--muted);
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 26px;
+    color: var(--text);
+  }
+
+  /* The triangle is a small glyph to begin with. */
+  .tab-nav button:last-child {
+    font-size: 18px;
   }
 
   .editor-tab > button:first-child {

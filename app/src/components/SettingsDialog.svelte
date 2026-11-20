@@ -217,7 +217,7 @@
               <span class="muted note">
                 A click in the editor puts the output away, so the editor has the whole height. Move the pointer to the bottom edge and it
                 comes back at the height it had; click in it and it stays until the editor is clicked again. Running a query always shows
-                it.
+                it. Double-clicking Output in the editor's toolbar switches this too.
               </span>
             </div>
             <input type="checkbox" bind:checked={draft.autoHideOutput} />
