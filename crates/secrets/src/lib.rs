@@ -14,9 +14,7 @@ fn entry(profile_id: &str) -> Result<Entry, String> {
 }
 
 pub fn save(profile_id: &str, password: &SecretString) -> Result<(), String> {
-    entry(profile_id)?
-        .set_password(password.expose_secret())
-        .map_err(|e| e.to_string())
+    entry(profile_id)?.set_password(password.expose_secret()).map_err(|e| e.to_string())
 }
 
 /// `Ok(None)` when no password is stored for this profile.

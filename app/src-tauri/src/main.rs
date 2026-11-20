@@ -25,8 +25,8 @@ use sqltool_core::slices;
 use sqltool_core::table::{self, IndexSpec, TableSpec};
 use sqltool_core::workbench;
 use sqltool_core::{
-    ddl, split, ApprovedFiles, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore,
-    ResultStore, RunEvent, SavedProfile, ServerInfo, Session, Settings, SettingsStore, TlsMode,
+    ddl, split, ApprovedFiles, Canceller, ColumnInfo, ConnectProfile, Error, History, HistoryEntry, ObjectKind, ProfileStore, ResultStore,
+    RunEvent, SavedProfile, ServerInfo, Session, Settings, SettingsStore, TlsMode,
 };
 use tauri::ipc::{Channel, Response};
 use tauri::{Emitter, Manager, State};
@@ -51,10 +51,7 @@ struct UiError {
 }
 
 fn ui_error(kind: &str, message: impl Into<String>) -> UiError {
-    UiError {
-        kind: kind.into(),
-        message: message.into(),
-    }
+    UiError { kind: kind.into(), message: message.into() }
 }
 
 impl From<Error> for UiError {
@@ -142,9 +139,7 @@ impl Workspace {
 /// Runs work that can take a while (sorting, copying, writing a file) on a
 /// thread meant for that, so the window and other commands stay responsive.
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, UiError> {
-    tauri::async_runtime::spawn_blocking(work)
-        .await
-        .map_err(|e| ui_error("other", e.to_string()))
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| ui_error("other", e.to_string()))
 }
 
 #[cfg(feature = "devtools")]
@@ -212,21 +207,11 @@ impl AppState {
     }
 
     fn workspace(&self, id: u64) -> Result<Arc<Workspace>, UiError> {
-        self.workspaces
-            .lock()
-            .unwrap()
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| ui_error("not-connected", "This connection is no longer open."))
+        self.workspaces.lock().unwrap().get(&id).cloned().ok_or_else(|| ui_error("not-connected", "This connection is no longer open."))
     }
 
     fn result(&self, id: u64) -> Result<Arc<ResultStore>, UiError> {
-        self.results
-            .lock()
-            .unwrap()
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| ui_error("no-result", "This result is no longer available."))
+        self.results.lock().unwrap().get(&id).cloned().ok_or_else(|| ui_error("no-result", "This result is no longer available."))
     }
 
     /// The chart data kept for a result, started on first use.
@@ -253,13 +238,8 @@ struct ProfileDto {
 }
 
 fn profile_dto(profile: SavedProfile) -> ProfileDto {
-    let has_password =
-        profile.save_password && matches!(sqltool_secrets::load(&profile.id), Ok(Some(_)));
-    ProfileDto {
-        profile,
-        has_password,
-        keychain_note: None,
-    }
+    let has_password = profile.save_password && matches!(sqltool_secrets::load(&profile.id), Ok(Some(_)));
+    ProfileDto { profile, has_password, keychain_note: None }
 }
 
 /// Removes a connection's password from the keychain. A keychain that cannot
@@ -284,11 +264,7 @@ fn profiles_list(state: State<'_, AppState>) -> Result<Vec<ProfileDto>, UiError>
 /// Saves the profile. `password` is stored in the keychain when the profile
 /// asks for that; `None` leaves an already stored password alone.
 #[tauri::command(async)]
-fn profile_save(
-    state: State<'_, AppState>,
-    profile: SavedProfile,
-    password: Option<String>,
-) -> Result<ProfileDto, UiError> {
+fn profile_save(state: State<'_, AppState>, profile: SavedProfile, password: Option<String>) -> Result<ProfileDto, UiError> {
     let saved = state.profiles.upsert(profile)?;
     // The connection is saved by now. A keychain that cannot be used must
     // not turn that into a failure: reported as one, a second Save would
@@ -304,9 +280,7 @@ fn profile_save(
             }
         }
     } else if let Err(e) = forget_password(&saved.id) {
-        note = Some(format!(
-            "The connection was saved, but the password stored for it could not be removed from the keychain. ({e})"
-        ));
+        note = Some(format!("The connection was saved, but the password stored for it could not be removed from the keychain. ({e})"));
     }
     let mut dto = profile_dto(saved);
     dto.keychain_note = note;
@@ -332,10 +306,7 @@ fn profiles_arrange(state: State<'_, AppState>, arrangement: Vec<Arranged>) -> R
 fn profile_delete(state: State<'_, AppState>, id: String) -> Result<(), UiError> {
     state.profiles.delete(&id)?;
     forget_password(&id).map_err(|e| {
-        ui_error(
-            "keychain",
-            format!("The connection was removed, but its password could not be removed from the keychain: {e}"),
-        )
+        ui_error("keychain", format!("The connection was removed, but its password could not be removed from the keychain: {e}"))
     })
 }
 
@@ -452,11 +423,7 @@ async fn certificate_probe(host: String, port: u16) -> Result<sqltool_core::prob
 
 /// Connects with the given settings and disconnects again.
 #[tauri::command]
-async fn connection_test(
-    state: State<'_, AppState>,
-    profile: SavedProfile,
-    password: Option<String>,
-) -> Result<ServerInfo, UiError> {
+async fn connection_test(state: State<'_, AppState>, profile: SavedProfile, password: Option<String>) -> Result<ServerInfo, UiError> {
     let password = resolve_password(&profile, password)?;
     let mut connect = profile.to_connect_profile(password);
     connect.connect_timeout = state.settings().connect_timeout();
@@ -467,33 +434,13 @@ async fn connection_test(
 }
 
 #[tauri::command]
-async fn connect(
-    state: State<'_, AppState>,
-    profile_id: String,
-    password: Option<String>,
-) -> Result<WorkspaceDto, UiError> {
-    let saved = state
-        .profiles
-        .get(&profile_id)?
-        .ok_or_else(|| ui_error("no-profile", "This connection no longer exists."))?;
+async fn connect(state: State<'_, AppState>, profile_id: String, password: Option<String>) -> Result<WorkspaceDto, UiError> {
+    let saved = state.profiles.get(&profile_id)?.ok_or_else(|| ui_error("no-profile", "This connection no longer exists."))?;
     let password = resolve_password(&saved, password)?;
-    let name = if saved.name.trim().is_empty() {
-        format!("{}@{}", saved.user, saved.host)
-    } else {
-        saved.name.clone()
-    };
+    let name = if saved.name.trim().is_empty() { format!("{}@{}", saved.user, saved.host) } else { saved.name.clone() };
     let mut profile = saved.to_connect_profile(password);
     profile.connect_timeout = state.settings().connect_timeout();
-    open_workspace(
-        &state,
-        profile,
-        Some(saved.id.clone()),
-        name,
-        saved.color.clone(),
-        saved.read_only,
-        saved.production,
-    )
-    .await
+    open_workspace(&state, profile, Some(saved.id.clone()), name, saved.color.clone(), saved.read_only, saved.production).await
 }
 
 #[tauri::command]
@@ -603,10 +550,7 @@ enum RunMsg {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 fn preview(sql: &str) -> String {
@@ -667,10 +611,7 @@ async fn run(
     let statements = select_statements(&script, &mode);
 
     let tab = workspace.tab(&tab_id).await?;
-    let mut session = tab
-        .session
-        .try_lock()
-        .map_err(|_| ui_error("busy", "A query is already running in this tab."))?;
+    let mut session = tab.session.try_lock().map_err(|_| ui_error("busy", "A query is already running in this tab."))?;
     tab.cancel_requested.store(false, Ordering::Relaxed);
 
     // Nothing has been sent yet, so reopening a dropped connection here can
@@ -680,12 +621,7 @@ async fn run(
             let _ = on_event.send(RunMsg::Reconnected);
         }
         Ok(false) => {}
-        Err(e) => {
-            return Err(ui_error(
-                e.kind(),
-                format!("The connection to the server was lost and could not be reopened: {e}"),
-            ))
-        }
+        Err(e) => return Err(ui_error(e.kind(), format!("The connection to the server was lost and could not be reopened: {e}"))),
     }
     workspace.adopt_default_schema(&mut session).await;
     let settings = state.settings();
@@ -697,11 +633,7 @@ async fn run(
     let mut failed = false;
 
     for (index, statement) in statements.iter().enumerate() {
-        let _ = on_event.send(RunMsg::Started {
-            index,
-            total,
-            sql: preview(&statement.text),
-        });
+        let _ = on_event.send(RunMsg::Started { index, total, sql: preview(&statement.text) });
         let started = Instant::now();
         let elapsed = || started.elapsed().as_millis() as u64;
         let mut summary = String::new();
@@ -739,42 +671,16 @@ async fn run(
                         current_result = state.id();
                         let columns = store.status().columns;
                         state.results.lock().unwrap().insert(current_result, store);
-                        RunMsg::ResultSet {
-                            index,
-                            result_id: current_result,
-                            columns,
-                            sql: statement.text.clone(),
-                        }
+                        RunMsg::ResultSet { index, result_id: current_result, columns, sql: statement.text.clone() }
                     }
-                    RunEvent::Progress { rows } => RunMsg::Progress {
-                        result_id: current_result,
-                        rows,
-                    },
+                    RunEvent::Progress { rows } => RunMsg::Progress { result_id: current_result, rows },
                     RunEvent::ResultDone { rows, truncated } => {
                         summary = format!("{rows} rows{}", if truncated { " (row limit reached)" } else { "" });
-                        RunMsg::ResultDone {
-                            index,
-                            result_id: current_result,
-                            rows,
-                            truncated,
-                            elapsed_ms: elapsed(),
-                        }
+                        RunMsg::ResultDone { index, result_id: current_result, rows, truncated, elapsed_ms: elapsed() }
                     }
-                    RunEvent::Done {
-                        affected_rows,
-                        last_insert_id,
-                        info,
-                        warnings,
-                    } => {
+                    RunEvent::Done { affected_rows, last_insert_id, info, warnings } => {
                         summary = format!("{affected_rows} rows affected");
-                        RunMsg::Done {
-                            index,
-                            affected_rows,
-                            last_insert_id,
-                            info,
-                            warnings,
-                            elapsed_ms: elapsed(),
-                        }
+                        RunMsg::Done { index, affected_rows, last_insert_id, info, warnings, elapsed_ms: elapsed() }
                     }
                 };
                 let _ = on_event.send(message);
@@ -813,11 +719,7 @@ async fn run(
                 );
             }
             failed = true;
-            let _ = on_event.send(RunMsg::Failed {
-                index,
-                message: summary.clone(),
-                elapsed_ms: elapsed(),
-            });
+            let _ = on_event.send(RunMsg::Failed { index, message: summary.clone(), elapsed_ms: elapsed() });
         }
         // History is a convenience; failing to write it must not fail the query.
         if settings.keep_history {
@@ -846,12 +748,7 @@ async fn run(
     if tab.cancel_requested.swap(false, Ordering::Relaxed) {
         session.absorb_stray_kill().await;
     }
-    let _ = on_event.send(RunMsg::Finished {
-        ran,
-        total,
-        failed,
-        elapsed_ms: run_started.elapsed().as_millis() as u64,
-    });
+    let _ = on_event.send(RunMsg::Finished { ran, total, failed, elapsed_ms: run_started.elapsed().as_millis() as u64 });
     Ok(())
 }
 
@@ -904,10 +801,7 @@ async fn run_sliced(
     let plan = Arc::new(slices::plan(&sql, &start, &end, step_secs)?);
     let whole = slices::whole(&sql, &start, &end)?;
     let tab = workspace.tab(&tab_id).await?;
-    let mut session = tab
-        .session
-        .try_lock()
-        .map_err(|_| ui_error("busy", "A query is already running in this tab."))?;
+    let mut session = tab.session.try_lock().map_err(|_| ui_error("busy", "A query is already running in this tab."))?;
     tab.cancel_requested.store(false, Ordering::Relaxed);
     let settings = state.settings();
     let total = plan.len();
@@ -1055,10 +949,7 @@ async fn run_sliced(
 
     if let Some(message) = &mut failure {
         if announced && added > 0 {
-            message.push_str(&format!(
-                ". The result holds the {added} of {total} slices before it, up to {}",
-                plan[added - 1].end
-            ));
+            message.push_str(&format!(". The result holds the {added} of {total} slices before it, up to {}", plan[added - 1].end));
         }
     }
     if truncated {
@@ -1066,7 +957,13 @@ async fn run_sliced(
     }
     combined.finish(failure.clone());
     if announced {
-        let _ = on_event.send(RunMsg::ResultDone { index: 0, result_id, rows, truncated: truncated || failure.is_some(), elapsed_ms: elapsed() });
+        let _ = on_event.send(RunMsg::ResultDone {
+            index: 0,
+            result_id,
+            rows,
+            truncated: truncated || failure.is_some(),
+            elapsed_ms: elapsed(),
+        });
     }
     if let Some(message) = &failure {
         let _ = on_event.send(RunMsg::Failed { index: 0, message: message.clone(), elapsed_ms: elapsed() });
@@ -1147,23 +1044,12 @@ struct CellDto {
 /// The complete value of one cell, for the value viewer and for copying.
 #[tauri::command(async)]
 fn get_cell(state: State<'_, AppState>, result_id: u64, row: u64, column: usize) -> Result<CellDto, UiError> {
-    let value = state
-        .result(result_id)?
-        .cell(row, column)
-        .ok_or_else(|| ui_error("no-cell", "That cell does not exist."))?;
+    let value = state.result(result_id)?.cell(row, column).ok_or_else(|| ui_error("no-cell", "That cell does not exist."))?;
     Ok(match value {
-        None => CellDto {
-            text: None,
-            bytes: 0,
-            truncated: false,
-        },
+        None => CellDto { text: None, bytes: 0, truncated: false },
         Some(bytes) => {
             let shown = &bytes[..bytes.len().min(MAX_CELL_BYTES)];
-            CellDto {
-                text: Some(String::from_utf8_lossy(shown).into_owned()),
-                bytes: bytes.len(),
-                truncated: bytes.len() > MAX_CELL_BYTES,
-            }
+            CellDto { text: Some(String::from_utf8_lossy(shown).into_owned()), bytes: bytes.len(), truncated: bytes.len() > MAX_CELL_BYTES }
         }
     })
 }
@@ -1188,23 +1074,14 @@ async fn schema_list(state: State<'_, AppState>, workspace_id: u64) -> Result<Ve
 }
 
 #[tauri::command]
-async fn schema_objects(
-    state: State<'_, AppState>,
-    workspace_id: u64,
-    schema: String,
-) -> Result<SchemaObjects, UiError> {
+async fn schema_objects(state: State<'_, AppState>, workspace_id: u64, schema: String) -> Result<SchemaObjects, UiError> {
     let workspace = state.workspace(workspace_id)?;
     let mut session = workspace.utility().await?;
     Ok(session.schema_objects(&schema).await?)
 }
 
 #[tauri::command]
-async fn table_columns(
-    state: State<'_, AppState>,
-    workspace_id: u64,
-    schema: String,
-    table: String,
-) -> Result<Vec<ColumnEntry>, UiError> {
+async fn table_columns(state: State<'_, AppState>, workspace_id: u64, schema: String, table: String) -> Result<Vec<ColumnEntry>, UiError> {
     let workspace = state.workspace(workspace_id)?;
     let mut session = workspace.utility().await?;
     Ok(session.table_columns(&schema, &table).await?)
@@ -1223,11 +1100,7 @@ async fn table_details(
 }
 
 #[tauri::command]
-async fn schema_defaults(
-    state: State<'_, AppState>,
-    workspace_id: u64,
-    schema: String,
-) -> Result<Option<SchemaDefaults>, UiError> {
+async fn schema_defaults(state: State<'_, AppState>, workspace_id: u64, schema: String) -> Result<Option<SchemaDefaults>, UiError> {
     let workspace = state.workspace(workspace_id)?;
     let mut session = workspace.utility().await?;
     Ok(session.schema_defaults(&schema).await?)
@@ -1253,11 +1126,7 @@ async fn collations(state: State<'_, AppState>, workspace_id: u64, charset: Stri
 #[tauri::command]
 fn schema_ddl(alter: bool, name: String, charset: Option<String>, collation: Option<String>) -> Result<String, UiError> {
     let (charset, collation) = (charset.as_deref(), collation.as_deref());
-    Ok(if alter {
-        ddl::alter_schema(&name, charset, collation)?
-    } else {
-        ddl::create_schema(&name, charset, collation)?
-    })
+    Ok(if alter { ddl::alter_schema(&name, charset, collation)? } else { ddl::create_schema(&name, charset, collation)? })
 }
 
 /// A script that changes an existing object, built from its current definition.
@@ -1295,9 +1164,7 @@ struct ScriptFile {
 }
 
 fn file_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// Shows the native open or save dialog and returns the chosen path. The
@@ -1307,11 +1174,7 @@ fn file_name(path: &std::path::Path) -> String {
 async fn pick_file(app: &tauri::AppHandle, save_as: Option<&str>, start: Option<PathBuf>) -> Option<PathBuf> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut dialog = app
-        .dialog()
-        .file()
-        .add_filter("SQL scripts", &["sql"])
-        .add_filter("All files", &["*"]);
+    let mut dialog = app.dialog().file().add_filter("SQL scripts", &["sql"]).add_filter("All files", &["*"]);
     if let Some(folder) = start {
         dialog = dialog.set_directory(folder);
     }
@@ -1364,11 +1227,7 @@ async fn folder_pick(app: tauri::AppHandle, start: Option<String>) -> Option<Str
 /// Lets the user pick a script and returns its contents. `None` if cancelled.
 /// The dialog starts in the connection's script folder.
 #[tauri::command]
-async fn script_open(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    workspace_id: Option<u64>,
-) -> Result<Option<ScriptFile>, UiError> {
+async fn script_open(app: tauri::AppHandle, state: State<'_, AppState>, workspace_id: Option<u64>) -> Result<Option<ScriptFile>, UiError> {
     let Some(path) = pick_file(&app, None, script_folder(&state, workspace_id)).await else {
         return Ok(None);
     };
@@ -1376,17 +1235,12 @@ async fn script_open(
     if std::fs::metadata(&path).map_err(storage)?.len() > MAX_SCRIPT_BYTES {
         return Err(ui_error("storage", "That file is larger than 20 MB, which is more than the editor opens."));
     }
-    let text = sqltool_core::decode_text(&std::fs::read(&path).map_err(storage)?).ok_or_else(|| {
-        ui_error("storage", "That file is not text in UTF-8 or UTF-16. Convert it to UTF-8 to open it here.")
-    })?;
+    let text = sqltool_core::decode_text(&std::fs::read(&path).map_err(storage)?)
+        .ok_or_else(|| ui_error("storage", "That file is not text in UTF-8 or UTF-16. Convert it to UTF-8 to open it here."))?;
     // The file is open either way; not being able to remember it only means
     // Save will ask where after a restart.
     let _ = state.approved_files.add(path.clone());
-    Ok(Some(ScriptFile {
-        name: file_name(&path),
-        path: path.to_string_lossy().into_owned(),
-        text,
-    }))
+    Ok(Some(ScriptFile { name: file_name(&path), path: path.to_string_lossy().into_owned(), text }))
 }
 
 #[derive(Serialize)]
@@ -1475,14 +1329,9 @@ async fn script_save(
             None => return Ok(None),
         },
     };
-    std::fs::write(&target, &text)
-        .map_err(|e| ui_error("storage", format!("Could not save {}: {e}", target.display())))?;
+    std::fs::write(&target, &text).map_err(|e| ui_error("storage", format!("Could not save {}: {e}", target.display())))?;
     let _ = state.approved_files.add(target.clone());
-    Ok(Some(ScriptFile {
-        name: file_name(&target),
-        path: target.to_string_lossy().into_owned(),
-        text: String::new(),
-    }))
+    Ok(Some(ScriptFile { name: file_name(&target), path: target.to_string_lossy().into_owned(), text: String::new() }))
 }
 
 // ---------- sorting, filtering and exporting results ----------
@@ -1536,8 +1385,14 @@ struct Exported {
 }
 
 /// Asks where to save an export. `None` if the user cancels.
-async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat) -> Option<PathBuf> {
-    pick_save_file(app, "result", format.extension()).await
+///
+/// `name` is what the interface suggests calling the file: the table the
+/// rows came from, or the script. It is only a suggestion, cleaned of
+/// anything that is not a plain file name; the user picks the folder.
+async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat, name: Option<&str>) -> Option<PathBuf> {
+    // A test run finds its exports by a fixed name.
+    let stem = if unattended() { export::file_stem(None) } else { export::file_stem(name) };
+    pick_save_file(app, &stem, format.extension()).await
 }
 
 /// Asks where to save a file called `name.extension`. `None` if the user cancels.
@@ -1553,13 +1408,11 @@ async fn pick_save_file(app: &tauri::AppHandle, name: &str, extension: &str) -> 
         }
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .add_filter(extension.to_uppercase(), &[extension])
-        .set_file_name(format!("{name}.{extension}"))
-        .save_file(move |path| {
+    app.dialog().file().add_filter(extension.to_uppercase(), &[extension]).set_file_name(format!("{name}.{extension}")).save_file(
+        move |path| {
             let _ = tx.send(path);
-        });
+        },
+    );
     rx.await.ok().flatten().and_then(|p| p.into_path().ok())
 }
 
@@ -1570,6 +1423,8 @@ async fn pick_save_file(app: &tauri::AppHandle, name: &str, extension: &str) -> 
 ///
 /// It runs in a connection of its own under `tab_id`, so the tab that showed
 /// the result stays usable, and `cancel` with that id stops it.
+// A command's arguments are the fields of the message the interface sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn export_query(
     app: tauri::AppHandle,
@@ -1579,6 +1434,7 @@ async fn export_query(
     sql: String,
     format: ExportFormat,
     table: String,
+    name: Option<String>,
     on_progress: Channel<u64>,
 ) -> Result<Option<Exported>, UiError> {
     let workspace = state.workspace(workspace_id)?;
@@ -1591,7 +1447,7 @@ async fn export_query(
              Raise the row limit, run the statement again, and export the rows shown.",
         ));
     }
-    let Some(path) = pick_export_file(&app, format).await else {
+    let Some(path) = pick_export_file(&app, format, name.as_deref()).await else {
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
@@ -1618,12 +1474,7 @@ async fn export_query(
     workspace.tabs.lock().await.remove(&tab_id);
 
     match outcome {
-        Ok(rows) => Ok(Some(Exported {
-            path: path.to_string_lossy().into_owned(),
-            rows,
-            truncated: false,
-            filtered: false,
-        })),
+        Ok(rows) => Ok(Some(Exported { path: path.to_string_lossy().into_owned(), rows, truncated: false, filtered: false })),
         Err(e) => {
             // An incomplete file would pass for the whole result. Remove it.
             let _ = std::fs::remove_file(&path);
@@ -1648,9 +1499,10 @@ async fn export_result(
     result_id: u64,
     format: ExportFormat,
     table: String,
+    name: Option<String>,
 ) -> Result<Option<Exported>, UiError> {
     let store = state.result(result_id)?;
-    let Some(path) = pick_export_file(&app, format).await else {
+    let Some(path) = pick_export_file(&app, format, name.as_deref()).await else {
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
@@ -1670,10 +1522,7 @@ async fn export_result(
             // An incomplete file would pass for the whole result. Remove it.
             let _ = std::fs::remove_file(&path);
             return Err(match failed {
-                Ok(Err(e)) => ui_error(
-                    "storage",
-                    format!("Could not write {}: {e}. The incomplete file was removed.", path.display()),
-                ),
+                Ok(Err(e)) => ui_error("storage", format!("Could not write {}: {e}. The incomplete file was removed.", path.display())),
                 Err(e) => ui_error(&e.kind, format!("{} The incomplete file was removed.", e.message)),
                 Ok(Ok(_)) => unreachable!("handled above"),
             });
@@ -1743,10 +1592,7 @@ async fn edit_target(state: State<'_, AppState>, workspace_id: u64, result_id: u
     }
     let store = state.result(result_id)?;
     let mut session = workspace.utility().await?;
-    session
-        .edit_target(&store)
-        .await
-        .map_err(|e| ui_error("not-editable", e.to_string()))
+    session.edit_target(&store).await.map_err(|e| ui_error("not-editable", e.to_string()))
 }
 
 /// The statements the edits would run, with values written in, for review.
@@ -1772,17 +1618,11 @@ async fn apply_edits(
     }
     let store = state.result(result_id)?;
     let tab = workspace.tab(&tab_id).await?;
-    let mut session = tab
-        .session
-        .try_lock()
-        .map_err(|_| ui_error("busy", "A query is running in this tab. Wait for it to finish."))?;
+    let mut session = tab.session.try_lock().map_err(|_| ui_error("busy", "A query is running in this tab. Wait for it to finish."))?;
     session.ensure_alive(IDLE_CHECK).await?;
     let keep_history = state.settings().keep_history;
     let started = Instant::now();
-    let target = session
-        .edit_target(&store)
-        .await
-        .map_err(|e| ui_error("not-editable", e.to_string()))?;
+    let target = session.edit_target(&store).await.map_err(|e| ui_error("not-editable", e.to_string()))?;
     let planned = edit::plan(&target, &store, &edits)?;
     let outcome = session.apply(&planned).await;
     for statement in planned.iter().filter(|_| keep_history) {
@@ -1814,32 +1654,18 @@ struct TableKeys {
 
 /// Keys and indexes of a table, for the information pane.
 #[tauri::command]
-async fn table_keys(
-    state: State<'_, AppState>,
-    workspace_id: u64,
-    schema: String,
-    table: String,
-) -> Result<Option<TableKeys>, UiError> {
+async fn table_keys(state: State<'_, AppState>, workspace_id: u64, schema: String, table: String) -> Result<Option<TableKeys>, UiError> {
     let workspace = state.workspace(workspace_id)?;
     let mut session = workspace.utility().await?;
     let Some(spec) = session.table_spec(&schema, &table).await? else {
         return Ok(None);
     };
-    Ok(Some(TableKeys {
-        primary_key: spec.primary_key,
-        indexes: spec.indexes,
-        foreign_keys: session.foreign_keys(&schema, &table).await?,
-    }))
+    Ok(Some(TableKeys { primary_key: spec.primary_key, indexes: spec.indexes, foreign_keys: session.foreign_keys(&schema, &table).await? }))
 }
 
 /// A table as the designer edits it. `None` if it does not exist.
 #[tauri::command]
-async fn table_spec(
-    state: State<'_, AppState>,
-    workspace_id: u64,
-    schema: String,
-    table: String,
-) -> Result<Option<TableSpec>, UiError> {
+async fn table_spec(state: State<'_, AppState>, workspace_id: u64, schema: String, table: String) -> Result<Option<TableSpec>, UiError> {
     let workspace = state.workspace(workspace_id)?;
     let mut session = workspace.utility().await?;
     Ok(session.table_spec(&schema, &table).await?)
@@ -1866,13 +1692,7 @@ enum ObjectAction {
 
 /// SQL for dropping, truncating or renaming, for the confirmation dialog.
 #[tauri::command]
-fn object_ddl(
-    action: ObjectAction,
-    kind: ObjectKind,
-    schema: String,
-    name: String,
-    new_name: Option<String>,
-) -> Result<String, UiError> {
+fn object_ddl(action: ObjectAction, kind: ObjectKind, schema: String, name: String, new_name: Option<String>) -> Result<String, UiError> {
     Ok(match action {
         ObjectAction::Drop => table::drop_object(kind, &schema, &name),
         ObjectAction::DropSchema => table::drop_schema(&schema),
@@ -1883,11 +1703,7 @@ fn object_ddl(
 
 /// Table and column names of a schema, for editor completion.
 #[tauri::command]
-async fn completion_columns(
-    state: State<'_, AppState>,
-    workspace_id: u64,
-    schema: String,
-) -> Result<Vec<(String, String)>, UiError> {
+async fn completion_columns(state: State<'_, AppState>, workspace_id: u64, schema: String) -> Result<Vec<(String, String)>, UiError> {
     let workspace = state.workspace(workspace_id)?;
     let mut session = workspace.utility().await?;
     Ok(session.completion_columns(&schema).await?)
@@ -1896,11 +1712,7 @@ async fn completion_columns(
 // ---------- history ----------
 
 #[tauri::command(async)]
-fn history_list(
-    state: State<'_, AppState>,
-    search: Option<String>,
-    limit: Option<usize>,
-) -> Result<Vec<HistoryEntry>, UiError> {
+fn history_list(state: State<'_, AppState>, search: Option<String>, limit: Option<usize>) -> Result<Vec<HistoryEntry>, UiError> {
     Ok(state.history.list(search.as_deref(), limit.unwrap_or(200).min(2000))?)
 }
 
@@ -2172,8 +1984,7 @@ fn app_info(state: State<'_, AppState>) -> AppInfo {
 /// The app is being driven by one of its own tests, not by a person. Only
 /// ever true in a development build.
 fn unattended() -> bool {
-    cfg!(feature = "devtools")
-        && (std::env::var_os("SQLTOOL_SELFTEST_HOST").is_some() || std::env::var_os("SQLTOOL_SMOKE").is_some())
+    cfg!(feature = "devtools") && (std::env::var_os("SQLTOOL_SELFTEST_HOST").is_some() || std::env::var_os("SQLTOOL_SMOKE").is_some())
 }
 
 /// Opens a connection to a fake MySQL Enterprise server running inside the
@@ -2191,12 +2002,8 @@ async fn connect_demo(state: State<'_, AppState>) -> Result<WorkspaceDto, UiErro
             .demo
             .get_or_try_init(|| async {
                 let identity = generate_identity(&["127.0.0.1"]);
-                let server =
-                    FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(identity.clone()))).await?;
-                Ok::<_, std::io::Error>(Demo {
-                    server,
-                    ca_pem: identity.ca_pem,
-                })
+                let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(identity.clone()))).await?;
+                Ok::<_, std::io::Error>(Demo { server, ca_pem: identity.ca_pem })
             })
             .await
             .map_err(|e| ui_error("other", e.to_string()))?;
@@ -2318,6 +2125,17 @@ fn main() {
                 let _ = window.set_focus();
             }
         }));
+    }
+    // The window opens where it was last, at the size it had. The place is
+    // kept in the app's usual folder, so not when the data folder is set by
+    // hand: a test run must not move the window of the installed app.
+    if std::env::var_os("SQLTOOL_DATA_DIR").is_none() {
+        use tauri_plugin_window_state::StateFlags;
+        builder = builder.plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        );
     }
     #[cfg(target_os = "macos")]
     {

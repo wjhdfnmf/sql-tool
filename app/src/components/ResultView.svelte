@@ -121,6 +121,11 @@
     return exportTable.trim() || target?.table || 'table_name';
   }
 
+  /** What to suggest calling an exported file: the table the rows are from, else the script they were run from. */
+  function exportName(): string | null {
+    return exportTable.trim() || target?.table || (tab.filePath ? tab.title.replace(/\.sql$/i, '') : null);
+  }
+
   async function writeClipboard(text: string): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(text);
@@ -190,7 +195,7 @@
     try {
       // What the grid shows at this moment: the file must hold exactly these rows.
       const shown = rows;
-      const done = await backend.exportResult(result.id, format, tableName());
+      const done = await backend.exportResult(result.id, format, tableName(), exportName());
       if (done) {
         if (done.rows !== shown) {
           // Never expected. If it happens the file is not what is on screen, and that must not pass quietly.
@@ -221,7 +226,7 @@
     exportTab = `export-${crypto.randomUUID()}`;
     note = null;
     try {
-      const done = await backend.exportQuery(workspace.info.id, exportTab, result.sql, format, tableName(), (rows) => {
+      const done = await backend.exportQuery(workspace.info.id, exportTab, result.sql, format, tableName(), exportName(), (rows) => {
         exportProgress = rows;
       });
       if (done) note = `Exported all ${formatCount(done.rows)} rows to ${done.path}`;

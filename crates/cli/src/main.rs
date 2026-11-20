@@ -97,10 +97,7 @@ async fn run_checks(profile: &ConnectProfile, checks: &Checks) -> bool {
     line(
         true,
         "server",
-        format!(
-            "{flavor} {}.{}.{}  (reported as \"{}\")",
-            info.version.major, info.version.minor, info.version.patch, info.version.raw
-        ),
+        format!("{flavor} {}.{}.{}  (reported as \"{}\")", info.version.major, info.version.minor, info.version.patch, info.version.raw),
     );
     line(true, "logged in as", &info.current_user);
     match (&info.tls_version, profile.tls) {
@@ -195,8 +192,7 @@ async fn run_checks(profile: &ConnectProfile, checks: &Checks) -> bool {
 async fn check(args: CheckArgs) -> Result<bool> {
     let password = match std::env::var("SQLTOOL_PASSWORD") {
         Ok(p) => p,
-        Err(_) => rpassword::prompt_password(format!("Password for {}@{}: ", args.user, args.host))
-            .context("reading password")?,
+        Err(_) => rpassword::prompt_password(format!("Password for {}@{}: ", args.user, args.host)).context("reading password")?,
     };
     let mut profile = ConnectProfile::new(args.host.clone(), args.port, args.user.clone(), password.into());
     profile.database = args.database;
@@ -211,21 +207,15 @@ async fn check(args: CheckArgs) -> Result<bool> {
     profile.accept_cleartext_on_unverified_transport = args.accept_cleartext_risk;
 
     println!("{}:{} as {}", args.host, args.port, args.user);
-    Ok(run_checks(
-        &profile,
-        &Checks {
-            metadata: true,
-            stream_query: args.stream_query,
-        },
-    )
-    .await)
+    Ok(run_checks(&profile, &Checks { metadata: true, stream_query: args.stream_query }).await)
 }
 
 async fn demo(rows: u64) -> Result<bool> {
     const PASSWORD: &str = "demo-password-not-a-real-secret";
     let mut all_ok = true;
 
-    let presets: [(&str, fn(&str, Option<sqltool_fakeserver::TlsIdentity>) -> Config); 2] = [
+    type Preset = fn(&str, Option<sqltool_fakeserver::TlsIdentity>) -> Config;
+    let presets: [(&str, Preset); 2] = [
         ("fake MySQL Enterprise 8.4.3, LDAP account", Config::mysql_8_4_enterprise_ldap),
         ("fake MySQL Enterprise 5.7.37, LDAP account, TLS 1.2 only", Config::mysql_5_7_enterprise_ldap),
     ];
@@ -237,14 +227,7 @@ async fn demo(rows: u64) -> Result<bool> {
         profile.allow_cleartext_auth = true;
 
         println!("{title}");
-        all_ok &= run_checks(
-            &profile,
-            &Checks {
-                metadata: false,
-                stream_query: Some(format!("SELECT fake_rows({rows}, 10)")),
-            },
-        )
-        .await;
+        all_ok &= run_checks(&profile, &Checks { metadata: false, stream_query: Some(format!("SELECT fake_rows({rows}, 10)")) }).await;
         let seen = server.observed();
         let delivered = seen.cleartext_password.as_deref() == Some(PASSWORD) && seen.cleartext_over_tls == Some(true);
         all_ok &= delivered;

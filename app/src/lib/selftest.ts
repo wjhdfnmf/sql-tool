@@ -347,7 +347,7 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     await backend.closeResults([done.resultId]);
     // Exporting every row of a query is refused for anything that is not a plain read.
     try {
-      await backend.exportQuery(workspace.id, `selftest-export-${workspace.id}`, 'DELETE FROM nothing_at_all', 'csv', '', () => {});
+      await backend.exportQuery(workspace.id, `selftest-export-${workspace.id}`, 'DELETE FROM nothing_at_all', 'csv', '', null, () => {});
       throw new Error('a statement that changes data was accepted for a full export');
     } catch (e) {
       expect(asUiError(e).kind === 'not-exportable', `unexpected: ${asUiError(e).kind}: ${asUiError(e).message}`);
@@ -369,7 +369,7 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
 
     const exported: Record<string, number> = {};
     for (const format of ['csv', 'sql'] as const) {
-      const saved = await backend.exportResult(done.resultId, format, 'copy');
+      const saved = await backend.exportResult(done.resultId, format, 'copy', 'people');
       expect(saved, 'the export was cancelled');
       expect(saved.rows === done.rows, `${format}: exported ${saved.rows} of the ${done.rows} rows held`);
       expect(!saved.truncated && !saved.filtered, `${format}: the export was marked partial: ${JSON.stringify(saved)}`);
@@ -377,7 +377,7 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     }
     // Sorted and filtered, the export follows what is shown.
     const visible = await backend.resultView(done.resultId, '77', 0, true);
-    const filtered = await backend.exportResult(done.resultId, 'tsv', '');
+    const filtered = await backend.exportResult(done.resultId, 'tsv', '', null);
     expect(filtered && filtered.rows === visible && filtered.filtered, `filtered export wrote ${filtered?.rows} of ${visible} visible rows`);
 
     // A chart is worked out from every row held, whatever the grid is filtered to (it still is, here).

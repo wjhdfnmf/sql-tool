@@ -42,9 +42,7 @@ async fn expect_tls_err(profile: &ConnectProfile) {
 #[tokio::test]
 async fn mysql_8_4_enterprise_cleartext_login_over_verified_tls() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
 
     let session = Session::connect(&ldap_profile(&server, &id)).await.unwrap();
     let info = session.info();
@@ -63,9 +61,7 @@ async fn mysql_8_4_enterprise_cleartext_login_over_verified_tls() {
 #[tokio::test]
 async fn mysql_5_7_enterprise_cleartext_login_over_tls_1_2() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_5_7_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_5_7_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
 
     let session = Session::connect(&ldap_profile(&server, &id)).await.unwrap();
     let info = session.info();
@@ -82,9 +78,7 @@ async fn mysql_5_7_enterprise_cleartext_login_over_tls_1_2() {
 #[tokio::test]
 async fn password_is_not_sent_when_cleartext_is_not_enabled() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
 
     let mut profile = ldap_profile(&server, &id);
     profile.allow_cleartext_auth = false;
@@ -96,43 +90,31 @@ async fn password_is_not_sent_when_cleartext_is_not_enabled() {
 
 #[tokio::test]
 async fn cleartext_without_tls_is_refused_before_connecting() {
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, None))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, None)).await.unwrap();
 
     let mut profile = ConnectProfile::new("127.0.0.1", server.port(), "ann", SecretString::from(PASSWORD));
     profile.allow_cleartext_auth = true;
     profile.tls = TlsMode::Disabled;
 
-    assert!(matches!(
-        expect_err(&profile).await,
-        Error::Policy(PolicyError::CleartextWithoutTls)
-    ));
+    assert!(matches!(expect_err(&profile).await, Error::Policy(PolicyError::CleartextWithoutTls)));
     assert_eq!(server.observed().connections, 0, "must not even open a socket");
 }
 
 #[tokio::test]
 async fn cleartext_with_unverified_tls_is_refused_before_connecting() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
 
     let mut profile = ldap_profile(&server, &id);
     profile.tls = TlsMode::Required;
 
-    assert!(matches!(
-        expect_err(&profile).await,
-        Error::Policy(PolicyError::CleartextWithUnverifiedTls)
-    ));
+    assert!(matches!(expect_err(&profile).await, Error::Policy(PolicyError::CleartextWithUnverifiedTls)));
     assert_eq!(server.observed().connections, 0);
 }
 
 #[tokio::test]
 async fn explicit_override_allows_cleartext_on_unverified_transport() {
-    let server = FakeServer::start(Config::mysql_5_7_enterprise_ldap(PASSWORD, None))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_5_7_enterprise_ldap(PASSWORD, None)).await.unwrap();
 
     let mut profile = ConnectProfile::new("127.0.0.1", server.port(), "ann", SecretString::from(PASSWORD));
     profile.allow_cleartext_auth = true;
@@ -147,9 +129,7 @@ async fn explicit_override_allows_cleartext_on_unverified_transport() {
 async fn server_signed_by_an_untrusted_ca_gets_no_password() {
     let real = identity();
     let someone_else = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(real)))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(real))).await.unwrap();
 
     let profile = ldap_profile(&server, &someone_else);
 
@@ -160,9 +140,7 @@ async fn server_signed_by_an_untrusted_ca_gets_no_password() {
 #[tokio::test]
 async fn host_name_mismatch_fails_verify_identity() {
     let id = generate_identity(&["db.example.test"]);
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
 
     expect_tls_err(&ldap_profile(&server, &id)).await;
     assert_eq!(server.observed().cleartext_password, None);
@@ -173,9 +151,7 @@ async fn host_name_mismatch_fails_verify_identity() {
 #[tokio::test]
 async fn verify_ca_accepts_a_host_name_mismatch() {
     let id = generate_identity(&["db.example.test"]);
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
 
     let mut profile = ldap_profile(&server, &id);
     profile.tls = TlsMode::VerifyCa;
@@ -185,9 +161,7 @@ async fn verify_ca_accepts_a_host_name_mismatch() {
 #[tokio::test]
 async fn tls_required_but_server_offers_none_is_refused() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, None))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, None)).await.unwrap();
 
     let profile = ldap_profile(&server, &id);
 
@@ -198,9 +172,7 @@ async fn tls_required_but_server_offers_none_is_refused() {
 #[tokio::test]
 async fn wrong_password_is_reported_as_access_denied() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap("a different password", Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap("a different password", Some(id.clone()))).await.unwrap();
 
     match expect_err(&ldap_profile(&server, &id)).await {
         Error::AccessDenied { code, .. } => assert_eq!(code, 1045),
@@ -230,9 +202,7 @@ async fn hostile_local_infile_request_uploads_nothing() {
 #[tokio::test]
 async fn running_query_can_be_cancelled_from_a_second_connection() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
     let mut session = Session::connect(&ldap_profile(&server, &id)).await.unwrap();
 
     let canceller = session.canceller();
@@ -257,19 +227,21 @@ async fn running_query_can_be_cancelled_from_a_second_connection() {
 #[tokio::test]
 async fn large_result_streams_row_by_row() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
     let mut session = Session::connect(&ldap_profile(&server, &id)).await.unwrap();
 
     let mut nulls = 0u64;
     let mut names = Vec::new();
     let stats = session
-        .stream("SELECT fake_rows(200000, 8)", |columns| names = columns, |row| {
-            if row.as_ref(4) == Some(&mysql_null()) {
-                nulls += 1;
-            }
-        })
+        .stream(
+            "SELECT fake_rows(200000, 8)",
+            |columns| names = columns,
+            |row| {
+                if row.as_ref(4) == Some(&mysql_null()) {
+                    nulls += 1;
+                }
+            },
+        )
         .await
         .unwrap();
 
@@ -291,9 +263,7 @@ async fn connected(server: &FakeServer, id: &TlsIdentity) -> Session {
 #[tokio::test]
 async fn run_stores_a_large_result_readable_by_window() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
     let mut session = connected(&server, &id).await;
 
     let mut stores = Vec::new();
@@ -333,9 +303,7 @@ async fn run_stores_a_large_result_readable_by_window() {
 #[tokio::test]
 async fn run_stops_at_the_row_limit_and_leaves_the_session_usable() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
     let mut session = connected(&server, &id).await;
 
     let mut store = None;
@@ -362,9 +330,7 @@ async fn run_stops_at_the_row_limit_and_leaves_the_session_usable() {
 #[tokio::test]
 async fn run_reports_statements_without_a_result_set() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
     let mut session = connected(&server, &id).await;
 
     let mut events = Vec::new();
@@ -385,9 +351,7 @@ async fn run_reports_statements_without_a_result_set() {
 #[tokio::test]
 async fn run_surfaces_server_errors_with_their_code() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
     let mut session = connected(&server, &id).await;
 
     match session.run("SELECT fake_rows(oops)", None, |_| {}).await {
@@ -400,9 +364,7 @@ async fn run_surfaces_server_errors_with_their_code() {
 #[tokio::test]
 async fn probe_returns_the_certificate_without_sending_credentials() {
     let id = identity();
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
 
     let info = sqltool_core::probe::probe_certificate("127.0.0.1", server.port()).await.unwrap();
     assert_eq!(info.sha256, sqltool_core::probe::to_hex(&sqltool_core::probe::fingerprint(&id.cert_der)));
@@ -418,10 +380,7 @@ async fn probe_returns_the_certificate_without_sending_credentials() {
 #[tokio::test]
 async fn probe_reports_a_server_without_tls() {
     let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, None)).await.unwrap();
-    assert!(matches!(
-        sqltool_core::probe::probe_certificate("127.0.0.1", server.port()).await,
-        Err(Error::ServerHasNoTls)
-    ));
+    assert!(matches!(sqltool_core::probe::probe_certificate("127.0.0.1", server.port()).await, Err(Error::ServerHasNoTls)));
 }
 
 fn pinned_profile(server: &FakeServer, pin: Option<[u8; 32]>) -> ConnectProfile {
@@ -437,9 +396,7 @@ async fn pinned_certificate_allows_cleartext_login_without_any_ca() {
     // A certificate no CA here vouches for, and whose name does not match:
     // exactly the kind of server certificate pinning is for.
     let id = generate_identity(&["db.example.test"]);
-    let server = FakeServer::start(Config::mysql_5_7_enterprise_ldap(PASSWORD, Some(id.clone())))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_5_7_enterprise_ldap(PASSWORD, Some(id.clone()))).await.unwrap();
     let pin = sqltool_core::probe::fingerprint(&id.cert_der);
 
     let session = Session::connect(&pinned_profile(&server, Some(pin))).await.unwrap();
@@ -453,9 +410,7 @@ async fn pinned_certificate_allows_cleartext_login_without_any_ca() {
 async fn a_different_certificate_than_the_pinned_one_gets_no_password() {
     let trusted = generate_identity(&["127.0.0.1"]);
     let impostor = generate_identity(&["127.0.0.1"]);
-    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(impostor)))
-        .await
-        .unwrap();
+    let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(impostor))).await.unwrap();
     let pin = sqltool_core::probe::fingerprint(&trusted.cert_der);
 
     assert!(matches!(expect_err(&pinned_profile(&server, Some(pin))).await, Error::CertificateChanged));
@@ -467,10 +422,7 @@ async fn a_different_certificate_than_the_pinned_one_gets_no_password() {
 async fn pinned_mode_without_a_pin_is_refused_before_connecting() {
     let id = identity();
     let server = FakeServer::start(Config::mysql_8_4_enterprise_ldap(PASSWORD, Some(id))).await.unwrap();
-    assert!(matches!(
-        expect_err(&pinned_profile(&server, None)).await,
-        Error::Policy(PolicyError::NothingPinned)
-    ));
+    assert!(matches!(expect_err(&pinned_profile(&server, None)).await, Error::Policy(PolicyError::NothingPinned)));
     assert_eq!(server.observed().connections, 0);
 }
 
@@ -524,10 +476,7 @@ async fn a_query_is_exported_in_full_without_keeping_its_rows() {
     // Far more rows than any row limit would keep.
     let mut out: Vec<u8> = Vec::new();
     let mut reported = Vec::new();
-    let rows = session
-        .export("SELECT fake_rows(50000, 3)", ExportFormat::Csv, "", &mut out, |n| reported.push(n))
-        .await
-        .unwrap();
+    let rows = session.export("SELECT fake_rows(50000, 3)", ExportFormat::Csv, "", &mut out, |n| reported.push(n)).await.unwrap();
     assert_eq!(rows, 50_000);
     let text = String::from_utf8(out).unwrap();
     assert_eq!(text.lines().count(), 50_001, "a header line and every row");

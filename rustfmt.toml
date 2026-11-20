@@ -1,0 +1,6 @@
+# The code was written with long lines and short things kept on one line;
+# these two settings are the ones closest to how it already reads.
+# `cargo fmt` formats this workspace's own crates. The driver copy under
+# vendor/ is left as its authors formatted it.
+max_width = 140
+use_small_heuristics = "Max"

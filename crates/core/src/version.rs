@@ -42,27 +42,15 @@ impl ServerVersion {
             Flavor::MariaDb => version.strip_prefix("5.5.5-").unwrap_or(version),
             _ => version,
         };
-        let mut parts = numeric
-            .split(|c: char| !c.is_ascii_digit())
-            .take(3)
-            .map(|p| p.parse::<u16>().unwrap_or(0));
+        let mut parts = numeric.split(|c: char| !c.is_ascii_digit()).take(3).map(|p| p.parse::<u16>().unwrap_or(0));
         let major = parts.next().unwrap_or(0);
         let minor = parts.next().unwrap_or(0);
         let patch = parts.next().unwrap_or(0);
 
         let enterprise = flavor == Flavor::MySql
-            && (lower.contains("enterprise")
-                || lower.contains("commercial")
-                || comment_lower.contains("enterprise"));
+            && (lower.contains("enterprise") || lower.contains("commercial") || comment_lower.contains("enterprise"));
 
-        Self {
-            flavor,
-            major,
-            minor,
-            patch,
-            enterprise,
-            raw: version.to_string(),
-        }
+        Self { flavor, major, minor, patch, enterprise, raw: version.to_string() }
     }
 
     pub fn at_least(&self, major: u16, minor: u16, patch: u16) -> bool {
@@ -81,53 +69,35 @@ mod tests {
 
     #[test]
     fn mysql_enterprise_8_4() {
-        assert_eq!(
-            v("8.4.3-commercial", "MySQL Enterprise Server - Commercial"),
-            (Flavor::MySql, 8, 4, 3, true)
-        );
+        assert_eq!(v("8.4.3-commercial", "MySQL Enterprise Server - Commercial"), (Flavor::MySql, 8, 4, 3, true));
     }
 
     #[test]
     fn mysql_enterprise_5_7() {
         assert_eq!(
-            v(
-                "5.7.37-enterprise-commercial-advanced-log",
-                "MySQL Enterprise Server - Advanced Edition (Commercial)"
-            ),
+            v("5.7.37-enterprise-commercial-advanced-log", "MySQL Enterprise Server - Advanced Edition (Commercial)"),
             (Flavor::MySql, 5, 7, 37, true)
         );
     }
 
     #[test]
     fn mysql_community() {
-        assert_eq!(
-            v("8.0.40", "MySQL Community Server - GPL"),
-            (Flavor::MySql, 8, 0, 40, false)
-        );
+        assert_eq!(v("8.0.40", "MySQL Community Server - GPL"), (Flavor::MySql, 8, 0, 40, false));
     }
 
     #[test]
     fn mariadb_with_replication_prefix() {
-        assert_eq!(
-            v("5.5.5-10.6.12-MariaDB-log", "mariadb.org binary distribution"),
-            (Flavor::MariaDb, 10, 6, 12, false)
-        );
+        assert_eq!(v("5.5.5-10.6.12-MariaDB-log", "mariadb.org binary distribution"), (Flavor::MariaDb, 10, 6, 12, false));
     }
 
     #[test]
     fn mariadb_without_prefix() {
-        assert_eq!(
-            v("11.4.2-MariaDB-ubu2404", "mariadb.org binary distribution"),
-            (Flavor::MariaDb, 11, 4, 2, false)
-        );
+        assert_eq!(v("11.4.2-MariaDB-ubu2404", "mariadb.org binary distribution"), (Flavor::MariaDb, 11, 4, 2, false));
     }
 
     #[test]
     fn percona() {
-        assert_eq!(
-            v("8.0.36-28", "Percona Server (GPL), Release 28, Revision 47601f19"),
-            (Flavor::Percona, 8, 0, 36, false)
-        );
+        assert_eq!(v("8.0.36-28", "Percona Server (GPL), Release 28, Revision 47601f19"), (Flavor::Percona, 8, 0, 36, false));
     }
 
     #[test]

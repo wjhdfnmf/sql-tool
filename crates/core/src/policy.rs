@@ -25,10 +25,7 @@ pub fn check(profile: &ConnectProfile) -> Result<(), PolicyError> {
     if profile.tls == TlsMode::Pinned && profile.pinned_sha256.is_none() {
         return Err(PolicyError::NothingPinned);
     }
-    if !profile.allow_cleartext_auth
-        || profile.tls.verifies_server()
-        || profile.accept_cleartext_on_unverified_transport
-    {
+    if !profile.allow_cleartext_auth || profile.tls.verifies_server() || profile.accept_cleartext_on_unverified_transport {
         return Ok(());
     }
     match profile.tls {

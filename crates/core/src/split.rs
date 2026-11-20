@@ -16,10 +16,7 @@ fn starts_with_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn line_end(bytes: &[u8], from: usize) -> usize {
-    bytes[from..]
-        .iter()
-        .position(|b| *b == b'\n')
-        .map_or(bytes.len(), |p| from + p)
+    bytes[from..].iter().position(|b| *b == b'\n').map_or(bytes.len(), |p| from + p)
 }
 
 /// Splits `script` into statements. Empty statements and statements made
@@ -39,11 +36,7 @@ pub fn split(script: &str) -> Vec<Statement> {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             let start = from + (raw.len() - raw.trim_start().len());
-            out.push(Statement {
-                text: trimmed.to_string(),
-                start,
-                end: start + trimmed.len(),
-            });
+            out.push(Statement { text: trimmed.to_string(), start, end: start + trimmed.len() });
         }
     };
 
@@ -100,9 +93,7 @@ pub fn split(script: &str) -> Vec<Statement> {
                 i = j.min(bytes.len());
             }
             b'#' => i = line_end(bytes, i),
-            b'-' if bytes.get(i + 1) == Some(&b'-')
-                && bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace() || b.is_ascii_control()) =>
-            {
+            b'-' if bytes.get(i + 1) == Some(&b'-') && bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace() || b.is_ascii_control()) => {
                 i = line_end(bytes, i);
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
@@ -111,10 +102,7 @@ pub fn split(script: &str) -> Vec<Statement> {
                 if matches!(bytes.get(i + 2), Some(b'!') | Some(b'+')) {
                     has_code = true;
                 }
-                i = bytes[i + 2..]
-                    .windows(2)
-                    .position(|w| w == b"*/")
-                    .map_or(bytes.len(), |p| i + 2 + p + 2);
+                i = bytes[i + 2..].windows(2).position(|w| w == b"*/").map_or(bytes.len(), |p| i + 2 + p + 2);
             }
             _ => {
                 has_code = true;
@@ -144,11 +132,7 @@ pub fn utf16_to_byte_offset(script: &str, utf16_offset: usize) -> usize {
 /// Picks the statement the cursor is in. A cursor in the gap after a
 /// statement (for example just after its `;`) selects that statement.
 pub fn statement_at(statements: &[Statement], byte_offset: usize) -> Option<&Statement> {
-    statements
-        .iter()
-        .rev()
-        .find(|s| s.start <= byte_offset)
-        .or_else(|| statements.first())
+    statements.iter().rev().find(|s| s.start <= byte_offset).or_else(|| statements.first())
 }
 
 /// The first word of a statement, upper-cased, skipping leading comments.
@@ -163,10 +147,7 @@ pub fn first_keyword(statement: &str) -> String {
             break;
         }
     }
-    rest.chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_uppercase()
+    rest.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_uppercase()
 }
 
 /// Quotes an identifier for use in SQL.
@@ -189,18 +170,12 @@ mod tests {
 
     #[test]
     fn semicolons_inside_strings_and_identifiers_do_not_split() {
-        assert_eq!(
-            texts(r#"SELECT 'a;b', "c;d", `e;f`; SELECT 2"#),
-            [r#"SELECT 'a;b', "c;d", `e;f`"#, "SELECT 2"]
-        );
+        assert_eq!(texts(r#"SELECT 'a;b', "c;d", `e;f`; SELECT 2"#), [r#"SELECT 'a;b', "c;d", `e;f`"#, "SELECT 2"]);
     }
 
     #[test]
     fn escaped_and_doubled_quotes_stay_inside_the_string() {
-        assert_eq!(
-            texts(r"SELECT 'it\'s; here', 'it''s; there'; SELECT 2"),
-            [r"SELECT 'it\'s; here', 'it''s; there'", "SELECT 2"]
-        );
+        assert_eq!(texts(r"SELECT 'it\'s; here', 'it''s; there'; SELECT 2"), [r"SELECT 'it\'s; here', 'it''s; there'", "SELECT 2"]);
     }
 
     #[test]
@@ -218,19 +193,13 @@ mod tests {
 
     #[test]
     fn comment_only_statements_are_dropped_but_version_comments_are_kept() {
-        assert_eq!(
-            texts("-- just a note\n/* another */;\n/*!40101 SET NAMES utf8mb4 */;"),
-            ["/*!40101 SET NAMES utf8mb4 */"]
-        );
+        assert_eq!(texts("-- just a note\n/* another */;\n/*!40101 SET NAMES utf8mb4 */;"), ["/*!40101 SET NAMES utf8mb4 */"]);
     }
 
     #[test]
     fn delimiter_command_allows_procedure_bodies() {
         let script = "DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND$$\nDELIMITER ;\nCALL p();";
-        assert_eq!(
-            texts(script),
-            ["CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "CALL p()"]
-        );
+        assert_eq!(texts(script), ["CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "CALL p()"]);
     }
 
     #[test]

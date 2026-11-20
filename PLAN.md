@@ -39,6 +39,19 @@ A review of the whole app for completeness, error handling and release quality o
 - The message box for a failure to start, and the notice after a save without a keychain: not seen.
 - "Close Anyway", which exits the app, by the self-test: it would end the test.
 
+### The project around the app (same pass)
+
+- **Formatting and lints are checked.** The Rust code had never been through `rustfmt`; it was formatted once with the two settings closest to how it was written (`rustfmt.toml`), and the nine things Clippy objected to were fixed. CI now refuses code that is not formatted or that Clippy objects to. The version of Rust is pinned in `rust-toolchain.toml`, so that a new compiler's lints arrive when that file is changed and not in the middle of something else.
+- **`CHANGELOG.md`**, from the notes of every release so far. Those notes had been kept only in a folder Git ignores.
+- **Pictures in the README**, taken by `tools/screenshots.mjs` from the interface running against made-up data in a headless browser.
+- **The installers name a publisher, a copyright line and a home page.**
+- **The window opens where it was**, at the size it had (not during test runs, which must not move the installed app's window).
+- **An exported file is offered a name** from the table its rows came from, or the script, cleaned of anything that is not a plain file name; `result` when there is nothing to go on.
+
+Verified on Windows: the tests (170 core, 26 connection), the lints with warnings as errors, the smoke test (10 of 10) and the desktop self-test on MariaDB and MySQL (41 of 41 each) after the reformat; the window reopening at a size and place written to its file. Not verified: the export name in the real Save dialog (the self-test's exports go to a fixed name), and the pinned toolchain on CI before this change's own run.
+
+Left for a decision, not done: the app's identifier ends in `.app`, which Tauri warns about on macOS, and names a domain; changing it moves the data folder, so it wants deciding before there are more users. The installers are not code-signed and there is no update check. The icon reads as a menu button.
+
 ## Graph builder (after 0.1.6)
 
 Asked for: a graphing tool in the manner of JMP's Graph Builder, reached from a button beside the menu button, that takes over the window from the query; columns placed on axes; bar charts, histograms and scatter plots; time, discrete and continuous X; filters, a legend and time range selection.

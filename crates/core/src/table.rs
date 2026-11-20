@@ -116,12 +116,7 @@ fn column_definition(column: &ColumnSpec) -> String {
 }
 
 fn index_definition(index: &IndexSpec) -> String {
-    format!(
-        "{}INDEX {} ({})",
-        if index.unique { "UNIQUE " } else { "" },
-        quote_identifier(index.name.trim()),
-        column_list(&index.columns)
-    )
+    format!("{}INDEX {} ({})", if index.unique { "UNIQUE " } else { "" }, quote_identifier(index.name.trim()), column_list(&index.columns))
 }
 
 const REFERENCE_ACTIONS: [&str; 5] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION", "SET DEFAULT"];
@@ -207,10 +202,7 @@ fn validate(spec: &TableSpec) -> Result<(), Error> {
         }
         check_name(&key.referenced_table).map_err(|_| fail(format!("{label} needs the table it refers to.")))?;
         if key.referenced_columns.len() != key.columns.len() || key.referenced_columns.iter().any(|c| c.trim().is_empty()) {
-            return Err(fail(format!(
-                "{label} needs one column in {} for each of its own columns.",
-                key.referenced_table.trim()
-            )));
+            return Err(fail(format!("{label} needs one column in {} for each of its own columns.", key.referenced_table.trim())));
         }
         for rule in [&key.on_update, &key.on_delete] {
             let rule = action(rule);
@@ -278,12 +270,7 @@ pub fn alter_table(original: &TableSpec, updated: &TableSpec) -> Result<String, 
     };
     let on_server = |names: &[String]| names.iter().map(server_name).collect::<Vec<_>>();
     let involves_new_column = |names: &[String]| {
-        names.iter().any(|name| {
-            updated
-                .columns
-                .iter()
-                .any(|c| c.name.trim() == name.trim() && c.original_name.is_none())
-        })
+        names.iter().any(|name| updated.columns.iter().any(|c| c.name.trim() == name.trim() && c.original_name.is_none()))
     };
 
     let mut clauses = Vec::new();
@@ -318,11 +305,7 @@ pub fn alter_table(original: &TableSpec, updated: &TableSpec) -> Result<String, 
         }
     }
     key_adds.extend(
-        updated
-            .foreign_keys
-            .iter()
-            .filter(|k| k.original_name.is_none())
-            .map(|k| format!("ADD {}", foreign_key_definition(k, own_schema))),
+        updated.foreign_keys.iter().filter(|k| k.original_name.is_none()).map(|k| format!("ADD {}", foreign_key_definition(k, own_schema))),
     );
 
     // Indexes that go away or change are dropped first.
@@ -345,16 +328,9 @@ pub fn alter_table(original: &TableSpec, updated: &TableSpec) -> Result<String, 
             }
         }
     }
-    index_adds.extend(
-        updated
-            .indexes
-            .iter()
-            .filter(|i| i.original_name.is_none())
-            .map(|i| format!("ADD {}", index_definition(i))),
-    );
+    index_adds.extend(updated.indexes.iter().filter(|i| i.original_name.is_none()).map(|i| format!("ADD {}", index_definition(i))));
 
-    let primary_key_changed =
-        involves_new_column(&updated.primary_key) || on_server(&updated.primary_key) != original.primary_key;
+    let primary_key_changed = involves_new_column(&updated.primary_key) || on_server(&updated.primary_key) != original.primary_key;
     if primary_key_changed && !original.primary_key.is_empty() {
         clauses.push("DROP PRIMARY KEY".to_string());
     }
@@ -452,12 +428,7 @@ mod tests {
     use super::*;
 
     fn column(name: &str, data_type: &str) -> ColumnSpec {
-        ColumnSpec {
-            name: name.into(),
-            data_type: data_type.into(),
-            original_name: Some(name.into()),
-            ..ColumnSpec::default()
-        }
+        ColumnSpec { name: name.into(), data_type: data_type.into(), original_name: Some(name.into()), ..ColumnSpec::default() }
     }
 
     fn orders() -> TableSpec {
@@ -557,7 +528,8 @@ mod tests {
     #[test]
     fn changed_and_removed_foreign_keys_are_dropped_in_their_own_statement_first() {
         let mut original = orders();
-        original.foreign_keys = vec![customer_key(), ForeignKeySpec { name: "fk_old".into(), original_name: Some("fk_old".into()), ..customer_key() }];
+        original.foreign_keys =
+            vec![customer_key(), ForeignKeySpec { name: "fk_old".into(), original_name: Some("fk_old".into()), ..customer_key() }];
         let mut updated = original.clone();
         updated.foreign_keys.remove(1);
         updated.foreign_keys[0].on_delete = "SET NULL".into();

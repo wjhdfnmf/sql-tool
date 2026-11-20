@@ -34,11 +34,7 @@ pub enum Error {
     AccessDenied { code: u16, message: String },
 
     #[error("server error {code} ({state}): {message}")]
-    Server {
-        code: u16,
-        state: String,
-        message: String,
-    },
+    Server { code: u16, state: String, message: String },
 
     #[error("network error: {0}")]
     Io(String),
@@ -86,26 +82,17 @@ impl From<mysql_async::Error> for Error {
     fn from(e: mysql_async::Error) -> Self {
         match e {
             mysql_async::Error::Driver(DriverError::CleartextPluginDisabled) => Error::CleartextNotEnabled,
-            mysql_async::Error::Driver(DriverError::UnknownAuthPlugin { name }) => {
-                Error::UnsupportedAuthPlugin(name)
-            }
+            mysql_async::Error::Driver(DriverError::UnknownAuthPlugin { name }) => Error::UnsupportedAuthPlugin(name),
             mysql_async::Error::Driver(DriverError::NoClientSslFlagFromServer) => Error::ServerHasNoTls,
-            mysql_async::Error::Driver(DriverError::ConnectionClosed) => {
-                Error::Io("the connection to the server is closed".into())
-            }
+            mysql_async::Error::Driver(DriverError::ConnectionClosed) => Error::Io("the connection to the server is closed".into()),
             mysql_async::Error::Io(IoError::Tls(e)) => Error::Tls(e.to_string()),
             // A failed TLS handshake (bad certificate, wrong host name, no
             // shared protocol version) arrives as an I/O error wrapping the
             // rustls error.
-            mysql_async::Error::Io(IoError::Io(e))
-                if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) =>
-            {
+            mysql_async::Error::Io(IoError::Io(e)) if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) => {
                 // The pinned-certificate check reports a mismatch this way.
                 let pin_mismatch = e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()).is_some_and(|tls| {
-                    matches!(
-                        tls,
-                        rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)
-                    )
+                    matches!(tls, rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure))
                 });
                 if pin_mismatch {
                     Error::CertificateChanged
@@ -116,15 +103,8 @@ impl From<mysql_async::Error> for Error {
             mysql_async::Error::Io(IoError::Io(e)) => Error::Io(e.to_string()),
             mysql_async::Error::Server(e) => match e.code {
                 // ER_DBACCESS_DENIED, ER_ACCESS_DENIED, ER_ACCESS_DENIED_NO_PASSWORD
-                1044 | 1045 | 1698 => Error::AccessDenied {
-                    code: e.code,
-                    message: e.message,
-                },
-                _ => Error::Server {
-                    code: e.code,
-                    state: e.state,
-                    message: e.message,
-                },
+                1044 | 1045 | 1698 => Error::AccessDenied { code: e.code, message: e.message },
+                _ => Error::Server { code: e.code, state: e.state, message: e.message },
             },
             other => Error::Other(other.to_string()),
         }

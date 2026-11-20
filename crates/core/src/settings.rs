@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 
 pub const THEMES: [&str; 16] = [
-    "system", "light", "dark", "midnight", "sepia", "contrast", "mist", "rose", "lavender", "sage", "graphite", "forest",
-    "orchid", "ember", "neon", "cobalt",
+    "system", "light", "dark", "midnight", "sepia", "contrast", "mist", "rose", "lavender", "sage", "graphite", "forest", "orchid",
+    "ember", "neon", "cobalt",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,11 +139,7 @@ impl SettingsStore {
 
     /// The saved settings, or the defaults if there are none or the file cannot be read.
     pub fn load(&self) -> Settings {
-        std::fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
-            .unwrap_or_default()
-            .sanitized()
+        std::fs::read(&self.path).ok().and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok()).unwrap_or_default().sanitized()
     }
 
     /// Saves the settings and returns them as stored (sanitized).
@@ -182,12 +178,7 @@ mod tests {
     fn settings_round_trip_and_unknown_fields_are_ignored() {
         let store = temp_store("roundtrip");
         let saved = store
-            .save(Settings {
-                theme: "midnight".into(),
-                query_timeout_secs: 90,
-                default_row_limit: None,
-                ..Settings::default()
-            })
+            .save(Settings { theme: "midnight".into(), query_timeout_secs: 90, default_row_limit: None, ..Settings::default() })
             .unwrap();
         assert_eq!(store.load(), saved);
         assert_eq!(saved.query_timeout(), Some(Duration::from_secs(90)));

@@ -41,6 +41,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "publisher": "SQL Tool contributors",
+    "copyright": "Copyright 2026 SQL Tool contributors. Licensed under Apache-2.0.",
+    "homepage": "https://github.com/wjhdfnmf/sql-tool",
     "category": "DeveloperTool",
     "shortDescription": "SQL client for MySQL and MariaDB",
     "longDescription": "A free, open-source desktop SQL client for MySQL and MariaDB.",

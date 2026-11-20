@@ -579,7 +579,7 @@ export const mockBackend: Backend = {
     await wait(300);
     return { path: `C:\\exports\\result.${format}`, rows: results.get(resultId)?.rows ?? 0, truncated: false, filtered: false };
   },
-  exportQuery: async (_workspaceId, tabId, _sql, format, _table, onProgress) => {
+  exportQuery: async (_workspaceId, tabId, _sql, format, _table, _name, onProgress) => {
     // Pretends to stream six million rows.
     cancelled.delete(tabId);
     for (let rows = 500_000; rows <= 6_000_000; rows += 500_000) {

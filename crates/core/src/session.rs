@@ -56,12 +56,7 @@ pub enum RunEvent {
     /// The current result set is complete.
     ResultDone { rows: u64, truncated: bool },
     /// A statement without a result set finished (INSERT, UPDATE, DDL, ...).
-    Done {
-        affected_rows: u64,
-        last_insert_id: Option<u64>,
-        info: String,
-        warnings: u16,
-    },
+    Done { affected_rows: u64, last_insert_id: Option<u64>, info: String, warnings: u16 },
 }
 
 /// How often the operating system probes a connection that has gone quiet.
@@ -143,12 +138,24 @@ fn column_info(column: &Column) -> ColumnInfo {
     use ColumnType::*;
     const BINARY_CHARSET: u16 = 63;
     let kind = match column.column_type() {
-        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL | MYSQL_TYPE_TINY | MYSQL_TYPE_SHORT | MYSQL_TYPE_INT24
-        | MYSQL_TYPE_LONG | MYSQL_TYPE_LONGLONG | MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE | MYSQL_TYPE_YEAR => {
-            ColumnKind::Number
-        }
-        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 | MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE | MYSQL_TYPE_TIME
-        | MYSQL_TYPE_TIME2 | MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => ColumnKind::Date,
+        MYSQL_TYPE_DECIMAL
+        | MYSQL_TYPE_NEWDECIMAL
+        | MYSQL_TYPE_TINY
+        | MYSQL_TYPE_SHORT
+        | MYSQL_TYPE_INT24
+        | MYSQL_TYPE_LONG
+        | MYSQL_TYPE_LONGLONG
+        | MYSQL_TYPE_FLOAT
+        | MYSQL_TYPE_DOUBLE
+        | MYSQL_TYPE_YEAR => ColumnKind::Number,
+        MYSQL_TYPE_TIMESTAMP
+        | MYSQL_TYPE_TIMESTAMP2
+        | MYSQL_TYPE_DATE
+        | MYSQL_TYPE_NEWDATE
+        | MYSQL_TYPE_TIME
+        | MYSQL_TYPE_TIME2
+        | MYSQL_TYPE_DATETIME
+        | MYSQL_TYPE_DATETIME2 => ColumnKind::Date,
         MYSQL_TYPE_JSON => ColumnKind::Json,
         MYSQL_TYPE_BIT | MYSQL_TYPE_GEOMETRY | MYSQL_TYPE_VECTOR => ColumnKind::Binary,
         _ if column.character_set() == BINARY_CHARSET => ColumnKind::Binary,
@@ -172,15 +179,9 @@ fn column_info(column: &Column) -> ColumnInfo {
 
 /// The TLS version and cipher of this connection, in one round trip.
 async fn tls_status(conn: &mut Conn) -> Result<(Option<String>, Option<String>), Error> {
-    let rows: Vec<(String, Option<String>)> = conn
-        .query("SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_version', 'Ssl_cipher')")
-        .await?;
-    let find = |name: &str| {
-        rows.iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .and_then(|(_, v)| v.clone())
-            .filter(|v| !v.is_empty())
-    };
+    let rows: Vec<(String, Option<String>)> =
+        conn.query("SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_version', 'Ssl_cipher')").await?;
+    let find = |name: &str| rows.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).and_then(|(_, v)| v.clone()).filter(|v| !v.is_empty());
     Ok((find("Ssl_version"), find("Ssl_cipher")))
 }
 
@@ -189,19 +190,15 @@ async fn tls_status(conn: &mut Conn) -> Result<(Option<String>, Option<String>),
 async fn open(opts: &Opts, timeout: Duration) -> Result<Conn, Error> {
     match tokio::time::timeout(timeout, Conn::new(opts.clone())).await {
         Ok(conn) => Ok(conn?),
-        Err(_) => Err(Error::Io(format!(
-            "no answer from the server after {} seconds",
-            timeout.as_secs().max(1)
-        ))),
+        Err(_) => Err(Error::Io(format!("no answer from the server after {} seconds", timeout.as_secs().max(1)))),
     }
 }
 
 /// Connects and asks the server what it is.
 async fn open_and_identify(opts: &Opts, timeout: Duration) -> Result<(Conn, ServerInfo), Error> {
     let mut conn = open(opts, timeout).await?;
-    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
-        .query_first("SELECT @@version, @@version_comment, CURRENT_USER()")
-        .await?;
+    let row: Option<(Option<String>, Option<String>, Option<String>)> =
+        conn.query_first("SELECT @@version, @@version_comment, CURRENT_USER()").await?;
     let (version, comment, user) = row.unwrap_or_default();
     let version_comment = comment.unwrap_or_default();
     let (tls_version, tls_cipher) = tls_status(&mut conn).await?;
@@ -284,10 +281,7 @@ impl Session {
         }
         if let Some(database) = self.database.clone() {
             // Best effort: the database may have been dropped meanwhile.
-            let _ = self
-                .conn
-                .query_drop(format!("USE {}", crate::split::quote_identifier(&database)))
-                .await;
+            let _ = self.conn.query_drop(format!("USE {}", crate::split::quote_identifier(&database))).await;
         }
         Ok(())
     }
@@ -300,10 +294,8 @@ impl Session {
     /// reconnect. Nothing has been sent at this point, so reconnecting here
     /// can never run a statement twice.
     pub async fn ensure_alive(&mut self, idle: Duration) -> Result<bool, Error> {
-        if !self.broken {
-            if self.last_used.elapsed() < idle || self.ping().await.is_ok() {
-                return Ok(false);
-            }
+        if !self.broken && (self.last_used.elapsed() < idle || self.ping().await.is_ok()) {
+            return Ok(false);
         }
         self.reconnect().await?;
         Ok(true)
@@ -318,11 +310,7 @@ impl Session {
 
     async fn query_inner(&mut self, sql: &str) -> Result<ResultSet, Error> {
         let mut result = self.conn.query_iter(sql).await?;
-        let columns = result
-            .columns_ref()
-            .iter()
-            .map(|c| c.name_str().into_owned())
-            .collect();
+        let columns = result.columns_ref().iter().map(|c| c.name_str().into_owned()).collect();
         let mut rows = Vec::new();
         while let Some(row) = result.next().await? {
             rows.push(row.unwrap().into_iter().map(text).collect());
@@ -339,19 +327,13 @@ impl Session {
     {
         let outcome = self.conn.exec(sql, params).await.map_err(Error::from);
         let rows: Vec<Row> = self.observe(outcome)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| row.unwrap().into_iter().map(text).collect())
-            .collect())
+        Ok(rows.into_iter().map(|row| row.unwrap().into_iter().map(text).collect()).collect())
     }
 
     /// Runs a parameterised statement that returns no rows; gives back the
     /// number of rows it affected.
     pub(crate) async fn exec_params(&mut self, sql: &str, params: Vec<Option<Vec<u8>>>) -> Result<u64, Error> {
-        let values: Vec<Value> = params
-            .into_iter()
-            .map(|p| p.map_or(Value::NULL, Value::Bytes))
-            .collect();
+        let values: Vec<Value> = params.into_iter().map(|p| p.map_or(Value::NULL, Value::Bytes)).collect();
         let params = if values.is_empty() { Params::Empty } else { Params::Positional(values) };
         let outcome = self.conn.exec_drop(sql, params).await.map_err(Error::from);
         self.observe(outcome)?;
@@ -373,11 +355,7 @@ impl Session {
 
     /// Makes `name` the default database of this session.
     pub async fn use_database(&mut self, name: &str) -> Result<(), Error> {
-        let outcome = self
-            .conn
-            .query_drop(format!("USE {}", crate::split::quote_identifier(name)))
-            .await
-            .map_err(Error::from);
+        let outcome = self.conn.query_drop(format!("USE {}", crate::split::quote_identifier(name))).await.map_err(Error::from);
         self.observe(outcome)?;
         self.database = Some(name.to_string());
         Ok(())
@@ -402,13 +380,7 @@ impl Session {
         let started = Instant::now();
         let mut stats = StreamStats::default();
         let mut result = self.conn.query_iter(sql).await?;
-        on_columns(
-            result
-                .columns_ref()
-                .iter()
-                .map(|c| c.name_str().into_owned())
-                .collect(),
-        );
+        on_columns(result.columns_ref().iter().map(|c| c.name_str().into_owned()).collect());
         while let Some(row) = result.next().await? {
             if stats.rows == 0 {
                 stats.time_to_first_row = Some(started.elapsed());
@@ -511,9 +483,7 @@ impl Session {
                         }
                         Ok(None) => break Ok(()),
                         // The interruption we asked for is not a failure.
-                        Err(mysql_async::Error::Server(e)) if truncated && e.code == ER_QUERY_INTERRUPTED => {
-                            break Ok(())
-                        }
+                        Err(mysql_async::Error::Server(e)) if truncated && e.code == ER_QUERY_INTERRUPTED => break Ok(()),
                         Err(e) => break Err(Error::from(e)),
                     }
                 };
@@ -554,14 +524,7 @@ impl Session {
     /// `on_progress` is told the number of rows written, now and then.
     /// Returns the number of rows written. If the statement or the writing
     /// fails part-way, `out` holds an incomplete file.
-    pub async fn export<W, P>(
-        &mut self,
-        sql: &str,
-        format: ExportFormat,
-        table: &str,
-        out: &mut W,
-        on_progress: P,
-    ) -> Result<u64, Error>
+    pub async fn export<W, P>(&mut self, sql: &str, format: ExportFormat, table: &str, out: &mut W, on_progress: P) -> Result<u64, Error>
     where
         W: std::io::Write + Send,
         P: FnMut(u64) + Send,
@@ -608,7 +571,7 @@ impl Session {
                         .collect();
                     outcome = writer.row(out, cells.iter().map(|cell| cell.as_deref())).map_err(storage);
                     rows += 1;
-                    if rows % PROGRESS_EVERY == 0 {
+                    if rows.is_multiple_of(PROGRESS_EVERY) {
                         on_progress(rows);
                     }
                 }

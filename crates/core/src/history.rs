@@ -68,10 +68,7 @@ fn storage(e: impl std::fmt::Display) -> Error {
 
 impl History {
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            file: Mutex::new(None),
-        }
+        Self { path, file: Mutex::new(None) }
     }
 
     pub fn append(&self, mut entry: HistoryEntry) -> Result<(), Error> {
@@ -86,10 +83,7 @@ impl History {
             }
             *guard = Some(crate::files::append_private(&self.path).map_err(storage)?);
         }
-        let too_large = guard
-            .as_ref()
-            .and_then(|file| file.metadata().ok())
-            .is_some_and(|m| m.len() > MAX_FILE_BYTES);
+        let too_large = guard.as_ref().and_then(|file| file.metadata().ok()).is_some_and(|m| m.len() > MAX_FILE_BYTES);
         if too_large {
             // Closed first: the file is replaced, not written through this handle.
             *guard = None;
@@ -149,14 +143,7 @@ mod tests {
     }
 
     fn entry(sql: &str, at_ms: u64) -> HistoryEntry {
-        HistoryEntry {
-            at_ms,
-            profile_name: "test".into(),
-            sql: sql.into(),
-            duration_ms: 5,
-            ok: true,
-            summary: "1 row".into(),
-        }
+        HistoryEntry { at_ms, profile_name: "test".into(), sql: sql.into(), duration_ms: 5, ok: true, summary: "1 row".into() }
     }
 
     #[test]

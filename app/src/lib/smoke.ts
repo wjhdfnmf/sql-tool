@@ -118,7 +118,7 @@ export async function runSmoke(): Promise<void> {
     expect(workspace, 'not connected');
     const result = workspace.activeTab.results[0];
     expect(result, 'no result to export');
-    const saved = await backend.exportResult(result.id, 'csv', '');
+    const saved = await backend.exportResult(result.id, 'csv', '', null);
     expect(saved && saved.rows === 2000, `exported ${saved?.rows} rows`);
     return { path: saved.path };
   });

@@ -125,9 +125,7 @@ impl ProfileStore {
                 // Set the file aside: the app can then start with an empty
                 // list, and saving a new connection cannot overwrite what
                 // might still be recovered by hand.
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 let aside = self.path.with_extension(format!("unreadable-{stamp}.json"));
                 match std::fs::rename(&self.path, &aside) {
                     Ok(()) => Error::Storage(format!(
@@ -212,7 +210,13 @@ mod tests {
         let group = |name: &str| Some(name.to_string());
         // c first in "Plant", then a ungrouped, then b in "Plant"; d is not mentioned; one id is unknown.
         store
-            .arrange(&[(c.clone(), group("  Plant ")), ("no-such-id".into(), group("x")), (a.clone(), None), (b.clone(), group("Plant")), (a.clone(), group("twice"))])
+            .arrange(&[
+                (c.clone(), group("  Plant ")),
+                ("no-such-id".into(), group("x")),
+                (a.clone(), None),
+                (b.clone(), group("Plant")),
+                (a.clone(), group("twice")),
+            ])
             .unwrap();
         let now: Vec<(String, Option<String>)> = store.load().unwrap().into_iter().map(|p| (p.name, p.group)).collect();
         assert_eq!(
@@ -238,12 +242,7 @@ mod tests {
     }
 
     fn sample() -> SavedProfile {
-        SavedProfile {
-            name: "Reporting".into(),
-            host: "db.example.test".into(),
-            user: "ann".into(),
-            ..SavedProfile::default()
-        }
+        SavedProfile { name: "Reporting".into(), host: "db.example.test".into(), user: "ann".into(), ..SavedProfile::default() }
     }
 
     #[test]
@@ -290,12 +289,7 @@ mod tests {
     #[test]
     fn the_script_folder_is_kept_and_older_files_without_one_still_load() {
         let store = temp_store("scripts");
-        let saved = store
-            .upsert(SavedProfile {
-                script_folder: Some(PathBuf::from("/work/reports")),
-                ..sample()
-            })
-            .unwrap();
+        let saved = store.upsert(SavedProfile { script_folder: Some(PathBuf::from("/work/reports")), ..sample() }).unwrap();
         assert_eq!(store.get(&saved.id).unwrap().unwrap().script_folder, Some(PathBuf::from("/work/reports")));
 
         // A file written before the setting existed.
