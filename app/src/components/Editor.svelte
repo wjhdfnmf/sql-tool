@@ -167,6 +167,25 @@
     view.focus();
   }
 
+  /** What comes before the selection (or the cursor) on the line it starts on. */
+  export function getLineBeforeSelection(): string {
+    if (!view) return '';
+    const { from } = view.state.selection.main;
+    return view.state.sliceDoc(view.state.doc.lineAt(from).from, from);
+  }
+
+  /**
+   * Replaces the selection, as one undoable step, and leaves the new text
+   * selected: what changed can be seen, and the same piece is ready to be
+   * acted on again. The view goes to the start of it.
+   */
+  export function replaceSelection(text: string): void {
+    if (!view) return;
+    const { from, to } = view.state.selection.main;
+    view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length, head: from }, scrollIntoView: true });
+    view.focus();
+  }
+
   /** Replaces the whole document, as one undoable step. */
   export function replaceAll(text: string): void {
     if (!view) return;

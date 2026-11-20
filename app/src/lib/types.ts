@@ -239,6 +239,8 @@ export type RunMsg =
   | { type: 'resultSet'; index: number; resultId: number; columns: ColumnInfo[]; sql: string }
   | { type: 'progress'; resultId: number; rows: number }
   | { type: 'resultDone'; index: number; resultId: number; rows: number; truncated: boolean; elapsedMs: number }
+  /** How far a query run in time slices has got. `etaMs` is null before the first slice is in. */
+  | { type: 'slices'; done: number; total: number; rows: number; etaMs: number | null; threads: number }
   | {
       type: 'done';
       index: number;
@@ -252,6 +254,16 @@ export type RunMsg =
   | { type: 'database'; name: string | null }
   | { type: 'reconnected' }
   | { type: 'finished'; ran: number; total: number; failed: boolean; elapsedMs: number };
+
+/** What running a query in time slices would do. */
+export interface SlicePlan {
+  slices: number;
+  /** The statement of the first and of the last slice. */
+  first: string;
+  last: string;
+  /** Slices run at once. */
+  threads: number;
+}
 
 export interface TableEntry {
   name: string;
@@ -346,6 +358,12 @@ export interface Settings {
   keepAliveSecs: number;
   keepHistory: boolean;
   resultMemoryMb: number;
+  /** How Reformat lays SQL out: standard, compact, aligned or oneline. */
+  reformatStyle: string;
+  /** What Reformat does to keywords: upper, lower or preserve. */
+  reformatKeywords: string;
+  /** Connections a query run in time slices uses at once. */
+  sliceThreads: number;
 }
 
 export interface AppInfo {

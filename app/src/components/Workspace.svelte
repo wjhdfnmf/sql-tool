@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { format } from 'sql-formatter';
   import { adminQueries } from '../lib/admin';
   import { backend } from '../lib/backend';
   import { defaultRole } from '../lib/chart';
@@ -7,6 +6,8 @@
   import { layout, saveLayout } from '../lib/layout.svelte';
   import { separator, type MenuItem } from '../lib/menu';
   import { placeIn } from '../lib/place';
+  import { reformatPiece, reformatSql, type KeywordCase, type ReformatStyle } from '../lib/reformat';
+  import { settings } from '../lib/settings.svelte';
   import { app, type EditorTab, type WorkspaceState } from '../lib/state.svelte';
   import {
     asUiError,
@@ -28,6 +29,7 @@
   import Results from './Results.svelte';
   import SchemaEditor from './SchemaEditor.svelte';
   import SchemaTree from './SchemaTree.svelte';
+  import SliceDialog, { type SliceSetup } from './SliceDialog.svelte';
   import TableDesigner from './TableDesigner.svelte';
 
   interface Props {
@@ -154,6 +156,37 @@
       await workspace.run(target, editor.getText(), { kind: how === 'explain' ? 'explainAt' : 'at', offset: editor.getCursor() });
     }
     historyKey++;
+  }
+
+  /** The query a run in time slices is being set up for, while its dialog is open. */
+  let slicing = $state<{ tab: EditorTab; sql: string } | null>(null);
+
+  /** Opens the dialog for running the selection, or the whole tab, in time slices. */
+  function sliceQuery() {
+    const editor = editors[tab.id];
+    if (!editor || tab.running) return;
+    const selected = editor.getSelection();
+    // One statement, without the semicolon that would end it.
+    const sql = (selected.trim() !== '' ? selected : editor.getText()).trim().replace(/;\s*$/, '');
+    if (sql === '') return;
+    slicing = { tab, sql };
+  }
+
+  async function runSlices(setup: SliceSetup, stepSecs: number) {
+    if (!slicing) return;
+    const { tab: target, sql } = slicing;
+    target.sliceSetup = setup;
+    await workspace.runSliced(target, sql, setup.start, setup.end, stepSecs);
+    historyKey++;
+  }
+
+  /** "about 40 s left", from milliseconds. */
+  function timeLeft(ms: number | null): string {
+    if (ms === null) return '';
+    const seconds = Math.max(1, Math.round(ms / 1000));
+    if (seconds < 90) return `about ${seconds} s left`;
+    const minutes = Math.round(seconds / 60);
+    return minutes < 90 ? `about ${minutes} min left` : `about ${(minutes / 60).toFixed(1)} h left`;
   }
 
   async function openAndRun(title: string, sql: string) {
@@ -301,21 +334,31 @@
   function reformat() {
     const editor = editors[tab.id];
     if (!editor) return;
+    // What is selected is reformatted and nothing else is touched. With nothing selected, it is the whole text.
     const selection = editor.getSelection();
     const partial = selection.trim() !== '';
     const source = partial ? selection : editor.getText();
     if (source.trim() === '') return;
     if (/^\s*delimiter\s/im.test(source)) {
-      report('A script that uses DELIMITER cannot be reformatted as a whole. Select the part to reformat.');
+      report(
+        partial
+          ? 'The selection has a DELIMITER line in it, which cannot be reformatted. Select the statements without it.'
+          : 'A script that uses DELIMITER cannot be reformatted as a whole. Select the part to reformat.',
+      );
       return;
     }
     try {
-      const formatted = format(source, { language: mariadb ? 'mariadb' : 'mysql', keywordCase: 'upper', tabWidth: 2 });
-      if (partial) editor.insert(formatted);
-      else editor.replaceAll(formatted + '\n');
+      const { reformatStyle, reformatKeywords, editorTabSize } = settings.current;
+      const [style, keywords] = [reformatStyle as ReformatStyle, reformatKeywords as KeywordCase];
+      if (partial) editor.replaceSelection(reformatPiece(selection, editor.getLineBeforeSelection(), mariadb, style, keywords, editorTabSize));
+      else editor.replaceAll(reformatSql(source, mariadb, style, keywords, editorTabSize) + '\n');
     } catch (e) {
       const reason = e instanceof Error ? e.message.split('\n')[0] : String(e);
-      report(`Could not reformat: ${reason}`);
+      report(
+        partial
+          ? `Could not reformat the selection: ${reason}. A selection has to be SQL that stands on its own: whole statements, or a piece with its brackets closed.`
+          : `Could not reformat: ${reason}`,
+      );
     }
   }
 
@@ -746,6 +789,7 @@
       </div>
 
       <div class="toolbar" role="toolbar" aria-label="Editor" hidden={!!tab.design}>
+        <button onclick={() => workspace.addTab()} title="A new, empty query tab (Ctrl+T)">New</button>
         <button onclick={openScript} title="Open a SQL script file (Ctrl+O)">Open</button>
         <button onclick={() => saveScript(tab)} title="Save this script (Ctrl+S)">Save</button>
         <button onclick={() => saveScript(tab, true)} title="Save this script under another name (Ctrl+Shift+S)">Save As</button>
@@ -759,6 +803,11 @@
         <button disabled={tab.running} title="Show the execution plan of the statement under the cursor (Ctrl+Alt+X)" onclick={() => run(tab, 'explain')}>
           Explain
         </button>
+        <button
+          disabled={tab.running}
+          title={`Run a long query as many short ones, one for each slice of a time range, so that none times out. The query marks its range with {start} and {end}.`}
+          onclick={sliceQuery}>In Slices&hellip;</button
+        >
         <button class="danger" disabled={!tab.running} title="Stop the running statement" onclick={() => workspace.cancel(tab)}>&#9632; Stop</button>
         <span class="divider"></span>
         <label class="limit">
@@ -843,6 +892,24 @@
     {#if info.readOnly}<span class="badge" title="Only reads are allowed on this connection">Read-only</span>{/if}
     {#if info.production}<span class="badge production" title="Risky statements ask for confirmation">Production</span>{/if}
     <span class="spacer"></span>
+    {#if tab.slices}
+      {@const s = tab.slices}
+      <!-- A run in time slices: how many are in, and how long the rest should take. -->
+      <span
+        class="slices"
+        role="progressbar"
+        aria-label="Time slices done"
+        aria-valuemin="0"
+        aria-valuemax={s.total}
+        aria-valuenow={s.done}
+        title={`Running in time slices${s.threads > 1 ? `, ${s.threads} at a time` : ''}: ${s.done} of ${s.total} done`}
+      >
+        <span class="slice-mark" class:fast={s.threads > 1} aria-hidden="true">{s.threads > 1 ? '\u21C9' : '\u25A6'}</span>
+        <span class="slice-bar"><span style:width={`${(s.done / Math.max(1, s.total)) * 100}%`}></span></span>
+        <span>{s.done}/{s.total}{s.threads > 1 ? ` \u00d7${s.threads}` : ''}</span>
+        {#if s.etaMs !== null}<span class="muted">{timeLeft(s.etaMs)}</span>{/if}
+      </span>
+    {/if}
     <!-- The result in front puts its notices, selection totals, time, state and row count here. -->
     <span class="result-status" bind:this={workspace.statusHost}></span>
     {#if tab.design || tab.activeResult === 'messages' || !workspace.showOutput}
@@ -905,6 +972,10 @@
     {/if}
   </div>
 </dialog>
+
+{#if slicing}
+  <SliceDialog sql={slicing.sql} last={slicing.tab.sliceSetup} onrun={runSlices} onclose={() => (slicing = null)} />
+{/if}
 
 {#if historyOpen}
   <dialog use:modal class="panel-dialog" aria-labelledby="history-title" onclose={() => (historyOpen = false)}>
@@ -976,6 +1047,45 @@
     background: var(--panel-2);
     border-color: var(--border);
     color: var(--text);
+  }
+
+  .slices {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .slice-mark {
+    color: var(--accent);
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .slice-mark.fast {
+    animation: slice-pulse 1.1s ease-in-out infinite;
+  }
+
+  @keyframes slice-pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  .slice-bar {
+    width: 84px;
+    height: 5px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .slice-bar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.2s linear;
   }
 
   .row-tools .graph-button[aria-pressed='true'] {

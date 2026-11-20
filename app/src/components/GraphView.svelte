@@ -9,6 +9,7 @@
     KINDS,
     LINE_ROLE_NAMES,
     ROLE_LABELS,
+    RUN_RULES,
     SEQUENTIAL,
     STATISTIC_LABELS,
     TREND_LABELS,
@@ -135,7 +136,24 @@
     lines: graph.shownLines,
     trend: graph.trend,
     normalCurve: graph.normalCurve,
+    barLabels: graph.barLabels,
+    paretoLine: graph.paretoLine,
+    paretoCutoff: graph.paretoCutoff,
+    paretoFade: graph.paretoFade,
+    rules: graph.rules,
+    zones: graph.zones,
+    spreadChart: graph.spreadChart,
   });
+
+  /** A number typed into an option, or null if the field was left empty or does not hold one. */
+  const typedNumber = (text: string): number | null => {
+    const value = Number(text.replaceAll(',', '').trim());
+    return text.trim() !== '' && Number.isFinite(value) ? value : null;
+  };
+
+  function toggleRule(rule: number, on: boolean) {
+    graph.rules = on ? [...graph.rules, rule].sort((a, b) => a - b) : graph.rules.filter((r) => r !== rule);
+  }
 
   const label = $derived(
     `${KINDS.find((k) => k.kind === graph.kind)?.label ?? ''} chart: ${yName}${xName ? ` against ${xName}` : ''}${graph.color !== null ? `, coloured by ${graph.name(graph.color)}` : ''}`,
@@ -278,11 +296,26 @@
     const control = data.control;
     if (control) {
       const points = data.series[0]?.values.filter((v) => v !== null).length ?? 0;
+      const given = control.fixed ? ' (as given)' : '';
       out.push(
-        ['Centre line', formatNumber(control.center)],
-        ['Sigma', formatNumber(control.sigma), control.individuals ? 'From the average change between one point and the next' : 'From the spread within the points, pooled'],
-        ['Outside limits', `${formatCount(control.beyond)} of ${formatCount(points)} points`, 'Points above the upper or below the lower control limit'],
+        ['Centre line', formatNumber(control.center) + (graph.fixedCenter !== null ? given : '')],
+        [
+          'Sigma',
+          formatNumber(control.sigma) + (graph.fixedSigma !== null ? given : ''),
+          graph.fixedSigma !== null ? 'As given' : control.individuals ? 'From the average change between one point and the next' : 'From the spread within the points, pooled',
+        ],
+        ['Points', formatCount(points)],
       );
+      // What each watched rule found, and how many points are marked in all.
+      const watched = graph.rules.reduce((bits, rule) => bits | (1 << (rule - 1)), 0);
+      for (const rule of RUN_RULES.filter((r) => graph.rules.includes(r.rule))) {
+        const hits = control.signals.filter((signal) => signal & (1 << (rule.rule - 1))).length;
+        out.push([`Rule ${rule.rule}`, hits === 0 ? 'none' : `${formatCount(hits)} ${hits === 1 ? 'point' : 'points'}`, rule.text]);
+      }
+      const marked = control.signals.filter((signal) => signal & watched).length;
+      out.push(['Marked', `${formatCount(marked)} of ${formatCount(points)}`, 'Points that break at least one of the rules being watched']);
+      const wide = control.spread.filter((v, i) => v !== null && control.spreadUpper[i] !== null && v > (control.spreadUpper[i] as number)).length;
+      if (wide > 0) out.push(['Spread too wide', `${formatCount(wide)} ${wide === 1 ? 'point' : 'points'}`, 'Points whose spread is above its own upper limit, on the chart underneath']);
     }
     if (stats && !measuredTime && graph.measured) {
       const [lsl, usl, target] = [graph.spec('lsl'), graph.spec('usl'), graph.spec('target')];
@@ -299,6 +332,26 @@
           ['Pp', index(fit.pp), 'As Cp, with the standard deviation of all the values'],
           ['Ppk', index(fit.ppk), 'As Cpk, with the standard deviation of all the values: what the process actually did'],
         );
+      }
+    }
+    if (is('pareto') && data.x.type === 'categories') {
+      const values = (data.series[0]?.values ?? []).map((v) => (v !== null && v > 0 ? v : 0));
+      const whole = values.reduce((a, b) => a + b, 0);
+      if (whole > 0) {
+        out.push(['Total', formatNumber(whole)], ['Values', formatCount(values.length)]);
+        const cutoff = graph.paretoCutoff;
+        if (cutoff > 0 && cutoff < 100) {
+          // The bars it takes to reach the mark, the one that crosses it included.
+          let [few, running] = [0, 0];
+          while (few < values.length && (running / whole) * 100 < cutoff) running += values[few++];
+          out.push([
+            'Vital few',
+            `${formatCount(few)} of ${formatCount(values.length)}`,
+            `The first ${few} ${few === 1 ? 'value makes' : 'values make'} up ${((running / whole) * 100).toFixed(1)}% of the total`,
+          ]);
+          out.push(['Their share', `${((running / whole) * 100).toFixed(1)}%`]);
+        }
+        out.push(['Largest', `${data.x.labels[0]}  ${((values[0] / whole) * 100).toFixed(1)}%`]);
       }
     }
     return out;
@@ -479,6 +532,12 @@
         <button aria-pressed={graph.kind === k.kind} title={k.hint} onclick={() => graph.setKind(k.kind)}>{k.label}</button>
       {/each}
     </div>
+    <span class="divider"></span>
+    <button
+      disabled={!graph.ready && graph.filters.length === 0 && graph.lines.length === 0 && !graph.trend && !graph.title && !graph.xLabel && !graph.yLabel}
+      title="Start over: take everything off the axes and remove the filters, lines, trend line and names"
+      onclick={() => graph.reset()}>Reset</button
+    >
     <span class="what muted" title={title}>{title}</span>
     <button disabled={!data || empty} title="Copy a picture of the chart" onclick={copyImage}>Copy image</button>
     <button disabled={!data || empty} title="Save a picture of the chart as a PNG file" onclick={saveImage}>Save image</button>
@@ -659,6 +718,82 @@
               onchange={(e) => (graph.maxCategories = Math.min(500, Math.max(1, Math.round(Number(e.currentTarget.value) || 40))))}
             />
           </label>
+        {/if}
+        {#if is('bar', 'line', 'pie', 'pareto') && graph.x?.role === 'discrete'}
+          <label class="check" title="Rows where the X column is NULL get no bar or slice of their own">
+            <input type="checkbox" bind:checked={graph.skipNull} /> <span>Leave out rows with no value</span>
+          </label>
+        {/if}
+        {#if is('pareto') || (is('bar') && graph.x?.role === 'discrete')}
+          <label class="check"><input type="checkbox" bind:checked={graph.barLabels} /> <span>Values on the bars</span></label>
+        {/if}
+        {#if is('pareto')}
+          <label class="check"><input type="checkbox" bind:checked={graph.paretoLine} /> <span>Running total line</span></label>
+          <label title="Where the running total is marked. The bars it takes to reach it are the vital few. 0 for no mark.">
+            <span>Mark at (%)</span>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="5"
+              value={graph.paretoCutoff}
+              onchange={(e) => (graph.paretoCutoff = Math.min(100, Math.max(0, Math.round(Number(e.currentTarget.value) || 0))))}
+            />
+          </label>
+          <label class="check" title="Draw the bars past the mark paler, so the few that matter stand out">
+            <input type="checkbox" bind:checked={graph.paretoFade} disabled={graph.paretoCutoff <= 0} /> <span>Fade the bars past the mark</span>
+          </label>
+        {/if}
+        {#if is('control')}
+          {#if !graph.x}
+            <label title="How many consecutive rows are averaged into one point. Leave empty for one row a point, or as many as it takes to fit.">
+              <span>Rows per point</span>
+              <input
+                type="number"
+                min="1"
+                max="100000"
+                placeholder="auto"
+                value={graph.runSize ?? ''}
+                onchange={(e) => (graph.runSize = e.currentTarget.value === '' ? null : Math.max(1, Math.round(Number(e.currentTarget.value) || 1)))}
+              />
+            </label>
+          {/if}
+          <label title="A centre line known from before (a target, or last month's average), to judge this data against. Leave empty to use this data's own average.">
+            <span>Centre</span>
+            <input type="text" placeholder="from this data" value={graph.fixedCenter ?? ''} onchange={(e) => (graph.fixedCenter = typedNumber(e.currentTarget.value))} />
+          </label>
+          <label title="A sigma known from before, for the limits. Leave empty to work it out from this data.">
+            <span>Sigma</span>
+            <input
+              type="text"
+              placeholder="from this data"
+              value={graph.fixedSigma ?? ''}
+              onchange={(e) => {
+                const value = typedNumber(e.currentTarget.value);
+                graph.fixedSigma = value !== null && value > 0 ? value : null;
+              }}
+            />
+          </label>
+          <label class="check" title={`A second chart underneath: the range from one point to the next, or the standard deviation within each point. It shows whether the spread itself is steady.`}>
+            <input type="checkbox" bind:checked={graph.spreadChart} /> <span>Chart of the spread underneath</span>
+          </label>
+          <label class="check" title="The lines one and two sigma from the centre, which rules 5 to 8 are judged by">
+            <input type="checkbox" bind:checked={graph.zones} /> <span>1 and 2 sigma lines</span>
+          </label>
+          <div class="rules" role="group" aria-label="Rules that mark a point">
+            <span class="rules-name">Mark points that break</span>
+            {#each RUN_RULES as rule (rule.rule)}
+              <label class="check" title={rule.text}>
+                <input type="checkbox" checked={graph.rules.includes(rule.rule)} onchange={(e) => toggleRule(rule.rule, e.currentTarget.checked)} />
+                <span>{rule.rule}. {rule.short}</span>
+              </label>
+            {/each}
+            <span class="rules-sets">
+              <button class="link" title="Rules 1, 2, 5 and 6" onclick={() => (graph.rules = [1, 2, 5, 6])}>Western Electric</button>
+              <button class="link" title="All eight" onclick={() => (graph.rules = [1, 2, 3, 4, 5, 6, 7, 8])}>Nelson</button>
+              <button class="link" title="Only points beyond a limit" onclick={() => (graph.rules = [1])}>Limits only</button>
+            </span>
+          </div>
         {/if}
         {#if is('bar', 'histogram') && graph.color !== null}
           <label class="check"><input type="checkbox" bind:checked={graph.stacked} disabled={graph.logY} /> <span>Stack the colours</span></label>
@@ -1145,6 +1280,29 @@
     flex: 1;
     min-width: 0;
     padding: 2px 5px;
+    font-size: 12px;
+  }
+
+  .rules {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px 0;
+    padding: 5px 7px 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+  }
+
+  .rules-name {
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+
+  .rules-sets {
+    display: flex;
+    gap: 10px;
+    margin-top: 3px;
     font-size: 12px;
   }
 

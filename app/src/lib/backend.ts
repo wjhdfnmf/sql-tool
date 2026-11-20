@@ -33,6 +33,7 @@ import type {
   SelfTestConfig,
   ServerInfo,
   Settings,
+  SlicePlan,
   TableDetails,
   WorkspaceInfo,
 } from './types';
@@ -61,6 +62,22 @@ export interface Backend {
     onEvent: (message: RunMsg) => void,
   ): Promise<void>;
   cancel(workspaceId: number, tabId: string): Promise<void>;
+  /** How many slices a range makes, and the first one's statement. Rejects with the reason if the query cannot be sliced. */
+  slicePlan(sql: string, start: string, end: string, stepSecs: number): Promise<SlicePlan>;
+  /**
+   * Runs a query once for each slice of a time range and puts the rows end to end as one result. The query marks its
+   * range with {start} and {end}. Progress arrives through `onEvent`, as for `run`, with `slices` messages as well.
+   */
+  runSliced(
+    workspaceId: number,
+    tabId: string,
+    sql: string,
+    start: string,
+    end: string,
+    stepSecs: number,
+    maxRows: number | null,
+    onEvent: (message: RunMsg) => void,
+  ): Promise<void>;
   /** Makes a schema the default for every tab of the connection. Rejects if it does not exist. */
   setDefaultSchema(workspaceId: number, schema: string): Promise<void>;
   /** Rows as raw bytes: u32 row count, then length-prefixed cells. */
@@ -159,6 +176,12 @@ const tauriBackend: Backend = {
     return invoke('run', { workspaceId, tabId, script, mode, maxRows, onEvent: channel });
   },
   cancel: (workspaceId, tabId) => invoke('cancel', { workspaceId, tabId }),
+  slicePlan: (sql, start, end, stepSecs) => invoke('slice_plan', { sql, start, end, stepSecs }),
+  runSliced: (workspaceId, tabId, sql, start, end, stepSecs, maxRows, onEvent) => {
+    const channel = new Channel<RunMsg>();
+    channel.onmessage = onEvent;
+    return invoke('run_sliced', { workspaceId, tabId, sql, start, end, stepSecs, maxRows, onEvent: channel });
+  },
   setDefaultSchema: (workspaceId, schema) => invoke('set_default_schema', { workspaceId, schema }),
   getRows: async (resultId, offset, count) => {
     const data = await invoke<ArrayBuffer | number[]>('get_rows', { resultId, offset, count });

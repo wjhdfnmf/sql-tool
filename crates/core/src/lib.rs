@@ -18,6 +18,7 @@ pub mod profile;
 pub mod profiles;
 pub mod session;
 pub mod settings;
+pub mod slices;
 pub mod split;
 pub mod store;
 pub mod table;

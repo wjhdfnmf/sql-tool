@@ -3,7 +3,7 @@
 // same request and the same shape of answer, worked out here from the mock's
 // synthetic rows. It reads at most ROW_CAP rows; the real backend reads all.
 
-import { NULL_LABEL, OTHER_LABEL, fitPoints, parseTime } from './chart';
+import { NULL_LABEL, OTHER_LABEL, fitPoints, parseTime, runRules } from './chart';
 import type { BoxStats, ChartData, ChartRequest, ChartRole, ChartSeries, ColumnSummary, Stats, TimeBucket, XAxis } from './chart';
 
 const ROW_CAP = 200_000;
@@ -393,11 +393,11 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
       if (inOrder) {
         let drawn = 0;
         for (let row = 0; row < rows; row++) if (usable(row)) drawn++;
-        const size = Math.max(1, Math.ceil(drawn / MAX_CONTROL_POINTS));
+        const size = Math.max(1, request.runSize ?? 1, Math.ceil(drawn / MAX_CONTROL_POINTS));
         let index = 0;
         for (let row = 0; row < rows; row++) if (usable(row)) group[row] = Math.floor(index++ / size);
         groups = Math.ceil(drawn / size);
-        if (size > 1) data.notes.push(`Each point is the average of ${count(size)} rows in a row, in the order of the result.`);
+        if (size > 1 && request.runSize !== size) data.notes.push(`Each point is the average of ${count(size)} rows in a row, in the order of the result.`);
         axis = { type: 'sequence', count: groups, rowsPerPoint: size };
       } else {
         for (let row = 0; row < rows; row++) if (usable(row)) group[row] = 0;
@@ -456,32 +456,57 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
     data.stats = statsOf(yv, mask, request);
     if (data.rowsDrawn === 0) return data;
     const means = members.map((m) => (m.length ? m.reduce((a, b) => a + b, 0) / m.length : null));
-    const center = members.reduce((sum, m) => sum + m.reduce((a, b) => a + b, 0), 0) / data.rowsDrawn;
     const individuals = members.every((m) => m.length <= 1);
-    let sigma = 0;
+    const inside = members.map((m, i) => m.reduce((sum, v) => sum + (v - (means[i] as number)) ** 2, 0));
+    const points = means.map((m, i) => [i, m] as const).filter((point): point is readonly [number, number] => point[1] !== null);
+    let estimated = 0;
     if (individuals) {
-      const points = means.filter((m): m is number => m !== null);
-      for (let i = 1; i < points.length; i++) sigma += Math.abs(points[i] - points[i - 1]);
-      sigma = points.length > 1 ? sigma / (points.length - 1) / 1.128 : 0;
+      for (let i = 1; i < points.length; i++) estimated += Math.abs(points[i][1] - points[i - 1][1]);
+      estimated = points.length > 1 ? estimated / (points.length - 1) / 1.128 : 0;
     } else {
-      let [inside, freedom] = [0, 0];
-      members.forEach((m, i) => {
-        for (const v of m) inside += (v - (means[i] as number)) ** 2;
-        if (m.length >= 2) freedom += m.length - 1;
-      });
-      sigma = freedom > 0 ? Math.sqrt(inside / freedom) : 0;
+      const freedom = members.reduce((sum, m) => sum + (m.length >= 2 ? m.length - 1 : 0), 0);
+      estimated = freedom > 0 ? Math.sqrt(inside.reduce((a, b) => a + b, 0) / freedom) : 0;
     }
+    const center = request.controlCenter ?? members.reduce((sum, m) => sum + m.reduce((a, b) => a + b, 0), 0) / data.rowsDrawn;
+    const sigma = request.controlSigma !== null && request.controlSigma > 0 ? request.controlSigma : estimated;
     const limit = (n: number, sign: number) => (n > 0 ? center + (sign * 3 * sigma) / Math.sqrt(n) : null);
-    const upper = members.map((m) => limit(m.length, 1));
-    const lower = members.map((m) => limit(m.length, -1));
+    const signals = new Array<number>(members.length).fill(0);
+    const found = runRules(
+      points.map(([i, m]) => (sigma > 0 ? (m - center) / (sigma / Math.sqrt(members[i].length)) : 0)),
+      points.map(([, m]) => m),
+    );
+    points.forEach(([i], at) => (signals[i] = found[at]));
+    const none = (): (number | null)[] => new Array<number | null>(members.length).fill(null);
+    const [spread, spreadCenter, spreadUpper, spreadLower] = [none(), none(), none(), none()];
+    if (individuals) {
+      for (let at = 1; at < points.length; at++) {
+        const i = points[at][0];
+        spread[i] = Math.abs(points[at][1] - points[at - 1][1]);
+        [spreadCenter[i], spreadUpper[i], spreadLower[i]] = [sigma * 1.128, 3.267 * sigma * 1.128, 0];
+      }
+    } else {
+      members.forEach((m, i) => {
+        if (m.length < 2) return;
+        const c4 = (4 * (m.length - 1)) / (4 * m.length - 3);
+        const reach = 3 * Math.sqrt(1 - c4 * c4);
+        spread[i] = Math.sqrt(inside[i] / (m.length - 1));
+        [spreadCenter[i], spreadUpper[i], spreadLower[i]] = [c4 * sigma, (c4 + reach) * sigma, Math.max(0, c4 - reach) * sigma];
+      });
+    }
     data.series = [{ name: null, values: means, points: [] }];
     data.control = {
       center,
       sigma,
-      upper,
-      lower,
-      beyond: means.filter((m, i) => m !== null && (m > (upper[i] as number) || m < (lower[i] as number))).length,
+      upper: members.map((m) => limit(m.length, 1)),
+      lower: members.map((m) => limit(m.length, -1)),
+      beyond: signals.filter((signal) => signal & 1).length,
       individuals,
+      fixed: request.controlCenter !== null || (request.controlSigma !== null && request.controlSigma > 0),
+      signals,
+      spread,
+      spreadCenter,
+      spreadUpper,
+      spreadLower,
     };
     return data;
   }
@@ -542,6 +567,10 @@ export function mockChartData(resultId: number, cell: Cell, total: number, reque
   };
   const name = (category: number) => (category === nullAt ? NULL_LABEL : labels[category]);
   let shown = Array.from({ length: labels.length + 1 }, (_, c) => ({ c, t: totalOf(c) })).filter((entry) => entry.t.count > 0);
+  if (request.skipNull && x?.codes) {
+    data.rowsDrawn -= totalOf(nullAt).count;
+    shown = shown.filter((entry) => entry.c !== nullAt);
+  }
   const byValue = (a: (typeof shown)[number], b: (typeof shown)[number]) =>
     (value(b.t, statistic) ?? -Infinity) - (value(a.t, statistic) ?? -Infinity) || natural(name(a.c), name(b.c));
   const limit = Math.min(500, Math.max(1, request.maxCategories ?? 40));

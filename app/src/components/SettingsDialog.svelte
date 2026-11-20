@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { REFORMAT_STYLES } from '../lib/reformat';
   import { applyTheme, defaultSettings, settings, themeGroups, themes } from '../lib/settings.svelte';
   import { asUiError, type Settings } from '../lib/types';
 
@@ -13,6 +14,24 @@
   let draft = $state<Settings>({ ...defaultSettings });
   let saving = $state(false);
   let error = $state<string | null>(null);
+
+  // A section that is not on the page until it is found: the heading of
+  // Queries clicked five times, or the word typed anywhere in this window.
+  const WORD = 'threadripper';
+  const THREADS = [1, 2, 4, 6, 8, 12, 16];
+  let found = $state(false);
+  let typed = '';
+  let knocks = 0;
+
+  function listen(e: KeyboardEvent) {
+    if (e.key.length !== 1) return;
+    typed = (typed + e.key.toLowerCase()).slice(-WORD.length);
+    if (typed === WORD) found = true;
+  }
+
+  function knock() {
+    if (++knocks >= 5) found = true;
+  }
 
   const rowLimits: { label: string; value: number | null }[] = [
     { label: '1,000 rows', value: 1000 },
@@ -53,7 +72,7 @@
   }
 </script>
 
-<dialog bind:this={dialog} oncancel={cancel} aria-labelledby="settings-title">
+<dialog bind:this={dialog} oncancel={cancel} onkeydown={listen} aria-labelledby="settings-title">
   <form
     onsubmit={(e) => {
       e.preventDefault();
@@ -98,6 +117,22 @@
             <option value={8}>8 spaces</option>
           </select>
         </label>
+        <label>
+          <span>Reformat lays SQL out as</span>
+          <select bind:value={draft.reformatStyle}>
+            {#each REFORMAT_STYLES as style (style.value)}<option value={style.value}>{style.label}</option>{/each}
+          </select>
+          <span class="muted note">{REFORMAT_STYLES.find((s) => s.value === draft.reformatStyle)?.note}</span>
+          <pre class="sample">{REFORMAT_STYLES.find((s) => s.value === draft.reformatStyle)?.sample}</pre>
+        </label>
+        <label>
+          <span>Reformat writes keywords</span>
+          <select bind:value={draft.reformatKeywords}>
+            <option value="upper">IN UPPER CASE</option>
+            <option value="lower">in lower case</option>
+            <option value="preserve">As they were typed</option>
+          </select>
+        </label>
         <label class="check"><input type="checkbox" bind:checked={draft.editorWordWrap} /> Wrap long lines</label>
         <label class="check"><input type="checkbox" bind:checked={draft.uppercaseKeywords} /> Offer keywords in UPPER CASE when completing</label>
         <label class="check">
@@ -109,7 +144,8 @@
       </section>
 
       <section>
-        <h3>Queries</h3>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+        <h3 onclick={knock}>Queries</h3>
         <label>
           <span>Row limit for a new connection</span>
           <select bind:value={draft.defaultRowLimit}>
@@ -133,6 +169,23 @@
           <span class="muted note">Shared by all open results. Beyond it, rows go to a temporary file that is removed when the result closes.</span>
         </label>
       </section>
+
+      {#if found || draft.sliceThreads > 1}
+        <section class="ripper">
+          <h3><span aria-hidden="true">&#8649;</span> Threadripper</h3>
+          <p class="muted note">
+            You found it. A query run with <strong>In Slices</strong> normally runs its slices one after another. Here it can run several
+            at once, each on a connection of its own, and still put the rows together in order. More is faster until the server is the
+            limit; every one is a real connection carrying a real query, so go easy on a server other people use.
+          </p>
+          <div class="threads" role="radiogroup" aria-label="Slices run at once">
+            {#each THREADS as count (count)}
+              <button type="button" role="radio" aria-checked={draft.sliceThreads === count} onclick={() => (draft.sliceThreads = count)}>{count}</button>
+            {/each}
+            <span class="muted">{draft.sliceThreads === 1 ? 'one at a time' : `${draft.sliceThreads} slices at a time`}</span>
+          </div>
+        </section>
+      {/if}
 
       <section>
         <h3>Connections</h3>
@@ -173,6 +226,51 @@
 </dialog>
 
 <style>
+  .ripper {
+    border: 1px dashed var(--accent);
+    border-radius: 8px;
+    padding: 8px 12px 10px;
+  }
+
+  .ripper h3 {
+    color: var(--accent);
+  }
+
+  .threads {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+  }
+
+  .threads button {
+    min-width: 34px;
+    padding: 3px 0;
+  }
+
+  .threads button[aria-checked='true'] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-text);
+  }
+
+  .threads span {
+    margin-left: 8px;
+  }
+
+  .sample {
+    margin: 4px 0 0;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
   dialog {
     width: min(620px, calc(100vw - 32px));
   }
