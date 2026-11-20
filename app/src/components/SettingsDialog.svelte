@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { REFORMAT_STYLES } from '../lib/reformat';
   import { applyTheme, defaultSettings, settings, themeGroups, themes } from '../lib/settings.svelte';
+  import { app } from '../lib/state.svelte';
   import { asUiError, type Settings } from '../lib/types';
 
   interface Props {
@@ -65,6 +66,12 @@
       error = asUiError(e).message;
       saving = false;
     }
+  }
+
+  /** Leaves Settings for the list of MySQL Workbench's connections. Changes made here and not saved are dropped. */
+  function importConnections() {
+    cancel();
+    app.showImport = true;
   }
 
   function restoreDefaults() {
@@ -189,6 +196,13 @@
 
       <section>
         <h3>Connections</h3>
+        <div class="import">
+          <div>
+            <div>Import from MySQL Workbench</div>
+            <span class="muted note">Reads the connections Workbench has saved and brings over the ones you tick. Passwords are not imported.</span>
+          </div>
+          <button type="button" onclick={importConnections}>Import&hellip;</button>
+        </div>
         <label>
           <span>Give up connecting after (seconds)</span>
           <input type="number" min="3" max="300" step="1" bind:value={draft.connectTimeoutSecs} />
@@ -226,6 +240,14 @@
 </dialog>
 
 <style>
+  .import {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 10px;
+  }
+
   .ripper {
     border: 1px dashed var(--accent);
     border-radius: 8px;

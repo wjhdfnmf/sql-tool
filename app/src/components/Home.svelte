@@ -5,12 +5,9 @@
   import { app, forgetSavedTabs, type WorkspaceState } from '../lib/state.svelte';
   import { asUiError, explainConnectError, newProfile, type Profile, type TlsSetting } from '../lib/types';
   import ConnectionDialog from './ConnectionDialog.svelte';
-  import WorkbenchImport from './WorkbenchImport.svelte';
   import Menu from './Menu.svelte';
   import PasswordPrompt from './PasswordPrompt.svelte';
 
-  /** The dialog that brings connections over from MySQL Workbench is open. */
-  let importing = $state(false);
   let editing = $state<Profile | null>(null);
   let asking = $state<Profile | null>(null);
   let promptError = $state<string | null>(null);
@@ -32,6 +29,18 @@
   function modal(node: HTMLDialogElement) {
     node.showModal();
   }
+
+  /** Everything about a connection that its card leaves out, for the tooltip. */
+  const more = (profile: Profile) =>
+    [
+      `${profile.user}@${profile.host}:${profile.port}`,
+      tlsLabels[profile.tls],
+      profile.database ? `default schema ${profile.database}` : '',
+      profile.cleartextAuth ? 'cleartext auth' : '',
+      profile.hasPassword ? 'password in the keychain' : 'asks for the password',
+    ]
+      .filter(Boolean)
+      .join(' \u00b7 ');
 
   const tlsLabels: Record<TlsSetting, string> = {
     'verify-identity': 'Encrypted, verified',
@@ -134,49 +143,63 @@
 
 <main class="home">
   <header>
-    <h1>Connections</h1>
-    <span class="head-buttons">
-      <button title="Bring connections over from MySQL Workbench: choose which ones" onclick={() => (importing = true)}>Import from Workbench&hellip;</button>
-      <button class="primary" onclick={() => (editing = newProfile())}>New connection</button>
-    </span>
+    <div>
+      <h1>Connections</h1>
+      {#if app.profiles.length > 0}
+        <p class="muted count">{app.profiles.length} saved</p>
+      {/if}
+    </div>
+    <button class="primary" onclick={() => (editing = newProfile())}>+ New connection</button>
   </header>
 
   {#if app.profiles.length === 0}
-    <p class="empty muted">
-      No saved connections yet. Create one to connect to a MySQL or MariaDB server, or import the ones you have in MySQL Workbench.
-    </p>
+    <div class="empty">
+      <div class="empty-mark" aria-hidden="true">&#9783;</div>
+      <p class="empty-title">No connections yet</p>
+      <p class="muted">
+        Create one to connect to a MySQL or MariaDB server. If you use MySQL Workbench, its connections can be brought over from
+        Settings.
+      </p>
+      <div class="empty-buttons">
+        <button class="primary" onclick={() => (editing = newProfile())}>+ New connection</button>
+        <button onclick={() => (app.showSettings = true)}>Settings</button>
+      </div>
+    </div>
   {/if}
 
   <ul class="profiles">
     {#each app.profiles as profile (profile.id)}
-      <li class="profile">
-        <span class="tag-dot" style:background={profile.color ? `var(--tag-${profile.color})` : 'var(--border)'}
-        ></span>
-        <div class="details">
-          <div class="name">{label(profile)}</div>
-          <div class="muted">
-            {profile.user}@{profile.host}:{profile.port}
-            &middot; {tlsLabels[profile.tls]}
-            {#if profile.cleartextAuth}&middot; cleartext auth{/if}
-            {#if profile.readOnly}&middot; read-only{/if}
-            {#if profile.production}&middot; production{/if}
+      {@const open = app.workspaces.some((w) => w.info.profileId === profile.id)}
+      <li class="card" class:failed={!!errors[profile.id]} style:--tag={profile.color ? `var(--tag-${profile.color})` : 'var(--border)'} title={more(profile)}>
+        <div class="card-top">
+          <span class="avatar" aria-hidden="true">{(label(profile).trim()[0] ?? '?').toUpperCase()}</span>
+          <div class="who">
+            <div class="name">{label(profile)}</div>
+            <div class="muted where">{profile.user}@{profile.host}</div>
           </div>
-          {#if errors[profile.id]}
-            <p class="error-text" role="alert">{errors[profile.id]}</p>
-            <p><button onclick={() => (editing = { ...profile })}>Edit connection settings</button></p>
-          {/if}
-        </div>
-        <div class="actions">
-          <button class="primary" disabled={busyId !== null} onclick={() => connect(profile)}>
-            {busyId === profile.id ? 'Connecting…' : 'Connect'}
-          </button>
           <button
-            class="more"
+            class="quiet more"
             aria-label={`More for ${label(profile)}`}
             aria-haspopup="menu"
             title="Edit, server information, delete"
             onclick={(e) => showMenu(e, profile)}>&#9776;</button
           >
+        </div>
+        {#if errors[profile.id]}
+          <p class="error-text" role="alert">{errors[profile.id]}</p>
+        {/if}
+        <div class="card-foot">
+          <!-- The two that change what a connection will let you do stay in sight. -->
+          {#if profile.production}<span class="pill production" title="Risky statements ask for confirmation">Production</span>{/if}
+          {#if profile.readOnly}<span class="pill" title="Only reads are allowed on this connection">Read-only</span>{/if}
+          {#if open}<span class="pill open" title="This connection is open in a tab">Open</span>{/if}
+          <span class="spacer"></span>
+          {#if errors[profile.id]}
+            <button onclick={() => (editing = { ...profile })}>Edit settings</button>
+          {/if}
+          <button class="primary" disabled={busyId !== null} onclick={() => connect(profile)}>
+            {busyId === profile.id ? 'Connecting\u2026' : 'Connect'}
+          </button>
         </div>
       </li>
     {/each}
@@ -251,10 +274,6 @@
   </dialog>
 {/if}
 
-{#if importing}
-  <WorkbenchImport onclose={() => (importing = false)} />
-{/if}
-
 {#if editing}
   <ConnectionDialog
     profile={editing}
@@ -282,73 +301,208 @@
   .home {
     flex: 1;
     overflow: auto;
-    padding: 24px max(24px, calc((100% - 860px) / 2));
-  }
-
-  .head-buttons {
-    display: flex;
-    gap: 8px;
+    padding: 28px max(24px, calc((100% - 920px) / 2)) 24px;
+    background: var(--panel);
   }
 
   header {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     justify-content: space-between;
-    margin-bottom: 16px;
+    margin-bottom: 18px;
   }
 
   h1 {
     margin: 0;
-    font-size: 20px;
-    font-weight: 600;
+    font-size: 22px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
   }
 
+  .count {
+    margin: 2px 0 0;
+    font-size: 12px;
+  }
+
+  /* Two to a row; one when the window is too narrow for two to read well. */
   .profiles {
     list-style: none;
     margin: 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
   }
 
-  .profile,
+  @media (max-width: 720px) {
+    .profiles {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 14px 12px 16px;
+    border: 1px solid var(--border);
+    /* The connection's colour tag, as a band down the side. */
+    border-left: 4px solid var(--tag);
+    border-radius: 10px;
+    background: var(--bg);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+    transition:
+      box-shadow 0.12s ease,
+      transform 0.12s ease,
+      border-color 0.12s ease;
+  }
+
+  .card:hover {
+    box-shadow: 0 4px 14px rgb(0 0 0 / 0.1);
+    transform: translateY(-1px);
+    border-top-color: var(--accent);
+    border-right-color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .card.failed {
+    border-top-color: var(--danger);
+    border-right-color: var(--danger);
+    border-bottom-color: var(--danger);
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .avatar {
+    width: 38px;
+    height: 38px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--tag) 22%, var(--panel));
+    color: var(--text);
+    font-size: 17px;
+    font-weight: 650;
+  }
+
+  .who {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .name {
+    font-weight: 600;
+    font-size: 15px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .where {
+    font-family: var(--mono);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .more {
+    flex: none;
+    padding: 4px 9px;
+    font-size: 15px;
+  }
+
+  .card-foot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+  }
+
+  .card-foot .primary {
+    min-width: 96px;
+  }
+
+  .spacer {
+    flex: 1;
+  }
+
+  .pill {
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .pill.production {
+    border-color: var(--warn-border);
+    background: var(--warn-bg);
+    color: var(--warn-text);
+  }
+
+  .pill.open {
+    border-color: var(--ok);
+    color: var(--ok);
+  }
+
+  .card .error-text {
+    margin: 0;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
   .demo {
     display: flex;
     align-items: flex-start;
     gap: 12px;
     padding: 12px 14px;
     border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg);
+    border-radius: 10px;
   }
 
-  .profile .tag-dot {
-    margin-top: 5px;
-  }
-
-  .details {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .details .muted {
-    overflow-wrap: anywhere;
-  }
-
-  .name {
-    font-weight: 600;
+  .demo .name {
     font-size: 14px;
   }
 
-  .actions {
+  .empty {
     display: flex;
+    flex-direction: column;
+    align-items: center;
     gap: 6px;
-    flex: none;
+    padding: 44px 24px;
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    text-align: center;
   }
 
-  .more {
-    padding: 5px 10px;
+  .empty p {
+    margin: 0;
+    max-width: 420px;
+  }
+
+  .empty-mark {
+    font-size: 30px;
+    color: var(--muted);
+    line-height: 1;
+  }
+
+  .empty-title {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .empty-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
   }
 
   .prompt {
@@ -413,7 +567,6 @@
     overflow-wrap: anywhere;
   }
 
-  .details p,
   .demo p {
     margin: 8px 0 0;
   }
@@ -421,17 +574,13 @@
   .demo {
     margin-top: 24px;
     justify-content: space-between;
-    background: var(--panel);
+    background: var(--bg);
     border-style: dashed;
   }
 
   code {
     font-family: var(--mono);
     font-size: 12px;
-  }
-
-  .empty {
-    padding: 24px 0;
   }
 
   .version {
