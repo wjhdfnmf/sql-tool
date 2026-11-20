@@ -51,6 +51,8 @@ pub struct Settings {
     pub slice_threads: u32,
     /// Let connections be dragged into a different order and into named groups on the Connections page.
     pub organize_connections: bool,
+    /// Hide the output while the editor is in use: a click in the editor puts it away, the pointer at the bottom brings it back.
+    pub auto_hide_output: bool,
 }
 
 pub const REFORMAT_STYLES: [&str; 4] = ["standard", "compact", "aligned", "oneline"];
@@ -76,6 +78,7 @@ impl Default for Settings {
             reformat_keywords: "upper".into(),
             slice_threads: 1,
             organize_connections: true,
+            auto_hide_output: false,
         }
     }
 }
