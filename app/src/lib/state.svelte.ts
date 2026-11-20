@@ -501,6 +501,8 @@ class AppState {
   showSettings = $state(false);
   /** The help screen (shortcuts and where things are) is open. */
   showHelp = $state(false);
+  /** The list of MySQL Workbench's connections, to bring some over, is open. */
+  showImport = $state(false);
   /** The end of the row of connection tabs, where the connection in front shows its buttons. */
   toolsHost = $state<HTMLElement | undefined>();
 

@@ -3,6 +3,7 @@
   import HelpDialog from './components/HelpDialog.svelte';
   import Home from './components/Home.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
+  import WorkbenchImport from './components/WorkbenchImport.svelte';
   import Workspace from './components/Workspace.svelte';
   import { backend } from './lib/backend';
   import { runSelfTest } from './lib/selftest';
@@ -71,6 +72,10 @@
 
 {#if app.showSettings}
   <SettingsDialog onclose={() => (app.showSettings = false)} />
+{/if}
+
+{#if app.showImport}
+  <WorkbenchImport onclose={() => (app.showImport = false)} />
 {/if}
 
 {#if app.showHelp}
