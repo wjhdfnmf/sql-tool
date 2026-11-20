@@ -25,6 +25,7 @@ What changed in each release, newest first. The [releases page](https://github.c
 
 - **macOS**: Cmd+W closed the window, which quit the app; it closes the query tab, as Ctrl+W does elsewhere. Explain (Cmd+Option+X) did nothing. Shortcuts are named Cmd and Option in tooltips, menus and Help.
 - **Linux with no keyring**: saving or deleting a connection reported an error, and a connection with a saved password would not connect. The connection is saved and a notice says what became of the password; connecting asks for it.
+- **Linux and macOS**: Copy could be refused by the system ("The clipboard could not be written to"). Copying cells, a name or a picture of a graph now goes through the system's own clipboard on every system.
 - **An export of the rows shown that failed part-way** left the partial file. It is removed.
 - **A script file that begins with a byte-order mark** failed at its first statement. The mark is dropped; UTF-16 files are opened too.
 - **If the app could not start** it closed without a word. It says why, and notes it in `crash.log`.

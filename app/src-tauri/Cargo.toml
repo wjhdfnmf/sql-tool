@@ -21,7 +21,8 @@ devtools = ["dep:sqltool-fakeserver"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# image-png: a picture of a chart arrives as a PNG and is put on the clipboard as pixels.
+tauri = { version = "2", features = ["image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { workspace = true }
@@ -30,6 +31,10 @@ sqltool-core = { path = "../../crates/core" }
 sqltool-secrets = { path = "../../crates/secrets" }
 sqltool-fakeserver = { path = "../../crates/fakeserver", optional = true }
 tauri-plugin-dialog = "2"
+# Copying goes through the system's own clipboard. The web view's is refused
+# on Linux and macOS unless the write happens inside the click itself, and a
+# copy here first asks the backend for the text.
+tauri-plugin-clipboard-manager = "2"
 # The window opens where it was, at the size it had.
 tauri-plugin-window-state = "2"
 # A second start brings the running app to the front instead of opening another.

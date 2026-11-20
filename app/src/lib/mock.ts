@@ -809,6 +809,10 @@ export const mockBackend: Backend = {
   closeAnswer: async () => {},
   onCloseRequested: async () => () => {},
   selftestConfig: async () => null,
+  // In a plain browser the page's own clipboard is all there is.
+  clipboardText: (text) => navigator.clipboard.writeText(text),
+  clipboardImage: (png) => navigator.clipboard.write([new ClipboardItem({ 'image/png': new Blob([png.buffer as ArrayBuffer], { type: 'image/png' }) })]),
+  selftestClipboard: async () => '',
   selftestReport: async () => {},
   selftestCloseWindow: async () => {},
 };

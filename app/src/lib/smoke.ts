@@ -102,16 +102,28 @@ export async function runSmoke(): Promise<void> {
     expect(result, 'no result to copy from');
     const text = await backend.copyRange(result.id, { rowStart: 0, rowEnd: 1, colStart: 0, colEnd: 1 }, 'tsv', true, '');
     expect(text.split('\n').length >= 3 && text.includes('\t'), `copied: ${text.slice(0, 80)}`);
-    // Putting it on the clipboard is the system's part. With no one at the
-    // keyboard the window may not be in front, and a system may then refuse:
-    // what it said is reported, not counted as a failure.
-    let clipboard = 'written';
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch (e) {
-      clipboard = `refused: ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`;
-    }
-    return { clipboard };
+    // Onto the system's clipboard, the way Copy does it, and read back from
+    // there: on Linux and macOS the web view's own clipboard refuses a write
+    // that is not made inside a click.
+    await backend.clipboardText(text);
+    const back = await backend.selftestClipboard();
+    expect(back === text, `the clipboard holds ${JSON.stringify(back.slice(0, 60))}, not what was copied`);
+    return { clipboard: `${back.length} characters, read back the same` };
+  });
+
+  await step('a picture is copied', async () => {
+    // What Copy image on a graph does, with a small picture drawn here.
+    const drawing = document.createElement('canvas');
+    drawing.width = 64;
+    drawing.height = 40;
+    const pen = drawing.getContext('2d')!;
+    pen.fillStyle = '#1f5fbf';
+    pen.fillRect(0, 0, 64, 40);
+    const blob = await new Promise<Blob | null>((done) => drawing.toBlob(done, 'image/png'));
+    expect(blob, 'no picture could be made');
+    const png = new Uint8Array(await blob.arrayBuffer());
+    await backend.clipboardImage(png);
+    return { bytes: png.length };
   });
 
   await step('a result is exported to a file', async () => {
