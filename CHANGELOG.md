@@ -4,6 +4,10 @@ What changed in each release, newest first. The [releases page](https://github.c
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.3.1 - 2026-11-20
+
 ### Added
 
 - **Connections can be organised**: drag one to move it, and gather them into named groups that fold away. A setting, on to begin with.
