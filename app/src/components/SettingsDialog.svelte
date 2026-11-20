@@ -196,6 +196,10 @@
 
       <section>
         <h3>Connections</h3>
+        <label class="check">
+          <input type="checkbox" bind:checked={draft.organizeConnections} /> Organise connections by dragging: reorder them, and gather them into named groups
+        </label>
+        <p class="muted note">Off, the Connections page is a plain list in the order kept, and nothing on it can be dragged. Groups are kept either way.</p>
         <div class="import">
           <div>
             <div>Import from MySQL Workbench</div>

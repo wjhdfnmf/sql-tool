@@ -124,7 +124,7 @@ const schemas: Record<string, Record<string, [string, string, boolean, string][]
 const mockDefaults: Settings = {
   theme: 'system', zoom: 100, editorTabSize: 2, editorWordWrap: false, uppercaseKeywords: true, rememberTabs: true,
   defaultRowLimit: 10_000, queryTimeoutSecs: 0, connectTimeoutSecs: 15, keepAliveSecs: 0, keepHistory: true, resultMemoryMb: 512,
-  reformatStyle: 'standard', reformatKeywords: 'upper', sliceThreads: 1,
+  reformatStyle: 'standard', reformatKeywords: 'upper', sliceThreads: 1, organizeConnections: true,
 };
 
 let nextId = 100;
@@ -263,6 +263,16 @@ export const mockBackend: Backend = {
     saved.hasPassword = saved.savePassword && (password !== null || !!profiles.find((p) => p.id === saved.id)?.hasPassword);
     profiles = profiles.some((p) => p.id === saved.id) ? profiles.map((p) => (p.id === saved.id ? saved : p)) : [...profiles, saved];
     return structuredClone(saved);
+  },
+  profilesArrange: async (arrangement) => {
+    const left = [...profiles];
+    const ordered: Profile[] = [];
+    for (const { id, group } of arrangement) {
+      const at = left.findIndex((p) => p.id === id);
+      if (at >= 0) ordered.push({ ...left.splice(at, 1)[0], group: group?.trim() || null });
+    }
+    profiles = [...ordered, ...left];
+    return structuredClone(profiles);
   },
   profileDelete: async (id) => {
     profiles = profiles.filter((p) => p.id !== id);

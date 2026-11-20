@@ -2,6 +2,7 @@
   import { adminQueries } from '../lib/admin';
   import { backend } from '../lib/backend';
   import { separator, type MenuItem } from '../lib/menu';
+  import { settings } from '../lib/settings.svelte';
   import { app, forgetSavedTabs, type WorkspaceState } from '../lib/state.svelte';
   import { asUiError, explainConnectError, newProfile, type Profile, type TlsSetting } from '../lib/types';
   import ConnectionDialog from './ConnectionDialog.svelte';
@@ -25,6 +26,223 @@
   let afterConnect: { profileId: string; title: string; sql: string } | null = null;
 
   const label = (profile: Profile) => profile.name || `${profile.user}@${profile.host}`;
+
+  // ---------- order and groups ----------
+  //
+  // The order of the connections is the order they are stored in, and a
+  // group is a name that some of them carry. Every change here makes a new
+  // list of (connection, group) in the order wanted and has the backend store it.
+
+  interface Section {
+    /** Null for the connections that are in no group, which come first. */
+    name: string | null;
+    profiles: Profile[];
+  }
+
+  const organize = $derived(settings.current.organizeConnections);
+  const sections = $derived.by((): Section[] => {
+    if (!organize) return [{ name: null, profiles: app.profiles }];
+    const loose: Section = { name: null, profiles: [] };
+    const named: Section[] = [];
+    for (const profile of app.profiles) {
+      const name = profile.group?.trim() || null;
+      const section = name === null ? loose : (named.find((g) => g.name === name) ?? (named.push({ name, profiles: [] }), named[named.length - 1]));
+      section.profiles.push(profile);
+    }
+    return loose.profiles.length > 0 || named.length === 0 ? [loose, ...named] : named;
+  });
+  const groupNames = $derived(sections.flatMap((section) => (section.name === null ? [] : [section.name])));
+
+  let arrangeError = $state<string | null>(null);
+
+  /** Stores an arrangement: the page shows it at once, and the stored list replaces it when it comes back. */
+  async function arrange(next: Section[]) {
+    const flat = next.flatMap((section) => section.profiles.map((profile) => ({ ...profile, group: section.name })));
+    const before = app.profiles;
+    app.profiles = flat;
+    arrangeError = null;
+    try {
+      app.profiles = await backend.profilesArrange(flat.map((profile) => ({ id: profile.id, group: profile.group ?? null })));
+    } catch (e) {
+      app.profiles = before;
+      arrangeError = `The new arrangement could not be saved: ${asUiError(e).message}`;
+    }
+  }
+
+  /** The sections as they are, as plain copies to rearrange. */
+  const copy = (): Section[] => sections.map((section) => ({ name: section.name, profiles: [...section.profiles] }));
+
+  /** Moves a connection into a group (null for none), before another connection or at the end. */
+  function moveCard(id: string, group: string | null, beforeId: string | null) {
+    if (id === beforeId) return;
+    const next = copy();
+    const moved = next.flatMap((section) => section.profiles).find((profile) => profile.id === id);
+    if (!moved) return;
+    for (const section of next) section.profiles = section.profiles.filter((profile) => profile.id !== id);
+    let target = next.find((section) => section.name === group);
+    if (!target) {
+      target = { name: group, profiles: [] };
+      // Connections in no group come first; a new group goes last.
+      if (group === null) next.unshift(target);
+      else next.push(target);
+    }
+    const at = beforeId === null ? -1 : target.profiles.findIndex((profile) => profile.id === beforeId);
+    target.profiles.splice(at < 0 ? target.profiles.length : at, 0, moved);
+    void arrange(next);
+  }
+
+  /** Moves a connection one place earlier or later within its group. */
+  function nudge(profile: Profile, by: -1 | 1) {
+    const section = sections.find((s) => s.profiles.some((p) => p.id === profile.id));
+    if (!section) return;
+    const at = section.profiles.findIndex((p) => p.id === profile.id);
+    const to = at + by;
+    if (to < 0 || to >= section.profiles.length) return;
+    // Later means after the next one: before the one after that, or at the end.
+    moveCard(profile.id, section.name, by < 0 ? section.profiles[to].id : (section.profiles[to + 1]?.id ?? null));
+  }
+
+  /** A group name not in use yet: "New group", "New group 2", and so on. */
+  function freeGroupName(): string {
+    for (let n = 1; ; n++) {
+      const name = n === 1 ? 'New group' : `New group ${n}`;
+      if (!groupNames.includes(name)) return name;
+    }
+  }
+
+  /** Starts a group with one connection in it, and opens its name for typing. */
+  function startGroup(id: string) {
+    const name = freeGroupName();
+    moveCard(id, name, null);
+    renaming = { from: name, text: name };
+  }
+
+  /** The group whose name is being typed. */
+  let renaming = $state<{ from: string; text: string } | null>(null);
+
+  function finishRename(keep: boolean) {
+    const current = renaming;
+    renaming = null;
+    if (!current || !keep) return;
+    const name = current.text.trim().slice(0, 60);
+    if (name === '' || name === current.from) return;
+    // Given the name of another group, the two become one.
+    const next = copy();
+    const from = next.find((section) => section.name === current.from);
+    const into = next.find((section) => section.name === name);
+    if (!from) return;
+    if (into) {
+      into.profiles.push(...from.profiles);
+      void arrange(next.filter((section) => section !== from));
+    } else {
+      from.name = name;
+      void arrange(next);
+    }
+  }
+
+  /** Dissolves a group: its connections go back among those in no group. */
+  function ungroup(name: string) {
+    const next = copy();
+    const from = next.find((section) => section.name === name);
+    if (!from) return;
+    let loose = next.find((section) => section.name === null);
+    if (!loose) {
+      loose = { name: null, profiles: [] };
+      next.unshift(loose);
+    }
+    loose.profiles.push(...from.profiles);
+    void arrange(next.filter((section) => section !== from));
+  }
+
+  function moveGroup(name: string, by: -1 | 1) {
+    const next = copy();
+    const at = next.findIndex((section) => section.name === name);
+    const to = at + by;
+    // The connections in no group stay first.
+    if (at < 0 || to < 0 || to >= next.length || next[to].name === null) return;
+    [next[at], next[to]] = [next[to], next[at]];
+    void arrange(next);
+  }
+
+  // Which groups are folded away is a matter of this window, not of the connections: it is kept here, not with them.
+  const FOLDED_KEY = 'sqltool.groups.folded';
+  let folded = $state<string[]>(
+    (() => {
+      try {
+        const kept: unknown = JSON.parse(localStorage.getItem(FOLDED_KEY) ?? '[]');
+        return Array.isArray(kept) ? kept.filter((name): name is string => typeof name === 'string') : [];
+      } catch {
+        return [];
+      }
+    })(),
+  );
+
+  function fold(name: string) {
+    folded = folded.includes(name) ? folded.filter((n) => n !== name) : [...folded, name];
+    try {
+      localStorage.setItem(FOLDED_KEY, JSON.stringify(folded));
+    } catch {
+      // Remembering what is folded is a convenience.
+    }
+  }
+
+  // ---------- dragging ----------
+
+  /** Where a dragged connection would land. */
+  type Drop = { group: string | null; beforeId: string | null; side: 'before' | 'after' | 'end'; overId: string | null } | { fresh: true };
+  let dragging = $state<{ id: string; x: number; y: number; drop: Drop | null } | null>(null);
+  /** Set when a drag has just ended, so that the click that follows it does nothing. */
+  let justDragged = false;
+
+  /** What is under the pointer: a card (and which half of it), the empty part of a group, or the place for a new group. */
+  function dropAt(x: number, y: number, id: string): Drop | null {
+    const under = document.elementFromPoint(x, y);
+    if (under?.closest('[data-fresh]')) return { fresh: true };
+    const section = under?.closest<HTMLElement>('[data-section]');
+    if (!section) return null;
+    const group = section.dataset.section === '' ? null : (section.dataset.section ?? null);
+    const card = under?.closest<HTMLElement>('[data-card]');
+    const members = sections.find((s) => s.name === group)?.profiles ?? [];
+    if (!card || card.dataset.card === id) return card ? null : { group, beforeId: null, side: 'end', overId: null };
+    const box = card.getBoundingClientRect();
+    const overId = card.dataset.card ?? null;
+    if (x < box.left + box.width / 2) return { group, beforeId: overId, side: 'before', overId };
+    const at = members.findIndex((p) => p.id === overId);
+    // After this card is before the next one that is not the card being dragged.
+    const next = members.slice(at + 1).find((p) => p.id !== id);
+    return { group, beforeId: next?.id ?? null, side: 'after', overId };
+  }
+
+  function startDrag(e: PointerEvent, profile: Profile) {
+    // Not from a button on the card, and only with the main button.
+    if (!organize || e.button !== 0 || (e.target as HTMLElement).closest('button, input, a')) return;
+    const [startX, startY] = [e.clientX, e.clientY];
+    let moved = false;
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
+      moved = true;
+      dragging = { id: profile.id, x: ev.clientX, y: ev.clientY, drop: dropAt(ev.clientX, ev.clientY, profile.id) };
+    };
+    const stop = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      const drop = ev.type === 'pointerup' && moved ? dropAt(ev.clientX, ev.clientY, profile.id) : null;
+      dragging = null;
+      if (!moved) return;
+      justDragged = true;
+      setTimeout(() => (justDragged = false));
+      if (!drop) return;
+      if ('fresh' in drop) startGroup(profile.id);
+      else moveCard(profile.id, drop.group, drop.beforeId);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+  }
+
+  /** The mark a card shows while something is dragged over it: a bar on the side the dragged card would go. */
+  const dropSide = (profile: Profile) => (dragging?.drop && !('fresh' in dragging.drop) && dragging.drop.overId === profile.id ? dragging.drop.side : null);
 
   function modal(node: HTMLDialogElement) {
     node.showModal();
@@ -113,6 +331,18 @@
       items: [
         { label: 'Edit…', action: () => (editing = { ...profile }) },
         { label: 'Server Information…', action: () => (infoFor = profile) },
+        // Everything dragging does can be done from here too.
+        ...(organize
+          ? [
+              separator,
+              { label: 'Move earlier', action: () => nudge(profile, -1) },
+              { label: 'Move later', action: () => nudge(profile, 1) },
+              separator,
+              ...groupNames.map((name) => ({ label: `Move to \u201c${name}\u201d`, checked: (profile.group ?? null) === name, action: () => moveCard(profile.id, name, null) })),
+              { label: 'Move to a new group…', action: () => startGroup(profile.id) },
+              { label: 'Take out of its group', disabled: !profile.group, action: () => moveCard(profile.id, null, null) },
+            ]
+          : []),
         separator,
         { label: 'Delete…', action: () => (deleting = profile) },
       ],
@@ -167,10 +397,18 @@
     </div>
   {/if}
 
-  <ul class="profiles">
-    {#each app.profiles as profile (profile.id)}
+{#snippet connection(profile: Profile)}
       {@const open = app.workspaces.some((w) => w.info.profileId === profile.id)}
-      <li class="card" class:failed={!!errors[profile.id]} style:--tag={profile.color ? `var(--tag-${profile.color})` : 'var(--border)'} title={more(profile)}>
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <li
+        class="card"
+        class:failed={!!errors[profile.id]}
+        class:movable={organize}
+        class:lifted={dragging?.id === profile.id}
+        class:drop-before={dropSide(profile) === 'before'}
+        class:drop-after={dropSide(profile) === 'after'}
+        data-card={profile.id}
+        onpointerdown={(e) => startDrag(e, profile)} style:--tag={profile.color ? `var(--tag-${profile.color})` : 'var(--border)'} title={more(profile)}>
         <div class="card-top">
           <span class="avatar" aria-hidden="true">{(label(profile).trim()[0] ?? '?').toUpperCase()}</span>
           <div class="who">
@@ -197,13 +435,75 @@
           {#if errors[profile.id]}
             <button onclick={() => (editing = { ...profile })}>Edit settings</button>
           {/if}
-          <button class="primary" disabled={busyId !== null} onclick={() => connect(profile)}>
+          <button class="primary" disabled={busyId !== null} onclick={() => !justDragged && connect(profile)}>
             {busyId === profile.id ? 'Connecting\u2026' : 'Connect'}
           </button>
         </div>
       </li>
-    {/each}
-  </ul>
+{/snippet}
+
+  {#if arrangeError}<p class="error-text" role="alert">{arrangeError}</p>{/if}
+
+  {#each sections as section (section.name ?? '')}
+    {@const name = section.name}
+    {@const shut = name !== null && folded.includes(name)}
+    <section class="group" class:target={dragging?.drop && !('fresh' in dragging.drop) && dragging.drop.group === name} data-section={name ?? ''}>
+      {#if name !== null}
+        <div class="group-head">
+          <button class="quiet fold" aria-expanded={!shut} aria-label={`${shut ? 'Show' : 'Hide'} the connections in ${name}`} title={shut ? 'Show' : 'Hide'} onclick={() => fold(name)}>
+            {shut ? '\u25B8' : '\u25BE'}
+          </button>
+          {#if renaming?.from === name}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="group-name-input"
+              type="text"
+              maxlength="60"
+              aria-label="Name of the group"
+              autofocus
+              value={renaming?.text ?? ''}
+              oninput={(e) => renaming && (renaming.text = e.currentTarget.value)}
+              onfocus={(e) => e.currentTarget.select()}
+              onblur={() => finishRename(true)}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') finishRename(true);
+                else if (e.key === 'Escape') {
+                  e.stopPropagation();
+                  finishRename(false);
+                }
+              }}
+            />
+          {:else}
+            <button class="quiet group-name" title="Rename this group" onclick={() => (renaming = { from: name, text: name })}>{name}</button>
+          {/if}
+          <span class="muted group-count">{section.profiles.length}</span>
+          <span class="rule"></span>
+          <span class="group-tools">
+            <button class="quiet" title="Move this group up" aria-label={`Move ${name} up`} disabled={groupNames.indexOf(name) === 0} onclick={() => moveGroup(name, -1)}>&#9652;</button>
+            <button class="quiet" title="Move this group down" aria-label={`Move ${name} down`} disabled={groupNames.indexOf(name) === groupNames.length - 1} onclick={() => moveGroup(name, 1)}>&#9662;</button>
+            <button class="quiet" title="Dissolve this group: its connections stay, in no group" aria-label={`Dissolve the group ${name}`} onclick={() => ungroup(name)}>&#215;</button>
+          </span>
+        </div>
+      {:else if organize && groupNames.length > 0 && section.profiles.length > 0}
+        <div class="group-head"><span class="group-name plain">Not in a group</span><span class="muted group-count">{section.profiles.length}</span><span class="rule"></span></div>
+      {/if}
+      {#if !shut}
+        <ul class="profiles">
+          {#each section.profiles as profile (profile.id)}
+            {@render connection(profile)}
+          {/each}
+        </ul>
+      {/if}
+    </section>
+  {/each}
+
+  {#if dragging}
+    <div class="fresh" class:target={dragging.drop && 'fresh' in dragging.drop} data-fresh>Drop here to start a new group</div>
+    <div class="ghost" style:left={`${dragging.x + 12}px`} style:top={`${dragging.y + 10}px`}>{label(app.profiles.find((p) => p.id === dragging?.id) ?? newProfile())}</div>
+  {:else if organize && app.profiles.length > 1 && groupNames.length === 0}
+    <p class="muted hint">Drag a connection to move it. Drag it to the bottom of the page to start a group.</p>
+  {/if}
+
 
   {#if app.info?.devtools}
     <section class="demo">
@@ -355,6 +655,141 @@
       box-shadow 0.12s ease,
       transform 0.12s ease,
       border-color 0.12s ease;
+  }
+
+  .group + .group {
+    margin-top: 18px;
+  }
+
+  .group-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 8px;
+    min-height: 26px;
+  }
+
+  .group-name {
+    padding: 1px 6px;
+    font-size: 13px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+  }
+
+  .group-name.plain {
+    padding-left: 0;
+    color: var(--muted);
+  }
+
+  .group-name-input {
+    width: 220px;
+    padding: 1px 6px;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .group-count {
+    font-size: 12px;
+  }
+
+  .rule {
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+    margin: 0 6px;
+  }
+
+  .fold {
+    padding: 0 5px;
+    font-size: 12px;
+  }
+
+  /* The tools of a group stay out of the way until the group is pointed at or one of them has the focus. */
+  .group-tools {
+    display: flex;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+
+  .group:hover .group-tools,
+  .group-tools:focus-within {
+    opacity: 1;
+  }
+
+  .group-tools button {
+    padding: 0 6px;
+  }
+
+  .group.target .rule {
+    background: var(--accent);
+    height: 2px;
+  }
+
+  .card.movable {
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .card.lifted {
+    opacity: 0.35;
+  }
+
+  /* Where a dragged connection would land: a bar on that side of the card it is over. */
+  .card.drop-before,
+  .card.drop-after {
+    position: relative;
+  }
+
+  .card.drop-before::after,
+  .card.drop-after::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+
+  .card.drop-before::after {
+    left: -9px;
+  }
+
+  .card.drop-after::after {
+    right: -8px;
+  }
+
+  .fresh {
+    margin-top: 16px;
+    padding: 18px;
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    text-align: center;
+    color: var(--muted);
+  }
+
+  .fresh.target {
+    border-color: var(--accent);
+    background: var(--selection);
+    color: var(--text);
+  }
+
+  .ghost {
+    position: fixed;
+    z-index: 50;
+    pointer-events: none;
+    padding: 6px 12px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--bg);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 0.25);
+    font-weight: 600;
+  }
+
+  .hint {
+    margin: 12px 0 0;
+    font-size: 12px;
   }
 
   .card:hover {

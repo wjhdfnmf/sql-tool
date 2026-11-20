@@ -55,6 +55,11 @@ pub struct SavedProfile {
     /// this folder. It only chooses where the file dialog begins; the user
     /// still picks the file.
     pub script_folder: Option<PathBuf>,
+    /// The group the connection is shown under on the Connections page, if
+    /// any. Groups are only their names: a group exists while a connection
+    /// carries it. The order of connections, and so of groups, is the order
+    /// they are stored in.
+    pub group: Option<String>,
 }
 
 impl Default for SavedProfile {
@@ -76,6 +81,7 @@ impl Default for SavedProfile {
             read_only: false,
             production: false,
             script_folder: None,
+            group: None,
         }
     }
 }
@@ -163,6 +169,25 @@ impl ProfileStore {
         Ok(profile)
     }
 
+    /// Puts the connections in a new order and sets the group of each, as
+    /// the Connections page arranges them. `arrangement` is ids with their
+    /// groups, in the order wanted. Ids it does not know are ignored; a
+    /// connection it leaves out keeps its group and goes after the rest, so
+    /// nothing can be lost by an arrangement made from a stale list.
+    pub fn arrange(&self, arrangement: &[(String, Option<String>)]) -> Result<(), Error> {
+        let mut left = self.load()?;
+        let mut ordered = Vec::with_capacity(left.len());
+        for (id, group) in arrangement {
+            if let Some(at) = left.iter().position(|p| &p.id == id) {
+                let mut profile = left.remove(at);
+                profile.group = group.as_deref().map(str::trim).filter(|g| !g.is_empty()).map(|g| g.chars().take(60).collect());
+                ordered.push(profile);
+            }
+        }
+        ordered.append(&mut left);
+        self.save(&ordered)
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         let mut all = self.load()?;
         all.retain(|p| p.id != id);
@@ -177,6 +202,34 @@ impl ProfileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connections_are_put_in_a_new_order_with_their_groups_and_none_is_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::new(dir.path().join("profiles.json"));
+        let add = |name: &str| store.upsert(SavedProfile { name: name.into(), host: "h".into(), ..SavedProfile::default() }).unwrap().id;
+        let (a, b, c, d) = (add("a"), add("b"), add("c"), add("d"));
+        let group = |name: &str| Some(name.to_string());
+        // c first in "Plant", then a ungrouped, then b in "Plant"; d is not mentioned; one id is unknown.
+        store
+            .arrange(&[(c.clone(), group("  Plant ")), ("no-such-id".into(), group("x")), (a.clone(), None), (b.clone(), group("Plant")), (a.clone(), group("twice"))])
+            .unwrap();
+        let now: Vec<(String, Option<String>)> = store.load().unwrap().into_iter().map(|p| (p.name, p.group)).collect();
+        assert_eq!(
+            now,
+            [("c".to_string(), group("Plant")), ("a".to_string(), None), ("b".to_string(), group("Plant")), ("d".to_string(), None)],
+            "names are trimmed, an id counts once, what is left out goes last"
+        );
+        // An empty name is no group, and a long one is cut.
+        store.arrange(&[(d.clone(), group("   ")), (a, group(&"x".repeat(200)))]).unwrap();
+        let after = store.load().unwrap();
+        assert_eq!((after[0].name.as_str(), &after[0].group), ("d", &None));
+        assert_eq!(after[1].group.as_ref().unwrap().chars().count(), 60);
+        assert_eq!(after.len(), 4);
+        // A file written before groups existed still loads.
+        assert!(serde_json::from_str::<SavedProfile>(r#"{"id":"1","name":"old","host":"h"}"#).unwrap().group.is_none());
+        let _ = (b, c);
+    }
 
     fn temp_store(name: &str) -> ProfileStore {
         let dir = std::env::temp_dir().join(format!("sqltool-profiles-{}-{name}", std::process::id()));

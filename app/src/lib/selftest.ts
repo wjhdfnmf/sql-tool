@@ -73,6 +73,34 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { count: all.length };
   });
 
+  await step('connections keep the order and groups they are arranged into', async () => {
+    expect(profile, 'no profile was saved');
+    const first = profile;
+    const second = await backend.profileSave({ ...config.profile, id: '', name: 'Arranged second', savePassword: false }, null);
+    try {
+      expect((await backend.settingsGet()).organizeConnections, 'organising connections is not on to begin with');
+      // The newer one first, each in a group; a name with spaces round it is trimmed.
+      const arranged = await backend.profilesArrange([
+        { id: second.id, group: ' Plant ' },
+        { id: first.id, group: 'Plant' },
+      ]);
+      expect(arranged.map((p) => p.id).join() === [second.id, first.id].join(), `the order came back as ${arranged.map((p) => p.name).join()}`);
+      expect(arranged.every((p) => p.group === 'Plant'), `the groups came back as ${arranged.map((p) => p.group).join()}`);
+      // It is what is stored, and editing a connection does not lose its group.
+      await backend.profileSave({ ...arranged[1], color: 'green' }, null);
+      const listed = await backend.profilesList();
+      expect(listed[0].id === second.id && listed[1].group === 'Plant' && listed[1].color === 'green', `after an edit the list was ${JSON.stringify(listed.map((p) => [p.name, p.group]))}`);
+      // Left out of an arrangement, a connection is kept, after the rest.
+      const partial = await backend.profilesArrange([{ id: first.id, group: null }]);
+      expect(partial.length === 2 && partial[0].id === first.id && partial[0].group === null && partial[1].id === second.id, `a partial arrangement gave ${JSON.stringify(partial.map((p) => [p.name, p.group]))}`);
+      profile = partial[0];
+    } finally {
+      await backend.profileDelete(second.id);
+    }
+    expect((await backend.profilesList()).length === 1, 'the second connection was not removed again');
+    return { ok: true };
+  });
+
   await step('connections saved by MySQL Workbench are read, and the chosen ones brought over', async () => {
     const file = await backend.workbenchConnections(false);
     expect(file && file.path.endsWith('connections.xml'), `no Workbench file was found: ${JSON.stringify(file)}`);

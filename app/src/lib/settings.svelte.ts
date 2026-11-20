@@ -21,6 +21,7 @@ export const defaultSettings: Settings = {
   reformatStyle: 'standard',
   reformatKeywords: 'upper',
   sliceThreads: 1,
+  organizeConnections: true,
 };
 
 export interface Theme {
