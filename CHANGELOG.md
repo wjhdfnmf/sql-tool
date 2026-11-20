@@ -8,7 +8,7 @@ What changed in each release, newest first. The [releases page](https://github.c
 
 - **Connections can be organised**: drag one to move it, and gather them into named groups that fold away. A setting, on to begin with.
 - **Settings has a tab for each area** (Appearance, Editor, Queries, Connections, Privacy), a mark on a tab where something differs from the defaults, and a button that restores one tab's defaults.
-- **Hide the output while editing** (a setting, off to begin with): a click in the editor puts the output away, the pointer at the bottom edge brings it back.
+- **Hide the output while editing** (a setting, off to begin with): a click in the editor puts the output away, the pointer at the bottom edge brings it back. Double-clicking Output, or Ctrl+Shift+O (Cmd+Shift+O on a Mac), switches it on and off, and the Output button takes the theme's colour while it is on.
 - **Closing the window asks first** while a statement is running, while changes in a result or a designer are not applied, or while a script has changes that would be lost.
 - **An error that nothing handled is shown**, and noted in `crash.log` in the data folder.
 - **Help** has the licences of everything the app is built with, the project's address, and where the data folder is.
@@ -16,6 +16,10 @@ What changed in each release, newest first. The [releases page](https://github.c
 - **The window opens where it was**, at the size it had.
 - **An exported file is named** after the table its rows came from, or the script, instead of always `result`.
 - **Starting the app a second time** brings the running one to the front.
+
+### Changed
+
+- **The editor's toolbar**: Execute Statement is labelled **ES**, to leave room, and the arrows for moving between query tabs are larger and darker.
 
 ### Fixed
 

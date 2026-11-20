@@ -35,7 +35,7 @@
     {
       title: 'Running queries',
       rows: [
-        ['Execute the statement under the cursor', keys('Mod+Enter')],
+        ['Execute the statement under the cursor (ES)', keys('Mod+Enter')],
         ['Execute the selection, or everything', keys('Mod+Shift+Enter')],
         ['Explain the statement under the cursor', keys('Mod+Alt+X')],
         ['Run a long query as many short ones', 'In Slices, with {start} and {end} in the query'],
@@ -51,6 +51,7 @@
         ['Find and replace', keys('Mod+F')],
         ['Comment or uncomment lines', keys('Mod+/')],
         ['Reformat query', keys('Mod+B')],
+        ['Have the output hide itself while editing, or not', keys('Mod+Shift+O') + ', or double-click Output'],
       ],
     },
     {

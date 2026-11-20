@@ -1012,6 +1012,25 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes, designedColumns, graph: graphNote.slice(0, 160), figures: figuresNote };
   });
 
+  await step('hiding the output while editing is switched by double-clicking Output and from the keyboard', async () => {
+    const before = (await backend.settingsGet()).autoHideOutput;
+    const output = [...document.querySelectorAll<HTMLButtonElement>('.toolbar .pane-toggle')].find((b) => b.textContent?.trim().startsWith('Output'));
+    expect(output, 'there is no Output button');
+    // A double-click is two clicks, the second one marked as the second.
+    output.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+    output.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
+    await sleep(400);
+    const afterDoubleClick = (await backend.settingsGet()).autoHideOutput;
+    expect(afterDoubleClick === !before, 'double-clicking Output did not switch the setting');
+    expect(output.getAttribute('aria-pressed') === 'true', 'the output was left hidden by the double-click');
+    expect(output.classList.contains('auto') === afterDoubleClick, 'the Output button does not show whether it is on');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'O', code: 'KeyO', ctrlKey: true, shiftKey: true, bubbles: true }));
+    await sleep(400);
+    const afterKey = (await backend.settingsGet()).autoHideOutput;
+    expect(afterKey === before, 'the keyboard shortcut did not switch it back');
+    return { before, afterDoubleClick, afterKey };
+  });
+
   await step('closing the window asks first while a statement is running, and stays open on "Keep Open"', async () => {
     const state = app.workspaces[0];
     expect(state, 'no connection is open in the interface');
