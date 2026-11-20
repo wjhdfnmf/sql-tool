@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- The app's icon: a query prompt. This is the source; app-icon.png is this
+       drawn at 1024 pixels, and the files under src-tauri/icons are made from
+       that with `npm run tauri icon app-icon.png`. The square leaves a margin,
+       as macOS expects of an icon. -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="#1E3A5F"/>
+  <path d="M300 368 L456 512 L300 656" fill="none" stroke="#FFFFFF" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="512" y="604" width="236" height="72" rx="32" fill="#F2A33A"/>
+</svg>
