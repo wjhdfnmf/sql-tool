@@ -216,6 +216,31 @@ impl RowWriter {
     }
 }
 
+/// The name to offer for an exported file, without its extension, made from
+/// what the interface suggests: the table the rows came from, or the script.
+/// Whatever a file system would refuse, or read as a path, is taken out; if
+/// nothing usable is left the name is `result`. The user still chooses the
+/// folder and may change the name in the Save dialog.
+pub fn file_stem(suggested: Option<&str>) -> String {
+    const FALLBACK: &str = "result";
+    // Names Windows keeps for devices, with or without an extension.
+    const RESERVED: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let spaced: String =
+        suggested.unwrap_or_default().chars().map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { ' ' } else { c }).collect();
+    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cut: String = joined.trim_matches(['.', ' ']).chars().take(80).collect();
+    let stem = cut.trim_end_matches(['.', ' ']);
+    let device = stem.split('.').next().unwrap_or_default().trim().to_ascii_lowercase();
+    if stem.is_empty() || RESERVED.contains(&device.as_str()) {
+        FALLBACK.to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
 /// Writes the store's visible rows to `out`. `table` names the target of the
 /// INSERT statements and is ignored by the other formats. Returns the number
 /// of rows written.
@@ -233,6 +258,27 @@ pub fn write(store: &ResultStore, format: ExportFormat, table: &str, out: &mut i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exported_file_is_named_after_what_it_holds_and_never_as_a_path() {
+        assert_eq!(file_stem(None), "result");
+        assert_eq!(file_stem(Some("   ")), "result");
+        assert_eq!(file_stem(Some("people")), "people");
+        assert_eq!(file_stem(Some("Zo\u{eb}'s t\u{e4}ble")), "Zo\u{eb}'s t\u{e4}ble");
+        assert_eq!(file_stem(Some("sales/2026: q4?")), "sales 2026 q4");
+        // Nothing that could step out of the folder the user picks.
+        assert_eq!(file_stem(Some("..\\..\\etc\\passwd")), "etc passwd");
+        assert_eq!(file_stem(Some("../../x")), "x");
+        assert_eq!(file_stem(Some("line\nbreak\ttab")), "line break tab");
+        // Device names on Windows, whatever follows the first dot.
+        assert_eq!(file_stem(Some("NUL")), "result");
+        assert_eq!(file_stem(Some("con.2026")), "result");
+        assert_eq!(file_stem(Some("console")), "console");
+        // Not too long for a file name, and no dot or space left at the end.
+        assert_eq!(file_stem(Some(&"x".repeat(300))).chars().count(), 80);
+        assert_eq!(file_stem(Some(&format!("{}. tail", "y".repeat(78)))), "y".repeat(78));
+        assert_eq!(file_stem(Some("...hidden...")), "hidden");
+    }
     use crate::store::RowBatch;
 
     fn sample() -> ResultStore {

@@ -294,10 +294,8 @@ impl Session {
     /// reconnect. Nothing has been sent at this point, so reconnecting here
     /// can never run a statement twice.
     pub async fn ensure_alive(&mut self, idle: Duration) -> Result<bool, Error> {
-        if !self.broken {
-            if self.last_used.elapsed() < idle || self.ping().await.is_ok() {
-                return Ok(false);
-            }
+        if !self.broken && (self.last_used.elapsed() < idle || self.ping().await.is_ok()) {
+            return Ok(false);
         }
         self.reconnect().await?;
         Ok(true)
@@ -573,7 +571,7 @@ impl Session {
                         .collect();
                     outcome = writer.row(out, cells.iter().map(|cell| cell.as_deref())).map_err(storage);
                     rows += 1;
-                    if rows % PROGRESS_EVERY == 0 {
+                    if rows.is_multiple_of(PROGRESS_EVERY) {
                         on_progress(rows);
                     }
                 }

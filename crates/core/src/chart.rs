@@ -2928,7 +2928,8 @@ mod tests {
     #[test]
     fn trend_lines_recover_the_curve_the_points_lie_on() {
         let xs = [1.0, 2.0, 3.0, 5.0, 8.0, 13.0];
-        let curves: [(TrendKind, u32, fn(f64) -> f64); 5] = [
+        type Curve = (TrendKind, u32, fn(f64) -> f64);
+        let curves: [Curve; 5] = [
             (TrendKind::Linear, 0, |x| 3.0 + 2.0 * x),
             (TrendKind::Polynomial, 2, |x| 1.0 - 4.0 * x + 0.5 * x * x),
             (TrendKind::Exponential, 0, |x| 2.0 * (0.3 * x).exp()),

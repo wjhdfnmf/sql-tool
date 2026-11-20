@@ -118,7 +118,8 @@ export interface Backend {
   /** Sorts and filters what the grid shows; resolves to the visible row count. */
   resultView(resultId: number, filter: string | null, sortColumn: number | null, descending: boolean): Promise<number>;
   /** Asks where to save and writes the visible rows. Null if cancelled. */
-  exportResult(resultId: number, format: ExportFormat, table: string): Promise<Exported | null>;
+  /** `name` suggests what to call the file, without an extension: a table or a script. The user picks where it goes. */
+  exportResult(resultId: number, format: ExportFormat, table: string, name: string | null): Promise<Exported | null>;
   /**
    * Asks where to save, then runs the statement again and writes every row it returns, however many,
    * regardless of the row limit. Runs in a connection of its own under `tabId`; `cancel` with that id stops it.
@@ -130,6 +131,7 @@ export interface Backend {
     sql: string,
     format: ExportFormat,
     table: string,
+    name: string | null,
     onProgress: (rows: number) => void,
   ): Promise<Exported | null>;
   /** The cells of a selection as text for the clipboard, built from the stored rows. */
@@ -226,11 +228,11 @@ const tauriBackend: Backend = {
   scriptSave: (workspaceId, path, suggestedName, text) => invoke('script_save', { workspaceId, path, suggestedName, text }),
   reviewScript: (script, mode) => invoke('review_script', { script, mode }),
   resultView: (resultId, filter, sortColumn, descending) => invoke('result_view', { resultId, filter, sortColumn, descending }),
-  exportResult: (resultId, format, table) => invoke('export_result', { resultId, format, table }),
-  exportQuery: (workspaceId, tabId, sql, format, table, onProgress) => {
+  exportResult: (resultId, format, table, name) => invoke('export_result', { resultId, format, table, name }),
+  exportQuery: (workspaceId, tabId, sql, format, table, name, onProgress) => {
     const channel = new Channel<number>();
     channel.onmessage = onProgress;
-    return invoke('export_query', { workspaceId, tabId, sql, format, table, onProgress: channel });
+    return invoke('export_query', { workspaceId, tabId, sql, format, table, name, onProgress: channel });
   },
   copyRange: (resultId, range, format, headers, table) => invoke('copy_range', { resultId, range, format, headers, table }),
   rangeStats: (resultId, range) => invoke('range_stats', { resultId, range }),

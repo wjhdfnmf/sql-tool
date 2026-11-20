@@ -30,6 +30,8 @@ sqltool-core = { path = "../../crates/core" }
 sqltool-secrets = { path = "../../crates/secrets" }
 sqltool-fakeserver = { path = "../../crates/fakeserver", optional = true }
 tauri-plugin-dialog = "2"
+# The window opens where it was, at the size it had.
+tauri-plugin-window-state = "2"
 # A second start brings the running app to the front instead of opening another.
 tauri-plugin-single-instance = "2"
 # The dialog plugin's own library, used directly for the one message that has

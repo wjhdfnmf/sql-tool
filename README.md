@@ -6,6 +6,10 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 
 **Status: early alpha.** It connects, runs queries, shows results and browses schemas. It has been tested on Windows against MariaDB 11.8 and MySQL 8.4 only. Expect rough edges, and do not rely on it for production work yet.
 
+![A query and its result: the schema tree, the SQL editor and a grid of rows](docs/screenshots/query.png)
+
+![The graph builder: a control chart of the same result, with its limits, run rules and figures](docs/screenshots/graph.png)
+
 ## What it does
 
 - **Connections**: saved profiles shown as cards, two to a row, each with its name and user@host; test connection, colour tags. Drag a card to move it, or to the bottom of the page to start a named group; groups can be renamed, folded away, moved and dissolved, and everything dragging does is on each card's menu too. A setting turns organising off. Passwords go in the operating system keychain or are asked for each time; they are never written to a settings file.
@@ -57,7 +61,7 @@ A free, open-source desktop SQL client for MySQL and MariaDB, built to be light 
 - No commit/rollback controls yet. When a dropped connection is reopened, session variables, temporary tables and an open transaction are not carried over; the output says so.
 - Installers are not code-signed, so Windows and macOS show a warning.
 
-[PLAN.md](PLAN.md) has the design, the roadmap and the test results in detail. See [SECURITY.md](SECURITY.md) to report a security problem and [CONTRIBUTING.md](CONTRIBUTING.md) to build and test.
+[CHANGELOG.md](CHANGELOG.md) lists what changed in each release. [PLAN.md](PLAN.md) has the design, the roadmap and the test results in detail. See [SECURITY.md](SECURITY.md) to report a security problem and [CONTRIBUTING.md](CONTRIBUTING.md) to build and test.
 
 ## Download
 
@@ -140,6 +144,7 @@ bash tests/smoke.sh
 | `app/src-tauri` | The desktop shell: a thin command layer over the core |
 | `app/src` | The user interface (Svelte and TypeScript) |
 | `tests/servers` | Scripts that set up local MariaDB and MySQL test servers |
+| `tools` | Scripts for the build and the repository: theme checks, the licence list, the pictures above |
 | `vendor/mysql_async` | A patched copy of the database driver; see its `PATCHES.md` |
 
 ## Licence

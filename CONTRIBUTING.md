@@ -30,6 +30,18 @@ cd app && npm run check
 
 The workspace tests need no database: login, TLS and query behaviour run against the fake server in `crates/fakeserver`.
 
+CI also refuses Rust code that is not formatted or that the lints object to. Before pushing:
+
+```bash
+cargo fmt
+```
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The version of Rust, and so of its lints, is the one named in `rust-toolchain.toml`; rustup installs it the first time `cargo` runs here. `cargo fmt` formats this workspace's own crates and leaves the driver copy under `vendor/` alone.
+
 Tests against real MariaDB and MySQL, and the app's end-to-end run, use local servers set up by the scripts in `tests/servers` (Linux or WSL, as root):
 
 ```bash
@@ -69,5 +81,7 @@ bash tests/smoke.sh
 `vendor/mysql_async` is a patched copy of the upstream driver. Read `vendor/mysql_async/PATCHES.md` before changing it; every local change is marked `SQL Tool patch` and listed there.
 
 ## Pull requests
+
+A change that someone using the app would notice gets a line under **Unreleased** in [CHANGELOG.md](CHANGELOG.md), in words a user would use. A release moves those lines under its version number.
 
 CI builds, tests and packages on Windows, Linux and macOS. Keep pull requests to one topic, and say in the description what you checked and what you could not.

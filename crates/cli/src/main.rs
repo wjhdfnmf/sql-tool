@@ -214,7 +214,8 @@ async fn demo(rows: u64) -> Result<bool> {
     const PASSWORD: &str = "demo-password-not-a-real-secret";
     let mut all_ok = true;
 
-    let presets: [(&str, fn(&str, Option<sqltool_fakeserver::TlsIdentity>) -> Config); 2] = [
+    type Preset = fn(&str, Option<sqltool_fakeserver::TlsIdentity>) -> Config;
+    let presets: [(&str, Preset); 2] = [
         ("fake MySQL Enterprise 8.4.3, LDAP account", Config::mysql_8_4_enterprise_ldap),
         ("fake MySQL Enterprise 5.7.37, LDAP account, TLS 1.2 only", Config::mysql_5_7_enterprise_ldap),
     ];

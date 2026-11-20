@@ -1385,8 +1385,14 @@ struct Exported {
 }
 
 /// Asks where to save an export. `None` if the user cancels.
-async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat) -> Option<PathBuf> {
-    pick_save_file(app, "result", format.extension()).await
+///
+/// `name` is what the interface suggests calling the file: the table the
+/// rows came from, or the script. It is only a suggestion, cleaned of
+/// anything that is not a plain file name; the user picks the folder.
+async fn pick_export_file(app: &tauri::AppHandle, format: ExportFormat, name: Option<&str>) -> Option<PathBuf> {
+    // A test run finds its exports by a fixed name.
+    let stem = if unattended() { export::file_stem(None) } else { export::file_stem(name) };
+    pick_save_file(app, &stem, format.extension()).await
 }
 
 /// Asks where to save a file called `name.extension`. `None` if the user cancels.
@@ -1417,6 +1423,8 @@ async fn pick_save_file(app: &tauri::AppHandle, name: &str, extension: &str) -> 
 ///
 /// It runs in a connection of its own under `tab_id`, so the tab that showed
 /// the result stays usable, and `cancel` with that id stops it.
+// A command's arguments are the fields of the message the interface sends.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn export_query(
     app: tauri::AppHandle,
@@ -1426,6 +1434,7 @@ async fn export_query(
     sql: String,
     format: ExportFormat,
     table: String,
+    name: Option<String>,
     on_progress: Channel<u64>,
 ) -> Result<Option<Exported>, UiError> {
     let workspace = state.workspace(workspace_id)?;
@@ -1438,7 +1447,7 @@ async fn export_query(
              Raise the row limit, run the statement again, and export the rows shown.",
         ));
     }
-    let Some(path) = pick_export_file(&app, format).await else {
+    let Some(path) = pick_export_file(&app, format, name.as_deref()).await else {
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
@@ -1490,9 +1499,10 @@ async fn export_result(
     result_id: u64,
     format: ExportFormat,
     table: String,
+    name: Option<String>,
 ) -> Result<Option<Exported>, UiError> {
     let store = state.result(result_id)?;
-    let Some(path) = pick_export_file(&app, format).await else {
+    let Some(path) = pick_export_file(&app, format, name.as_deref()).await else {
         return Ok(None);
     };
     let storage = |e: std::io::Error| ui_error("storage", format!("Could not write {}: {e}", path.display()));
@@ -2115,6 +2125,17 @@ fn main() {
                 let _ = window.set_focus();
             }
         }));
+    }
+    // The window opens where it was last, at the size it had. The place is
+    // kept in the app's usual folder, so not when the data folder is set by
+    // hand: a test run must not move the window of the installed app.
+    if std::env::var_os("SQLTOOL_DATA_DIR").is_none() {
+        use tauri_plugin_window_state::StateFlags;
+        builder = builder.plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        );
     }
     #[cfg(target_os = "macos")]
     {

@@ -1,0 +1,9 @@
+# The version of Rust this project is built and checked with, on every
+# developer's machine and in CI. Pinned so that a new release of Rust, and of
+# the lints that come with it, arrives when this line is changed, not in the
+# middle of an unrelated change. To move to a newer one: change the number,
+# run the checks in CONTRIBUTING.md, and fix what the new lints find.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

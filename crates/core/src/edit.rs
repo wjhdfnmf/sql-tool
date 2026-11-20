@@ -14,6 +14,15 @@ use crate::export::sql_literal;
 use crate::split::quote_identifier;
 use crate::store::{ColumnInfo, ColumnKind, ResultStore};
 
+/// Values sent beside a statement, in the order of its placeholders.
+type Params = Vec<Option<Vec<u8>>>;
+/// Where a row is: the condition with placeholders, the same with the values
+/// written out for review, and the values.
+type Located = (String, String, Params);
+/// What a row is set to: the assignments with placeholders, the same written
+/// out for review, and the values.
+type Assigned = (Vec<String>, Vec<String>, Params);
+
 /// Where a result's edits go.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,7 +114,7 @@ pub fn plan(target: &EditTarget, store: &ResultStore, edits: &[RowEdit]) -> Resu
     };
 
     // `WHERE key = ? AND ...` for a row, from the values it had when read.
-    let locate = |row: u64| -> Result<(String, String, Vec<Option<Vec<u8>>>), Error> {
+    let locate = |row: u64| -> Result<Located, Error> {
         let cells = store.row(row).ok_or_else(|| fail("That row is no longer in the result."))?;
         let mut sql = Vec::new();
         let mut preview = Vec::new();
@@ -123,7 +132,7 @@ pub fn plan(target: &EditTarget, store: &ResultStore, edits: &[RowEdit]) -> Resu
         Ok((sql.join(" AND "), preview.join(" AND "), params))
     };
 
-    let assignments = |changes: &[CellChange]| -> Result<(Vec<String>, Vec<String>, Vec<Option<Vec<u8>>>), Error> {
+    let assignments = |changes: &[CellChange]| -> Result<Assigned, Error> {
         if changes.is_empty() {
             return Err(fail("There is nothing to change."));
         }
@@ -176,6 +185,46 @@ pub fn plan(target: &EditTarget, store: &ResultStore, edits: &[RowEdit]) -> Resu
             }
         })
         .collect()
+}
+
+impl crate::session::Session {
+    /// Checks that `store` can be edited and says where the edits would go.
+    /// The result must include every column of the table's primary key.
+    pub async fn edit_target(&mut self, store: &ResultStore) -> Result<EditTarget, Error> {
+        let target = edit_target(&store.status().columns).map_err(fail)?;
+        let details = self.table_details(&target.schema, &target.table).await?;
+        if details.is_none_or(|d| d.is_view) {
+            return Err(fail("Views cannot be edited here."));
+        }
+        let key_size = self.table_columns(&target.schema, &target.table).await?.iter().filter(|c| c.key == "PRI").count();
+        if key_size != target.key_columns.len() {
+            return Err(fail("The result does not include every column of the table's primary key."));
+        }
+        Ok(target)
+    }
+
+    /// Applies planned statements in one transaction. If any statement fails,
+    /// or a delete does not find its row, nothing is changed.
+    pub async fn apply(&mut self, statements: &[PlannedStatement]) -> Result<(), Error> {
+        // Transaction control goes over the plain protocol: MySQL does not
+        // accept it as a prepared statement.
+        self.query("START TRANSACTION").await?;
+        for statement in statements {
+            let outcome = match self.exec_params(&statement.sql, statement.params.clone()).await {
+                Ok(1) => Ok(()),
+                Ok(0) if !statement.must_match_one_row => Ok(()),
+                Ok(0) => Err(fail("A row to delete no longer exists. Nothing was changed.")),
+                Ok(n) => Err(fail(format!("A statement meant for one row matched {n}. Nothing was changed."))),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = outcome {
+                let _ = self.query("ROLLBACK").await;
+                return Err(e);
+            }
+        }
+        self.query("COMMIT").await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -283,45 +332,5 @@ mod tests {
         store.set_view(None, Some((0, true)));
         let planned = plan(&target, &store, &[RowEdit::Delete { row: 0 }]).unwrap();
         assert_eq!(planned[0].params, [Some(b"8".to_vec())], "row 0 is now the highest id");
-    }
-}
-
-impl crate::session::Session {
-    /// Checks that `store` can be edited and says where the edits would go.
-    /// The result must include every column of the table's primary key.
-    pub async fn edit_target(&mut self, store: &ResultStore) -> Result<EditTarget, Error> {
-        let target = edit_target(&store.status().columns).map_err(fail)?;
-        let details = self.table_details(&target.schema, &target.table).await?;
-        if details.is_none_or(|d| d.is_view) {
-            return Err(fail("Views cannot be edited here."));
-        }
-        let key_size = self.table_columns(&target.schema, &target.table).await?.iter().filter(|c| c.key == "PRI").count();
-        if key_size != target.key_columns.len() {
-            return Err(fail("The result does not include every column of the table's primary key."));
-        }
-        Ok(target)
-    }
-
-    /// Applies planned statements in one transaction. If any statement fails,
-    /// or a delete does not find its row, nothing is changed.
-    pub async fn apply(&mut self, statements: &[PlannedStatement]) -> Result<(), Error> {
-        // Transaction control goes over the plain protocol: MySQL does not
-        // accept it as a prepared statement.
-        self.query("START TRANSACTION").await?;
-        for statement in statements {
-            let outcome = match self.exec_params(&statement.sql, statement.params.clone()).await {
-                Ok(1) => Ok(()),
-                Ok(0) if !statement.must_match_one_row => Ok(()),
-                Ok(0) => Err(fail("A row to delete no longer exists. Nothing was changed.")),
-                Ok(n) => Err(fail(format!("A statement meant for one row matched {n}. Nothing was changed."))),
-                Err(e) => Err(e),
-            };
-            if let Err(e) = outcome {
-                let _ = self.query("ROLLBACK").await;
-                return Err(e);
-            }
-        }
-        self.query("COMMIT").await?;
-        Ok(())
     }
 }

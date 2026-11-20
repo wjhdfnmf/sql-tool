@@ -54,10 +54,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev rpm xvfb
 
+      # The version named in rust-toolchain.toml, with its lints and formatter.
       - name: Install the Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component clippy --component rustfmt
           rustc --version
 
       - name: Add both Mac targets
@@ -92,6 +93,14 @@ jobs:
       - name: Build the UI
         working-directory: app
         run: npm run build
+
+      # The same on every system, so one of them is enough. After the UI is
+      # built, because the desktop shell does not compile without it.
+      - name: Check formatting and lints
+        if: runner.os == 'Linux'
+        run: |
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Unit tests, plus login, TLS and query tests against the fake MySQL
       # server in this repository. No database is needed.
