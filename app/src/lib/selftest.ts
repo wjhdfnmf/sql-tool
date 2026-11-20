@@ -73,6 +73,30 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { count: all.length };
   });
 
+  await step('connections saved by MySQL Workbench are read, and the chosen ones brought over', async () => {
+    const file = await backend.workbenchConnections(false);
+    expect(file && file.path.endsWith('connections.xml'), `no Workbench file was found: ${JSON.stringify(file)}`);
+    const [plant, archive, tunnel] = file.connections;
+    expect(file.connections.length === 3, `found ${file.connections.length} connections`);
+    // The name comes through as written; "Require" becomes encrypted, not verified; clear text is on but its risk is not accepted.
+    expect(
+      plant.name === 'Plant & reporting' && plant.profile?.host === 'plant-db.example.test' && plant.profile.port === 3310 && plant.profile.user === 'ann' && plant.profile.database === 'plant',
+      `the first connection was read as ${JSON.stringify(plant)}`,
+    );
+    expect(plant.profile.tls === 'unverified' && plant.profile.cleartextAuth && !plant.profile.cleartextRiskAccepted && !plant.profile.savePassword, `its security was read as ${JSON.stringify(plant.profile)}`);
+    expect(plant.notes.some((n) => n.includes('clear text')), `it carried no warning: ${JSON.stringify(plant.notes)}`);
+    expect(archive.profile?.tls === 'verify-identity' && archive.profile.caFile === '/etc/ssl/archive-ca.pem' && archive.profile.port === 3306, `the second was read as ${JSON.stringify(archive)}`);
+    expect(tunnel.profile === null && (tunnel.problem ?? '').includes('SSH tunnel'), `the SSH connection was read as ${JSON.stringify(tunnel)}`);
+    // Bringing one over is an ordinary save, with no password; then it is removed again.
+    const before = (await backend.profilesList()).length;
+    const saved = await backend.profileSave({ ...plant.profile, id: '', hasPassword: false }, null);
+    const listed = (await backend.profilesList()).find((p) => p.id === saved.id);
+    expect(listed && listed.name === 'Plant & reporting' && !listed.hasPassword && listed.cleartextAuth, `after importing, it was saved as ${JSON.stringify(listed)}`);
+    await backend.profileDelete(saved.id);
+    expect((await backend.profilesList()).length === before, 'the imported connection was not removed again');
+    return { found: file.connections.map((c) => `${c.name}: ${c.profile ? 'yes' : 'no'}`) };
+  });
+
   await step('test connection (password from the keychain)', async () => {
     expect(profile, 'no profile');
     return serverLabel((await backend.connectionTest(profile, null)).version);

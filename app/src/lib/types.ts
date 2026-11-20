@@ -310,6 +310,24 @@ export interface Charset {
   defaultCollation: string;
 }
 
+/** A connection found in MySQL Workbench's file. */
+export interface WorkbenchConnection {
+  name: string;
+  /** How Workbench connects with it, in Workbench's words. */
+  method: string;
+  /** What it would be here; null if it cannot be brought over. */
+  profile: Omit<Profile, 'hasPassword'> | null;
+  /** Why it cannot be brought over. */
+  problem: string | null;
+  /** What will be different here. */
+  notes: string[];
+}
+
+export interface WorkbenchFile {
+  path: string;
+  connections: WorkbenchConnection[];
+}
+
 export interface ScriptFile {
   path: string;
   name: string;

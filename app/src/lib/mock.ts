@@ -508,6 +508,33 @@ export const mockBackend: Backend = {
     if (kind === 'view') return `CREATE VIEW ${prefix}\`new_view\` AS\nSELECT *\nFROM ${prefix}\`table_name\`;\n`;
     return `DELIMITER $$\nCREATE ${kind.toUpperCase()} \`new_${kind}\`()\nBEGIN\n  SELECT 1;\nEND$$\nDELIMITER ;\n`;
   },
+  workbenchConnections: async () => {
+    await wait(150);
+    const base = { id: '', caFile: null, pinnedSha256: null, cleartextRiskAccepted: false, savePassword: false, color: null, readOnly: false, production: false, scriptFolder: null };
+    return {
+      path: 'C:\\Users\\ann\\AppData\\Roaming\\MySQL\\Workbench\\connections.xml',
+      connections: [
+        { name: 'Local MariaDB', method: 'Standard (TCP/IP)', problem: null, notes: [], profile: { ...base, name: 'Local MariaDB', host: '127.0.0.1', port: 3307, user: 'root', database: null, tls: 'disabled', cleartextAuth: false } },
+        {
+          name: 'Plant reporting',
+          method: 'Standard (TCP/IP)',
+          problem: null,
+          notes: ['It sends the password in clear text to a server that is not verified. Before it connects you will be asked to accept that in its settings; verifying the server, or pinning its certificate, is safer.'],
+          profile: { ...base, name: 'Plant reporting', host: 'plant-db.example.test', port: 3306, user: 'ann', database: 'plant', tls: 'unverified', cleartextAuth: true },
+        },
+        {
+          name: 'Warehouse',
+          method: 'Standard (TCP/IP)',
+          problem: null,
+          notes: ['Workbench encrypted it only if the server offered to. Here it is always encrypted, with the server not verified; it will not connect to a server that cannot encrypt.'],
+          profile: { ...base, name: 'Warehouse', host: 'wh-db.example.test', port: 3306, user: 'ann', database: null, tls: 'unverified', cleartextAuth: false },
+        },
+        { name: 'Verified archive', method: 'LDAP User/Password', problem: null, notes: [], profile: { ...base, name: 'Verified archive', host: 'archive.example.test', port: 3306, user: 'ann', database: 'archive', tls: 'verify-identity', caFile: 'C:\\certs\\ca.pem', cleartextAuth: true } },
+        { name: 'Through the jump host', method: 'Standard TCP/IP over SSH', problem: 'It connects through an SSH tunnel, which this app does not do.', notes: [], profile: null },
+        { name: 'Local socket', method: 'Local Socket/Pipe', problem: 'It connects through a local socket or pipe, which this app does not do.', notes: [], profile: null },
+      ],
+    };
+  },
   scriptOpen: async () => ({
     path: 'C:\\scripts\\monthly-report.sql',
     name: 'monthly-report.sql',

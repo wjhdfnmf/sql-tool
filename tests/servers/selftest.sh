@@ -56,6 +56,49 @@ mkdir -p "$OUT/scripts-a" "$OUT/scripts-b"
 export SQLTOOL_SELFTEST_SCRIPTS_A="$(native "$OUT/scripts-a")"
 export SQLTOOL_SELFTEST_SCRIPTS_B="$(native "$OUT/scripts-b")"
 
+# A connections file as MySQL Workbench writes it, for the import to read.
+cat > "$OUT/connections.xml" <<'XML'
+<?xml version="1.0"?>
+<data grt_format="2.0">
+  <value _ptr_="0x1" type="list" content-type="object" content-struct-name="db.mgmt.Connection">
+    <value type="object" struct-name="db.mgmt.Connection" id="{A1}" struct-checksum="0x96ba47d8">
+      <link type="object" struct-name="db.mgmt.Driver" key="driver">com.mysql.rdbms.mysql.driver.native</link>
+      <value type="string" key="hostIdentifier">Mysql@plant-db.example.test:3310</value>
+      <value _ptr_="0x2" type="dict" key="parameterValues">
+        <value type="int" key="OPT_ENABLE_CLEARTEXT_PLUGIN">1</value>
+        <value type="string" key="hostName">plant-db.example.test</value>
+        <value type="int" key="port">3310</value>
+        <value type="string" key="schema">plant</value>
+        <value type="string" key="sslCA"></value>
+        <value type="int" key="useSSL">2</value>
+        <value type="string" key="userName">ann</value>
+      </value>
+      <value type="string" key="name">Plant &amp; reporting</value>
+    </value>
+    <value type="object" struct-name="db.mgmt.Connection" id="{A2}" struct-checksum="0x96ba47d8">
+      <link type="object" struct-name="db.mgmt.Driver" key="driver">com.mysql.rdbms.mysql.driver.native</link>
+      <value _ptr_="0x3" type="dict" key="parameterValues">
+        <value type="string" key="hostName">archive.example.test</value>
+        <value type="string" key="sslCA">/etc/ssl/archive-ca.pem</value>
+        <value type="int" key="useSSL">4</value>
+        <value type="string" key="userName">reader</value>
+      </value>
+      <value type="string" key="name">Archive</value>
+    </value>
+    <value type="object" struct-name="db.mgmt.Connection" id="{A3}" struct-checksum="0x96ba47d8">
+      <link type="object" struct-name="db.mgmt.Driver" key="driver">com.mysql.rdbms.mysql.driver.native_sshtun</link>
+      <value _ptr_="0x4" type="dict" key="parameterValues">
+        <value type="string" key="hostName">127.0.0.1</value>
+        <value type="string" key="sshHost">jump.example.test:22</value>
+        <value type="string" key="userName">ann</value>
+      </value>
+      <value type="string" key="name">Through the jump host</value>
+    </value>
+  </value>
+</data>
+XML
+export SQLTOOL_SELFTEST_WORKBENCH="$(native "$OUT/connections.xml")"
+
 # Exports made by the self-test go here instead of through a file dialog.
 mkdir -p "$OUT/export"
 export SQLTOOL_SELFTEST_EXPORT_DIR="$(native "$OUT/export")"
