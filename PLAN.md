@@ -38,7 +38,7 @@ Asked for: a graphing tool in the manner of JMP's Graph Builder, reached from a 
 
 ## Import from MySQL Workbench (after 0.2.0)
 
-Workbench keeps its connections in `connections.xml` in its data folder (`%APPDATA%\\MySQL\\Workbench` on Windows, `~/Library/Application Support/MySQL/Workbench` on macOS, `~/.mysql/workbench` on Linux): a list of `db.mgmt.Connection` objects, each with a driver, a name and a dictionary of settings. The names of the drivers and settings, and the numbering of the SSL choices, were taken from Workbench's own definition file (`mysql_rdbms_info.xml` in its source), not guessed.
+Workbench keeps its connections in `connections.xml` in its data folder (`%APPDATA%\MySQL\Workbench` on Windows, `~/Library/Application Support/MySQL/Workbench` on macOS, `~/.mysql/workbench` on Linux): a list of `db.mgmt.Connection` objects, each with a driver, a name and a dictionary of settings. The names of the drivers and settings, and the numbering of the SSL choices, were taken from Workbench's own definition file (`mysql_rdbms_info.xml` in its source), not guessed.
 
 `crates/core/src/workbench.rs` reads the file and turns each connection into a profile where it can:
 
