@@ -48,6 +48,12 @@ cargo test -p sqltool-core --test real_servers -- --ignored
 cargo build --release -p sqltool-app --features custom-protocol,devtools && bash tests/servers/selftest.sh mariadb
 ```
 
+The same build also runs a shorter check that needs no database, against the server built into it. CI runs it on Windows, Linux and macOS, so that a change which stops the app from starting on one of them is caught:
+
+```bash
+bash tests/smoke.sh
+```
+
 ## Rules the code keeps
 
 - **`crates/core` knows nothing about the UI.** Connections, policy, running statements, result storage and SQL generation live there and are tested there.

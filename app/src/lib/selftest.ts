@@ -8,6 +8,7 @@
 
 import { evalFit, type AxisRef, type ChartRequest } from './chart';
 import { backend } from './backend';
+import { faults } from './faults.svelte';
 import { reformatPiece, reformatSql } from './reformat';
 import { app } from './state.svelte';
 import { decodeCells } from './rows';
@@ -1011,6 +1012,29 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     return { editorFont: font.slice(0, 48), grid: `${canvas.width}x${canvas.height}`, schemaNodes, designedColumns, graph: graphNote.slice(0, 160), figures: figuresNote };
   });
 
+  await step('closing the window asks first while a statement is running, and stays open on "Keep Open"', async () => {
+    const state = app.workspaces[0];
+    expect(state, 'no connection is open in the interface');
+    const tab = state.addTab();
+    void state.run(tab, 'SELECT SLEEP(8)', { kind: 'all' });
+    await sleep(900);
+    expect(tab.running, 'the statement is not running');
+    await backend.selftestCloseWindow();
+    await sleep(600);
+    const question = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) => d.textContent?.includes('Close SQL Tool?'));
+    expect(question, 'closing the window did not ask');
+    const said = (question.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(/still running/.test(said), `the question said: ${said.slice(0, 160)}`);
+    [...question.querySelectorAll('button')].find((b) => b.textContent?.includes('Keep Open'))?.click();
+    await sleep(300);
+    expect(!document.querySelector('dialog[open]'), 'the question stayed up after Keep Open');
+    await state.cancel(tab);
+    for (let waited = 0; tab.running && waited < 10_000; waited += 100) await sleep(100);
+    expect(!tab.running, 'the statement did not stop');
+    state.closeTab(tab);
+    return { said: said.slice(0, 120) };
+  });
+
   await step('disconnect and remove the profile', async () => {
     expect(workspace && profile, 'nothing to clean up');
     await backend.closeTab(workspace.id, tabId);
@@ -1024,6 +1048,10 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
       return asUiError(e).kind;
     }
     throw new Error('the workspace still answered after disconnect');
+  });
+
+  await step('no error went unhandled along the way', async () => {
+    expect(faults.seen.length === 0, `errors that nothing handled: ${faults.seen.join('; ')}`);
   });
 
   const report = { ok: steps.every((s) => s.ok), passed: steps.filter((s) => s.ok).length, total: steps.length, steps };

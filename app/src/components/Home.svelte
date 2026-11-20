@@ -12,6 +12,8 @@
   let editing = $state<Profile | null>(null);
   let asking = $state<Profile | null>(null);
   let promptError = $state<string | null>(null);
+  /** Something to tell about the keychain after a save that went through without it. */
+  let notice = $state<string | null>(null);
   let busyId = $state<string | null>(null);
   let errors = $state<Record<string, string>>({});
   let demoError = $state<string | null>(null);
@@ -274,7 +276,8 @@
     try {
       const info = await backend.connect(profile.id, password);
       if (remember && password !== null) {
-        await backend.profileSave({ ...profile, savePassword: true }, password);
+        const saved = await backend.profileSave({ ...profile, savePassword: true }, password);
+        if (saved.keychainNote) notice = saved.keychainNote;
         await app.refreshProfiles();
       }
       asking = null;
@@ -286,9 +289,10 @@
       }
     } catch (e) {
       const error = asUiError(e);
-      if (error.kind === 'password-required') {
+      if (error.kind === 'password-required' || error.kind === 'keychain-unreadable') {
         asking = profile;
-        promptError = null;
+        // With no keychain to read, the password is asked for, and the prompt says why.
+        promptError = error.kind === 'keychain-unreadable' ? error.message : null;
       } else if (asking && error.kind === 'access-denied') {
         promptError = error.message;
       } else {
@@ -381,6 +385,13 @@
     </div>
     <button class="primary" onclick={() => (editing = newProfile())}>+ New connection</button>
   </header>
+
+  {#if notice}
+    <div class="warning-box notice" role="status">
+      <span>{notice}</span>
+      <button onclick={() => (notice = null)}>Dismiss</button>
+    </div>
+  {/if}
 
   {#if app.profiles.length === 0}
     <div class="empty">
@@ -578,8 +589,9 @@
   <ConnectionDialog
     profile={editing}
     onclose={() => (editing = null)}
-    onsaved={async () => {
+    onsaved={async (note) => {
       editing = null;
+      notice = note;
       await app.refreshProfiles();
     }}
   />
@@ -598,6 +610,18 @@
 {/if}
 
 <style>
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .notice span {
+    flex: 1;
+    overflow-wrap: anywhere;
+  }
+
   .home {
     flex: 1;
     overflow: auto;

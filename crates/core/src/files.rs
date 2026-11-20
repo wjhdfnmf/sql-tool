@@ -26,6 +26,31 @@ fn private(options: &mut OpenOptions, path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
+/// The text of a script file, or `None` if it is not text this app reads.
+///
+/// UTF-8 with or without a byte-order mark, and UTF-16 with one (what some
+/// Windows tools write). The mark is never part of the text: a server would
+/// take it for the start of the first statement and refuse the statement.
+pub fn decode_text(bytes: &[u8]) -> Option<String> {
+    fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Option<String> {
+        let (pairs, rest) = bytes.as_chunks::<2>();
+        if !rest.is_empty() {
+            return None;
+        }
+        String::from_utf16(&pairs.iter().map(|pair| unit(*pair)).collect::<Vec<u16>>()).ok()
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8(rest.to_vec()).ok();
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return utf16(rest, u16::from_le_bytes);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return utf16(rest, u16::from_be_bytes);
+    }
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
 /// Replaces the file's contents.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     private(OpenOptions::new().write(true).truncate(true), path)?.write_all(bytes)
@@ -39,6 +64,23 @@ pub(crate) fn append_private(path: &Path) -> std::io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_files_are_read_whatever_mark_they_start_with() {
+        assert_eq!(decode_text(b"SELECT 1").as_deref(), Some("SELECT 1"));
+        assert_eq!(decode_text("SELECT 'é'".as_bytes()).as_deref(), Some("SELECT 'é'"));
+        // The mark is dropped, so the first statement starts with its first letter.
+        assert_eq!(decode_text(b"\xEF\xBB\xBFSELECT 1").as_deref(), Some("SELECT 1"));
+        let le: Vec<u8> = [0xFF, 0xFE].into_iter().chain("SELECT 'é'".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        assert_eq!(decode_text(&le).as_deref(), Some("SELECT 'é'"));
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain("SELECT 'é'".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(decode_text(&be).as_deref(), Some("SELECT 'é'"));
+        assert_eq!(decode_text(b"").as_deref(), Some(""));
+        // Not text: bytes that are no UTF-8, half a UTF-16 unit, half a surrogate pair.
+        assert_eq!(decode_text(&[0x53, 0xE9, 0x4C]), None);
+        assert_eq!(decode_text(&[0xFF, 0xFE, 0x53]), None);
+        assert_eq!(decode_text(&[0xFF, 0xFE, 0x00, 0xD8]), None);
+    }
 
     #[test]
     fn files_are_written_and_appended() {

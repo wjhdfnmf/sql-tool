@@ -33,10 +33,15 @@ jobs:
         include:
           - name: Windows
             os: windows-latest
+          # The oldest Ubuntu there is a runner for, not the newest: a program
+          # built against a C library runs on that version and later ones,
+          # so this is what decides which Linux systems the packages start on.
           - name: Linux
-            os: ubuntu-latest
+            os: ubuntu-22.04
+          # One app for both kinds of Mac, Apple silicon and Intel.
           - name: macOS
             os: macos-latest
+            tauri-args: --target universal-apple-darwin
     defaults:
       run:
         shell: bash
@@ -47,13 +52,17 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev rpm
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev rpm xvfb
 
       - name: Install the Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustc --version
+
+      - name: Add both Mac targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: actions/setup-node@v7
         with:
@@ -96,7 +105,23 @@ jobs:
 
       - name: Build the installers
         working-directory: app
-        run: npm run tauri build
+        run: npm run tauri build -- ${{ matrix.tauri-args }}
+
+      # The installers are built; what is not yet known is whether the app in
+      # them starts on this system. So it is built once more with its test
+      # server inside, started, and left to check itself: connect, run a
+      # query through the real interface, copy, export. No database is needed.
+      - name: Start the app and let it check itself
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            # For this Mac's own processor, beside what the universal build made for it.
+            host="$(rustc -vV | sed -n 's/^host: //p')"
+            cargo build --release --locked -p sqltool-app --features custom-protocol,devtools --target "$host"
+            bash tests/smoke.sh "target/$host/release/sqltool-app"
+          else
+            cargo build --release --locked -p sqltool-app --features custom-protocol,devtools
+            bash tests/smoke.sh
+          fi
 
       - name: Upload the installers
         uses: actions/upload-artifact@v7
@@ -107,6 +132,6 @@ jobs:
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
-            target/release/bundle/dmg/*.dmg
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 14

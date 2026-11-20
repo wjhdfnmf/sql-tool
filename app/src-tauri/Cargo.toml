@@ -30,3 +30,8 @@ sqltool-core = { path = "../../crates/core" }
 sqltool-secrets = { path = "../../crates/secrets" }
 sqltool-fakeserver = { path = "../../crates/fakeserver", optional = true }
 tauri-plugin-dialog = "2"
+# A second start brings the running app to the front instead of opening another.
+tauri-plugin-single-instance = "2"
+# The dialog plugin's own library, used directly for the one message that has
+# to be shown when the app cannot start and there is no window to show it in.
+rfd = { version = "0.17", default-features = false, features = ["gtk3"] }

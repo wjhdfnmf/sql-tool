@@ -2,6 +2,43 @@
 
 Status: Phases 0 to 2 done; Phase 3 partly done (see "Phase 3 status"); 0.1.0 released 2026-11-16, followed by a pass over everyday use and a code review (see "Everyday-use pass"). Project name is still to be chosen.
 
+## Release-quality pass over all three systems (after 0.3.0)
+
+A review of the whole app for completeness, error handling and release quality on Windows, Linux and macOS, then the fixes for what would stop it being used on one of them and for errors that were swallowed.
+
+### What stood in the way on Linux and macOS
+
+- **The Linux packages were built on the newest Ubuntu**, so they needed its C library and would not start on Ubuntu 22.04 or Debian 12. They are built on Ubuntu 22.04 now, the oldest there is a runner for.
+- **macOS had an Apple silicon build only.** There is one universal app now, for Apple silicon and Intel.
+- **macOS shortcuts.** Explain (Cmd+Option+X) could never fire: Option changes the letter a key gives, so the key is now told by its position. Cmd+W belonged to the system's "Close Window", which on a one-window app is quitting; the menu bar is now the app's own, without that item, so Cmd+W closes the query tab as Ctrl+W does elsewhere, and Quit asks before losing work. Shortcuts in tooltips, menus and Help are spelled Cmd and Option on a Mac.
+- **A Linux desktop with no keyring** made saving or deleting any connection report a keychain error, even with "save password" off, and refused to connect to one with a saved password. Now the connection is saved and a notice says what became of the password; connecting asks for the password and says why.
+- **The licences of what the app is built with were only in the repository.** They are collected when the interface is built (`tools/licences.mjs`: 29 npm packages, 530 crates, 278 distinct texts) and shown under Help.
+- **Nothing ever started the app on Linux or macOS.** `tests/smoke.sh` starts it against the server built into development builds and lets it check itself: settings, connect over TLS, a query through the real interface with the grid painted, copy, export, the licences, no blocked content and no unhandled error. CI runs it on all three systems after building the installers.
+
+### Errors that were swallowed
+
+- **An error nothing handled showed nothing.** It is now shown along the bottom of the window and noted in `crash.log` (the kind and the place in the code, not what a server said).
+- **Closing the window asked nothing.** It asks first while a statement is running, while changes in a result or a designer are not applied, or while a script has unsaved changes that would not be remembered. A second request while the question is up closes, so an interface that has stopped answering cannot hold the window open.
+- **An export of loaded rows that failed part-way left the partial file.** It is removed, as the full-query export already did.
+- **A script saved with a byte-order mark** kept the mark, and its first statement failed on the server. The mark is dropped; UTF-16 files with a mark are read too.
+- **A failure to start was silent.** The reason goes to `crash.log` and into a message box.
+- **Two copies of the app** could overwrite each other's settings. A second start now brings the first to the front.
+
+### How it was verified
+
+- `cargo test --workspace`: 169 core tests (one new, for reading script files) and 26 connection tests pass. `npm run check`: no errors.
+- `tests/smoke.sh` on Windows: 10 of 10 steps, the exported file counted, `crash.log` empty.
+- The desktop self-test against MariaDB 11.8 and MySQL 8.4 on Windows: 41 of 41 steps on each. Two are new: asking the window to close while `SELECT SLEEP(8)` runs brings up the question, and "Keep Open" keeps it open; and no error went unhandled during the whole run.
+- Starting the app twice on Windows: the second start exits at once and the first stays.
+- In the preview: Help with the licences and the About section, shortcut labels, the notice for an unhandled error.
+
+### Not verified
+
+- **Anything on Linux or macOS by hand.** The macOS menu bar, Cmd+W and Cmd+Option+X, the universal build, and the Linux packages on Ubuntu 22.04 are reasoned from the code and checked only as far as CI builds them and the smoke test runs. The macOS menu cannot even be compiled into a running app on Windows; it is type-checked there.
+- The keyring-less Linux case: the code paths were read, not run on such a system.
+- The message box for a failure to start, and the notice after a save without a keychain: not seen.
+- "Close Anyway", which exits the app, by the self-test: it would end the test.
+
 ## Graph builder (after 0.1.6)
 
 Asked for: a graphing tool in the manner of JMP's Graph Builder, reached from a button beside the menu button, that takes over the window from the query; columns placed on axes; bar charts, histograms and scatter plots; time, discrete and continuous X; filters, a legend and time range selection.

@@ -28,4 +28,4 @@ Apache ECharts carries this notice:
 
 Rust crates, listed with their versions in [Cargo.lock](Cargo.lock): most under MIT or Apache-2.0. The database driver is a patched copy of `mysql_async` (MIT or Apache-2.0) in [vendor/mysql_async](vendor/mysql_async); its changes are described in `PATCHES.md` there.
 
-The full text of each licence is in the software's own repository, linked above, and in the packages themselves under `app/node_modules` and Cargo's registry after a build.
+The app carries the full text of every one of these licences: **Help**, **About**, **Show the licences**. They are collected into one file each time the interface is built, by `tools/licences.mjs`, from the packages themselves (under `app/node_modules` and in Cargo's registry), so the list in the app is of exactly what that build contains.

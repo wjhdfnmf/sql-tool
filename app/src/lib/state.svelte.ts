@@ -27,6 +27,8 @@ export interface ResultTab {
   elapsedMs: number | null;
   /** The statement that produced this result, to run it again after edits. */
   sql: string;
+  /** Changes made in the grid and not yet applied or discarded. Kept here so that closing the window can ask first. */
+  pendingEdits?: number;
 }
 
 /** What a designer tab is editing. A null name means something new is being made. */
