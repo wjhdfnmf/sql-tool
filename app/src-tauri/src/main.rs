@@ -267,6 +267,21 @@ fn profile_save(
     Ok(profile_dto(saved))
 }
 
+#[derive(Deserialize)]
+struct Arranged {
+    id: String,
+    group: Option<String>,
+}
+
+/// Puts the saved connections in the order given, each in the group given,
+/// as they were arranged on the Connections page.
+#[tauri::command(async)]
+fn profiles_arrange(state: State<'_, AppState>, arrangement: Vec<Arranged>) -> Result<Vec<ProfileDto>, UiError> {
+    let pairs: Vec<(String, Option<String>)> = arrangement.into_iter().map(|a| (a.id, a.group)).collect();
+    state.profiles.arrange(&pairs)?;
+    Ok(state.profiles.load()?.into_iter().map(profile_dto).collect())
+}
+
 #[tauri::command(async)]
 fn profile_delete(state: State<'_, AppState>, id: String) -> Result<(), UiError> {
     state.profiles.delete(&id)?;
@@ -2030,6 +2045,7 @@ fn main() {
             profiles_list,
             profile_save,
             profile_delete,
+            profiles_arrange,
             connection_test,
             certificate_probe,
             connect,

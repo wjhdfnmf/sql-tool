@@ -25,6 +25,8 @@ export interface Profile {
   production: boolean;
   /** Where this connection's scripts are kept: Open and Save As start there. */
   scriptFolder: string | null;
+  /** The group it is shown under on the Connections page, if any. */
+  group?: string | null;
   /** Whether the keychain holds a password. Set by the backend. */
   hasPassword?: boolean;
 }
@@ -382,6 +384,8 @@ export interface Settings {
   reformatKeywords: string;
   /** Connections a query run in time slices uses at once. */
   sliceThreads: number;
+  /** Connections can be dragged into a different order and into named groups. */
+  organizeConnections: boolean;
 }
 
 export interface AppInfo {

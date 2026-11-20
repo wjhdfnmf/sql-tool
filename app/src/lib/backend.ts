@@ -45,6 +45,8 @@ export interface Backend {
   /** `password` null leaves a stored password as it is. */
   profileSave(profile: Profile, password: string | null): Promise<Profile>;
   profileDelete(id: string): Promise<void>;
+  /** Puts the saved connections in this order, each in this group (null for none). Resolves to the list as stored. */
+  profilesArrange(arrangement: { id: string; group: string | null }[]): Promise<Profile[]>;
   connectionTest(profile: Profile, password: string | null): Promise<ServerInfo>;
   /** Fetches the certificate a server presents. Sends no credentials. */
   certificateProbe(host: string, port: number): Promise<CertificateInfo>;
@@ -170,6 +172,7 @@ const tauriBackend: Backend = {
   profilesList: () => invoke('profiles_list'),
   profileSave: (profile, password) => invoke('profile_save', { profile, password }),
   profileDelete: (id) => invoke('profile_delete', { id }),
+  profilesArrange: (arrangement) => invoke('profiles_arrange', { arrangement }),
   connectionTest: (profile, password) => invoke('connection_test', { profile, password }),
   certificateProbe: (host, port) => invoke('certificate_probe', { host, port }),
   connect: (profileId, password) => invoke('connect', { profileId, password }),

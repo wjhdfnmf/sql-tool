@@ -49,6 +49,8 @@ pub struct Settings {
     pub reformat_keywords: String,
     /// Connections a query run in time slices uses at once. 1 runs the slices one after another.
     pub slice_threads: u32,
+    /// Let connections be dragged into a different order and into named groups on the Connections page.
+    pub organize_connections: bool,
 }
 
 pub const REFORMAT_STYLES: [&str; 4] = ["standard", "compact", "aligned", "oneline"];
@@ -73,6 +75,7 @@ impl Default for Settings {
             reformat_style: "standard".into(),
             reformat_keywords: "upper".into(),
             slice_threads: 1,
+            organize_connections: true,
         }
     }
 }
