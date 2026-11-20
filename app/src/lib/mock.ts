@@ -124,7 +124,7 @@ const schemas: Record<string, Record<string, [string, string, boolean, string][]
 const mockDefaults: Settings = {
   theme: 'system', zoom: 100, editorTabSize: 2, editorWordWrap: false, uppercaseKeywords: true, rememberTabs: true,
   defaultRowLimit: 10_000, queryTimeoutSecs: 0, connectTimeoutSecs: 15, keepAliveSecs: 0, keepHistory: true, resultMemoryMb: 512,
-  reformatStyle: 'standard', reformatKeywords: 'upper', sliceThreads: 1, organizeConnections: true,
+  reformatStyle: 'standard', reformatKeywords: 'upper', sliceThreads: 1, organizeConnections: true, autoHideOutput: false,
 };
 
 let nextId = 100;

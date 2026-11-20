@@ -57,7 +57,7 @@
   /** How many settings on a tab differ from their defaults, to show where things have been changed. */
   const KEYS: Record<string, (keyof Settings)[]> = {
     appearance: ['theme', 'zoom'],
-    editor: ['editorTabSize', 'editorWordWrap', 'uppercaseKeywords', 'reformatStyle', 'reformatKeywords'],
+    editor: ['editorTabSize', 'editorWordWrap', 'uppercaseKeywords', 'autoHideOutput', 'reformatStyle', 'reformatKeywords'],
     queries: ['defaultRowLimit', 'queryTimeoutSecs', 'resultMemoryMb'],
     connections: ['organizeConnections', 'connectTimeoutSecs', 'keepAliveSecs'],
     privacy: ['keepHistory', 'rememberTabs'],
@@ -210,6 +210,17 @@
               <span class="muted note">What the list of suggestions offers as you type.</span>
             </div>
             <input type="checkbox" bind:checked={draft.uppercaseKeywords} />
+          </label>
+          <label class="row">
+            <div class="about">
+              <span class="title">Hide the output while editing</span>
+              <span class="muted note">
+                A click in the editor puts the output away, so the editor has the whole height. Move the pointer to the bottom edge and it
+                comes back at the height it had; click in it and it stays until the editor is clicked again. Running a query always shows
+                it.
+              </span>
+            </div>
+            <input type="checkbox" bind:checked={draft.autoHideOutput} />
           </label>
           <h4>Reformat</h4>
           <div class="row">

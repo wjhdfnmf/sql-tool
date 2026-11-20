@@ -40,6 +40,35 @@
 
   let editors = $state<Record<string, Editor | undefined>>({});
   let editorHeight = $state(260);
+
+  // The output put away while the editor is in use (a setting). 'open' is the
+  // ordinary state; 'tucked' is hidden; 'peek' is shown because the pointer
+  // went to the bottom, and goes away again when the pointer leaves unless
+  // something in it was clicked.
+  let outputMode = $state<'open' | 'peek' | 'tucked'>('open');
+  let outputTimer: ReturnType<typeof setTimeout> | undefined;
+  const autoHide = $derived(settings.current.autoHideOutput);
+  const tucked = $derived(autoHide && outputMode === 'tucked');
+
+  function setOutput(mode: 'open' | 'peek' | 'tucked', after = 0) {
+    clearTimeout(outputTimer);
+    if (!autoHide) return;
+    if (after === 0) outputMode = mode;
+    else outputTimer = setTimeout(() => (outputMode = mode), after);
+  }
+
+  /** The pointer left the output: one that was only being looked at goes away again. */
+  function leaveOutput() {
+    if (outputMode === 'peek') setOutput('tucked', 350);
+  }
+
+  // A query that starts always brings its output into view.
+  $effect(() => {
+    if (tab.running) {
+      clearTimeout(outputTimer);
+      outputMode = 'open';
+    }
+  });
   let historyOpen = $state(false);
   let infoOpen = $state(false);
   let aside = $state<HTMLElement | undefined>();
@@ -831,7 +860,10 @@
           class="pane-toggle"
           aria-pressed={workspace.showOutput}
           title="Show or hide the output (messages and results)"
-          onclick={() => (workspace.showOutput = !workspace.showOutput)}>Output</button
+          onclick={() => {
+            if (tucked && workspace.showOutput) setOutput('open');
+            else workspace.showOutput = !workspace.showOutput;
+          }}>Output</button
         >
       </div>
 
@@ -846,8 +878,15 @@
             {/if}
           </div>
         {:else}
-          {@const split = workspace.showOutput && hasOutput(t)}
-          <div class="editor-area" class:fill={!split} style:height={split ? `${editorHeight}px` : undefined} hidden={t.id !== workspace.activeTabId}>
+          {@const split = workspace.showOutput && hasOutput(t) && !tucked}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="editor-area"
+            class:fill={!split}
+            style:height={split ? `${editorHeight}px` : undefined}
+            hidden={t.id !== workspace.activeTabId}
+            onpointerdown={() => setOutput('tucked')}
+          >
             <Editor
               bind:this={editors[t.id]}
               value={t.text}
@@ -869,18 +908,45 @@
         aria-label="Resize editor"
         aria-valuenow={editorHeight}
         tabindex="0"
-        hidden={!workspace.showOutput || !!tab.design || !hasOutput(tab)}
-        onpointerdown={startResize}
+        hidden={!workspace.showOutput || !!tab.design || !hasOutput(tab) || tucked}
+        onpointerdown={(e) => {
+          setOutput('open');
+          startResize(e);
+        }}
+        onpointerenter={() => clearTimeout(outputTimer)}
+        onpointerleave={leaveOutput}
         onkeydown={resizeByKey}
       ></div>
 
       {#each workspace.tabs as t (t.id)}
         {#if !t.design}
-          <div class="results-area" hidden={!workspace.showOutput || !hasOutput(t) || t.id !== workspace.activeTabId}>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="results-area"
+            hidden={!workspace.showOutput || !hasOutput(t) || t.id !== workspace.activeTabId || tucked}
+            onpointerdown={() => setOutput('open')}
+            onfocusin={() => setOutput('open')}
+            onpointerenter={() => clearTimeout(outputTimer)}
+            onpointerleave={leaveOutput}
+          >
             <Results {workspace} tab={t} />
           </div>
         {/if}
       {/each}
+
+      {#if tucked && workspace.showOutput && !tab.design && hasOutput(tab)}
+        <!-- The output is put away: the pointer resting here, or a click, brings it back. -->
+        <button
+          class="output-edge"
+          title="Output is hidden while editing. Rest the pointer here to look at it; click to keep it open."
+          aria-label="Show the output"
+          onpointerenter={() => setOutput('peek', 140)}
+          onpointerleave={() => clearTimeout(outputTimer)}
+          onclick={() => setOutput('open')}
+        >
+          <span aria-hidden="true"></span>
+        </button>
+      {/if}
     </div>
   </div>
 
@@ -1335,6 +1401,38 @@
   .results-area {
     flex: 1;
     min-height: 0;
+  }
+
+  /* Where the output went: a thin edge along the bottom with a grip in it. */
+  .output-edge {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 9px;
+    padding: 0;
+    border: none;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    background: var(--panel);
+    cursor: n-resize;
+  }
+
+  .output-edge span {
+    width: 44px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+
+  .output-edge:hover,
+  .output-edge:focus-visible {
+    background: var(--panel-2);
+  }
+
+  .output-edge:hover span,
+  .output-edge:focus-visible span {
+    background: var(--accent);
   }
 
   .status {

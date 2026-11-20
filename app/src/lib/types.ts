@@ -386,6 +386,8 @@ export interface Settings {
   sliceThreads: number;
   /** Connections can be dragged into a different order and into named groups. */
   organizeConnections: boolean;
+  /** The output is put away while the editor is in use, and comes back when the pointer goes to the bottom. */
+  autoHideOutput: boolean;
 }
 
 export interface AppInfo {
