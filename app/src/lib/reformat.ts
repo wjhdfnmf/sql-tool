@@ -63,6 +63,30 @@ function fold(formatted: string, whole: boolean): string {
     .join('\n\n');
 }
 
+/**
+ * Reformats a piece of a script that is selected, so that it goes back
+ * exactly where it was and nothing around it moves.
+ *
+ * The white space at each end of the selection is kept as it is: a selection
+ * that takes in the line break after a statement must not pull the next
+ * statement up onto its last line. `before` is what comes before the
+ * selection on its first line. Every line after the first is given that
+ * line's indent, so a piece that was indented stays indented as a block.
+ *
+ * Throws like `reformatSql` if the piece cannot be read as SQL, which a
+ * piece cut through the middle of a bracket cannot.
+ */
+export function reformatPiece(selected: string, before: string, mariadb: boolean, style: ReformatStyle, keywords: KeywordCase, indent: number): string {
+  const lead = /^\s*/.exec(selected)?.[0] ?? '';
+  const trail = /\s*$/.exec(selected.slice(lead.length))?.[0] ?? '';
+  const formatted = reformatSql(selected.slice(lead.length, selected.length - trail.length), mariadb, style, keywords, indent);
+  // The line the piece starts on, up to where it starts: its indent is the margin for the rest.
+  const startLine = (before + lead).split('\n').at(-1) ?? '';
+  const margin = /^[ \t]*/.exec(startLine)?.[0] ?? '';
+  const lines = formatted.split('\n').map((line, i) => (i === 0 || line === '' ? line : margin + line));
+  return lead + lines.join('\n') + trail;
+}
+
 /** Reformats SQL. Throws, with a message from the parser, if the text cannot be read as SQL. */
 export function reformatSql(source: string, mariadb: boolean, style: ReformatStyle, keywords: KeywordCase, indent: number): string {
   const formatted = format(source, {

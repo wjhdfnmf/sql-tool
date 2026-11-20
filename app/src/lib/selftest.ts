@@ -8,6 +8,7 @@
 
 import { evalFit, type AxisRef, type ChartRequest } from './chart';
 import { backend } from './backend';
+import { reformatPiece, reformatSql } from './reformat';
 import { app } from './state.svelte';
 import { decodeCells } from './rows';
 import { asUiError, serverLabel, type Profile, type RowEdit, type RunMode, type RunMsg, type SelfTestConfig, type WorkspaceInfo } from './types';
@@ -202,6 +203,34 @@ export async function runSelfTest(config: SelfTestConfig): Promise<void> {
     expect(set && set.columns.some((c) => c.name.toLowerCase() === 'select_type'), 'no execution plan came back');
     await backend.closeResults([set.resultId]);
     return set.columns.map((c) => c.name);
+  });
+
+  await step('reformatting a selection changes that piece and nothing around it', async () => {
+    const piece = (selected: string, before: string, style: 'standard' | 'compact' | 'oneline' = 'compact') => reformatPiece(selected, before, true, style, 'upper', 2);
+    // A whole line with its line break: the break stays, so the next statement is not pulled up.
+    expect(piece('select a,b from t where x=1;\n', '') === 'SELECT a, b\nFROM t\nWHERE x = 1;\n', `a line with its break became ${JSON.stringify(piece('select a,b from t where x=1;\n', ''))}`);
+    // Blank lines and indent around the piece are kept exactly.
+    expect(piece('\n\n  select 1  \n\n', '') === '\n\n  SELECT 1  \n\n', `white space around the piece changed: ${JSON.stringify(piece('\n\n  select 1  \n\n', ''))}`);
+    // An indented piece stays indented as a block, whether the indent is before the selection or inside it.
+    const indented = '    SELECT d\n    FROM v\n    WHERE z = 1';
+    expect('    ' + piece('select d from v where z=1', '    ') === indented, `after an indent: ${JSON.stringify(piece('select d from v where z=1', '    '))}`);
+    expect(piece('    select d from v where z=1', '') === indented, `with the indent selected: ${JSON.stringify(piece('    select d from v where z=1', ''))}`);
+    // Doing it again changes nothing.
+    expect(piece(indented, '') === indented, 'reformatting a reformatted piece changed it');
+    // One line stays one line wherever it is.
+    expect(piece('select a  from t', 'x = (', 'oneline') === 'SELECT a FROM t', 'a one-line piece grew');
+    // A piece cut through a bracket is refused, not mangled.
+    let refused = '';
+    try {
+      piece(' id from w);', '');
+    } catch (e) {
+      refused = e instanceof Error ? e.message : String(e);
+    }
+    expect(refused !== '', 'a piece with an unopened bracket was reformatted');
+    // The time-slice marks pass through untouched.
+    const marked = reformatSql('select * from t where at >= {start} and at < {end}', true, 'oneline', 'upper', 2);
+    expect(marked === 'SELECT * FROM t WHERE at >= {start} AND at < {end}', `the slice marks came out as ${marked}`);
+    return { refused: refused.split('\n')[0].slice(0, 60) };
   });
 
   await step('risky statements are flagged for confirmation', async () => {

@@ -6,7 +6,7 @@
   import { layout, saveLayout } from '../lib/layout.svelte';
   import { separator, type MenuItem } from '../lib/menu';
   import { placeIn } from '../lib/place';
-  import { reformatSql, type KeywordCase, type ReformatStyle } from '../lib/reformat';
+  import { reformatPiece, reformatSql, type KeywordCase, type ReformatStyle } from '../lib/reformat';
   import { settings } from '../lib/settings.svelte';
   import { app, type EditorTab, type WorkspaceState } from '../lib/state.svelte';
   import {
@@ -334,22 +334,31 @@
   function reformat() {
     const editor = editors[tab.id];
     if (!editor) return;
+    // What is selected is reformatted and nothing else is touched. With nothing selected, it is the whole text.
     const selection = editor.getSelection();
     const partial = selection.trim() !== '';
     const source = partial ? selection : editor.getText();
     if (source.trim() === '') return;
     if (/^\s*delimiter\s/im.test(source)) {
-      report('A script that uses DELIMITER cannot be reformatted as a whole. Select the part to reformat.');
+      report(
+        partial
+          ? 'The selection has a DELIMITER line in it, which cannot be reformatted. Select the statements without it.'
+          : 'A script that uses DELIMITER cannot be reformatted as a whole. Select the part to reformat.',
+      );
       return;
     }
     try {
       const { reformatStyle, reformatKeywords, editorTabSize } = settings.current;
-      const formatted = reformatSql(source, mariadb, reformatStyle as ReformatStyle, reformatKeywords as KeywordCase, editorTabSize);
-      if (partial) editor.insert(formatted);
-      else editor.replaceAll(formatted + '\n');
+      const [style, keywords] = [reformatStyle as ReformatStyle, reformatKeywords as KeywordCase];
+      if (partial) editor.replaceSelection(reformatPiece(selection, editor.getLineBeforeSelection(), mariadb, style, keywords, editorTabSize));
+      else editor.replaceAll(reformatSql(source, mariadb, style, keywords, editorTabSize) + '\n');
     } catch (e) {
       const reason = e instanceof Error ? e.message.split('\n')[0] : String(e);
-      report(`Could not reformat: ${reason}`);
+      report(
+        partial
+          ? `Could not reformat the selection: ${reason}. A selection has to be SQL that stands on its own: whole statements, or a piece with its brackets closed.`
+          : `Could not reformat: ${reason}`,
+      );
     }
   }
 
