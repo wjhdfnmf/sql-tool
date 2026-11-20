@@ -4380,7 +4380,7 @@ dependencies = [
 
 [[package]]
 name = "sqltool-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rfd",
  "secrecy",
@@ -4400,7 +4400,7 @@ dependencies = [
 
 [[package]]
 name = "sqltool-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "sqltool-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "memmap2",
  "mysql_async",
@@ -4433,7 +4433,7 @@ dependencies = [
 
 [[package]]
 name = "sqltool-fakeserver"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rcgen",
  "rustls",
@@ -4443,7 +4443,7 @@ dependencies = [
 
 [[package]]
 name = "sqltool-secrets"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "keyring",
  "secrecy",
