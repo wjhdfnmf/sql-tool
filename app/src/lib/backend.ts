@@ -149,6 +149,12 @@ export interface Backend {
   chartClose(resultId: number): Promise<void>;
   /** Asks where to save, then writes a PNG picture of a chart. Resolves to the path, or null if cancelled. */
   chartSaveImage(png: Uint8Array): Promise<string | null>;
+  /** Puts text on the system clipboard. */
+  clipboardText(text: string): Promise<void>;
+  /** Puts a picture, given as a PNG, on the system clipboard. */
+  clipboardImage(png: Uint8Array): Promise<void>;
+  /** The text on the clipboard. Self-test only: the interface has no other way to read it. */
+  selftestClipboard(): Promise<string>;
   /** Rejects with kind `not-editable` and the reason if the result cannot be edited. */
   editTarget(workspaceId: number, resultId: number): Promise<EditTarget>;
   previewEdits(resultId: number, edits: RowEdit[]): Promise<string[]>;
@@ -241,6 +247,9 @@ const tauriBackend: Backend = {
   chartClose: (resultId) => invoke('chart_close', { resultId }),
   // The picture goes as the raw body of the call, not as JSON.
   chartSaveImage: (png) => invoke('chart_save_image', png),
+  clipboardText: (text) => invoke('clipboard_text', { text }),
+  clipboardImage: (png) => invoke('clipboard_image', png),
+  selftestClipboard: () => invoke('selftest_clipboard'),
   editTarget: (workspaceId, resultId) => invoke('edit_target', { workspaceId, resultId }),
   previewEdits: (resultId, edits) => invoke('preview_edits', { resultId, edits }),
   applyEdits: (workspaceId, tabId, resultId, edits) => invoke('apply_edits', { workspaceId, tabId, resultId, edits }),

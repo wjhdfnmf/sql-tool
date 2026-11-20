@@ -520,7 +520,7 @@
     if (!target) return always;
     const copyName: MenuItem = {
       label: 'Copy Name',
-      action: () => void navigator.clipboard.writeText(target.name ?? target.schema),
+      action: () => void backend.clipboardText(target.name ?? target.schema).catch((e) => tab.report(asUiError(e).message)),
     };
     const insertName: MenuItem = {
       label: 'Insert Name into Editor',

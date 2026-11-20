@@ -1581,6 +1581,47 @@ async fn chart_save_image(app: tauri::AppHandle, request: tauri::ipc::Request<'_
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+// ---------- the clipboard ----------
+
+fn clipboard_error(e: impl std::fmt::Display) -> UiError {
+    ui_error("clipboard", format!("The clipboard could not be written to: {e}"))
+}
+
+/// Puts text on the system clipboard. The interface can put things there; it
+/// is given no way to read what is there.
+#[tauri::command]
+fn clipboard_text(app: tauri::AppHandle, text: String) -> Result<(), UiError> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(clipboard_error)
+}
+
+/// Puts a picture of a chart on the system clipboard. The request body is
+/// the PNG itself.
+#[tauri::command]
+fn clipboard_image(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), UiError> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    let tauri::ipc::InvokeBody::Raw(image) = request.body() else {
+        return Err(ui_error("other", "The picture did not arrive as image data."));
+    };
+    if !image.starts_with(PNG) || image.len() > MAX_IMAGE_BYTES {
+        return Err(ui_error("other", "That is not a PNG picture this app can copy."));
+    }
+    let picture = tauri::image::Image::from_bytes(image).map_err(clipboard_error)?;
+    app.clipboard().write_image(&picture).map_err(clipboard_error)
+}
+
+/// The text on the clipboard, so that the app's own tests can check that a
+/// copy arrived. Refused outside a test run.
+#[tauri::command]
+fn selftest_clipboard(app: tauri::AppHandle) -> Result<String, UiError> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    if !unattended() {
+        return Err(ui_error("unavailable", "Not in self-test mode."));
+    }
+    app.clipboard().read_text().map_err(|e| ui_error("clipboard", format!("The clipboard could not be read: {e}")))
+}
+
 // ---------- editing rows ----------
 
 /// Whether a result can be edited, and which table the edits would go to.
@@ -2143,6 +2184,7 @@ fn main() {
     }
     let outcome = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .on_menu_event(|app, event| {
             if event.id().as_ref() == QUIT_ITEM && may_close(app) {
                 app.exit(0);
@@ -2230,6 +2272,9 @@ fn main() {
             close_guard,
             close_answer,
             selftest_config,
+            clipboard_text,
+            clipboard_image,
+            selftest_clipboard,
             selftest_report,
             selftest_close_window
         ])

@@ -431,7 +431,7 @@
     const png = canvas?.png();
     if (!png) return;
     try {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': new Blob([png.buffer as ArrayBuffer], { type: 'image/png' }) })]);
+      await backend.clipboardImage(png);
       notice = 'Picture copied.';
     } catch {
       notice = 'A picture cannot be copied from here on this system. Use Save image.';

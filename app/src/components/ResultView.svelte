@@ -128,7 +128,7 @@
 
   async function writeClipboard(text: string): Promise<boolean> {
     try {
-      await navigator.clipboard.writeText(text);
+      await backend.clipboardText(text);
       return true;
     } catch {
       note = 'The clipboard could not be written to.';
@@ -631,7 +631,7 @@
       <pre class="value">{cell.pretty ?? cell.value.text}</pre>
     {/if}
     <div class="buttons">
-      <button onclick={() => void navigator.clipboard.writeText(cell.pretty ?? cell.value.text ?? 'NULL')}>Copy</button>
+      <button onclick={() => void writeClipboard(cell.pretty ?? cell.value.text ?? 'NULL')}>Copy</button>
       <span class="spacer"></span>
       <button onclick={() => (openCell = null)}>{cell.editable ? 'Cancel' : 'Close'}</button>
       {#if cell.editable}<button class="primary" onclick={stageCell}>Stage Change</button>{/if}
