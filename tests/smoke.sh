@@ -35,17 +35,23 @@ export SQLTOOL_SELFTEST_REPORT="$(native "$OUT/report.json")"
 
 # With no screen (a CI runner), Linux gets a virtual one, and the web view is
 # told not to look for a graphics card.
-RUN=()
+VIRTUAL_SCREEN=no
 if [ "$(uname -s)" = Linux ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   if ! command -v xvfb-run >/dev/null 2>&1; then
     echo "There is no screen and xvfb-run is not installed." >&2
     exit 2
   fi
-  RUN=(xvfb-run -a)
+  VIRTUAL_SCREEN=yes
   export WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
 fi
 
-"${RUN[@]}" "$APP" > "$OUT/app.log" 2>&1 &
+# Written out twice rather than kept as a list of words to put in front: the
+# bash that macOS ships (3.2) takes an empty list for a variable never set.
+if [ "$VIRTUAL_SCREEN" = yes ]; then
+  xvfb-run -a "$APP" > "$OUT/app.log" 2>&1 &
+else
+  "$APP" > "$OUT/app.log" 2>&1 &
+fi
 PID=$!
 LIMIT=120
 for _ in $(seq 1 "$LIMIT"); do
@@ -76,7 +82,8 @@ else
 fi
 
 # Count what the app actually wrote, rather than trust the number it reported.
-CSV_LINES=$(wc -l < "$OUT/export/result.csv" 2>/dev/null || echo 0)
+CSV_LINES=0
+[ -f "$OUT/export/result.csv" ] && CSV_LINES=$(wc -l < "$OUT/export/result.csv" | tr -d ' ')
 if [ "$CSV_LINES" -eq 2001 ]; then
   echo "  [ ok ] the exported file holds 2000 rows and its header"
 else
